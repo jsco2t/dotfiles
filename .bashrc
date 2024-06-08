@@ -35,7 +35,7 @@ LANG=en_US.UTF-8
 LANGUAGE=en_US.UTF-8
 LC_ALL=en_US.UTF-8
 export editor=vim
-export PATH="$PATH:/usr/local/bin:/usr/local/go/bin:/opt/nvim-linux64/bin"
+export PATH="$PATH:/usr/local/bin:/usr/local/go/bin"
 
 # ui
 export CLICOLOR=1

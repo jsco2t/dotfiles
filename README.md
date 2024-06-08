@@ -34,12 +34,15 @@ shopt -s expand_aliases
 echo ".dotfiles" >> .gitignore
 
 # clone and configure the repo:
-git clone --bare git@github.com:jsco2t/dotfiles.git $HOME/.dotfiles
+git clone --bare  https://github.com/jsco2t/dotfiles.git $HOME/.dotfiles
 
 dot config --local status.showUntrackedFiles no
 dot config --local user.name "user name"
 dot config --local user.email "user@email"
 
+alias dot='/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME'
+shopt -s expand_aliases
+dot reset --hard HEAD
 dot pull
 ``` 
 

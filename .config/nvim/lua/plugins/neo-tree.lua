@@ -12,6 +12,7 @@ return {
   cmd = 'Neotree',
   keys = {
     { '\\', ':Neotree reveal<CR>', { desc = 'NeoTree reveal' } },
+    { '<leader>e', ':Neotree reveal<CR>', { desc = 'NeoTree reveal' } },
   },
   opts = {
     window = {
@@ -21,6 +22,7 @@ return {
       window = {
         mappings = {
           ['\\'] = 'close_window',
+          ['<leader>e'] = 'close_window',
         },
       },
       filtered_items = {

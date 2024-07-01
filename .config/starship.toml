@@ -1,3 +1,6 @@
 [hostname]
 ssh_symbol = '⌨'
 format = '[$ssh_symbol]($style) in '
+
+[container]  
+disabled = true

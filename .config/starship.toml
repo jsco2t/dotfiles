@@ -1,0 +1,41 @@
+format = """
+$username\
+$hostname\
+$directory\
+$line_break\
+$status\
+$shell\
+$character
+"""
+
+[username]
+format = '[$user]($style) on '
+
+[hostname]
+ssh_symbol = '⌨'
+format = '[$ssh_symbol](fg:#68c156) in '
+
+[directory]
+truncation_length = 3
+truncate_to_repo = false
+format = "[$path]($style)[$read_only]($read_only_style)"
+[directory.substitutions]
+"Developer/sources/work" = "/󰳏/󱔠"
+"developer/sources/work" = "/󰳏/󱔠"
+"Developer/Sources/personal" = "/󰳏/"
+"Developer/sources/personal" = "/󰳏/"
+"developer/sources/personal" = "/󰳏/"
+"Developer/sources/learning" = "/󰳏/󰪶"
+"developer/sources/learning" = "/󰳏/󰪶"
+"developer/sources/external" = "/󰳏/󰪶"
+"Developer/sources/external" = "/󰳏/󰪶"
+"Developer/sources" = "󰳏"
+"developer/sources" = "󰳏"
+"Developer" = ""
+"developer" = ""
+#"~" = "󰋝"
+#"~" = "󰮧"
+#"~" = "⌂"
+
+[container]
+disabled = true

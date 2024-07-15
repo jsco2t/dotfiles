@@ -18,8 +18,9 @@ class GitRepoManager:
 # Get changes from git
 def getGitChanges(repo):
     repo.remote().pull()
-    #diffs = repo.index.diff(None)
-    diffs = repo.index.diff("HEAD")
+    diffs01 = repo.index.diff(None)
+    diffs02 = repo.index.diff("HEAD")
+    diffs = diffs01 + diffs02
     return diffs
 
 def printGitChanges(repo):

@@ -1,10 +1,24 @@
 #!/usr/bin/env python3
 
-from textual import log, events, on
+# A few notes about this utility:
+#
+#   1. I am not a python expert: any of the following should not be taken as example code.
+#   2. This is clearly over-kill.
+#   3. So why did I do it?
+#       a. It seemed fun
+#       b. I like TUI's
+#       c. I needed an excuse to play with python more
+#
+# This code may or may not work, or it may work in ways you didn't intend.
+#
+# All of that to say - you have been warned :)
+#
+
+from textual import log, on
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal
+from textual.containers import Container
 from textual.widgets import Header, Footer, Label, ListItem, ListView, Static, Input
-from textual.validation import Validator, Length, ValidationResult
+from textual.validation import Length
 from git import Repo
 
 class GitRepoManager:
@@ -18,9 +32,9 @@ class GitRepoManager:
 # Get changes from git
 def getGitChanges(repo):
     repo.remote().pull()
-    diffs01 = repo.index.diff(None)
-    diffs02 = repo.index.diff("HEAD")
-    diffs = diffs01 + diffs02
+    diffsFromWorkingCopy = repo.index.diff(None)
+    diffsFromTree = repo.index.diff("HEAD")
+    diffs = diffsFromWorkingCopy + diffsFromTree
     return diffs
 
 def printGitChanges(repo):

@@ -13,6 +13,15 @@
 #
 # All of that to say - you have been warned :)
 #
+# Install instructions:
+#
+#   - On an rpi the python packages in APT are not new enough. One solution is to force a global install using pip:
+#
+#       pip install textual --break-system-packages
+#       pip install gitpython --break-system-packages
+#
+#     This is likely a less than ideal solution due to the chance to break the system packages.
+#
 
 from textual import log, on
 from textual.app import App, ComposeResult

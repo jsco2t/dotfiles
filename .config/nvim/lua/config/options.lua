@@ -71,6 +71,8 @@ vim.opt.scrolloff = 10
 
 vim.opt.confirm = true -- Confirm to save changes before exiting modified buffer
 vim.opt.cursorline = true -- Enable highlighting of the current line
+--vim.opt.cursorline = false
+vim.opt.lazyredraw = true
 vim.opt.expandtab = true -- Use spaces instead of tabs
 vim.opt.formatoptions = 'jcroqlnt' -- tcqj -- https://neovim.io/doc/user/change.html#fo-table
 vim.opt.scrolloff = 4 -- Lines of context

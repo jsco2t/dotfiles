@@ -40,7 +40,8 @@ vim.opt.smartcase = true
 vim.opt.signcolumn = 'yes'
 
 -- Decrease update time
-vim.opt.updatetime = 250
+--vim.opt.updatetime = 250
+vim.opt.updatetime = 500
 
 -- Decrease mapped sequence wait time
 -- Displays which-key popup sooner
@@ -63,15 +64,12 @@ vim.opt.list = true -- show whitespace characters
 -- Preview substitutions live, as you type!
 vim.opt.inccommand = 'split'
 
--- Show which line your cursor is on
-vim.opt.cursorline = true
-
 -- Minimal number of screen lines to keep above and below the cursor.
 vim.opt.scrolloff = 10
 
 vim.opt.confirm = true -- Confirm to save changes before exiting modified buffer
 vim.opt.cursorline = true -- Enable highlighting of the current line
---vim.opt.cursorline = false
+vim.opt.cursorline = false
 vim.opt.lazyredraw = true
 vim.opt.expandtab = true -- Use spaces instead of tabs
 vim.opt.formatoptions = 'jcroqlnt' -- tcqj -- https://neovim.io/doc/user/change.html#fo-table
@@ -86,6 +84,8 @@ vim.opt.undofile = true
 vim.opt.undolevels = 10000
 vim.opt.virtualedit = 'block' -- Allow cursor to move where there is no text in visual block mode
 
--- Set highlight on search, but clear on pressing <Esc> in normal mode
-vim.opt.hlsearch = true
-vim.keymap.set('n', '<Esc>', '<cmd>nohlsearch<CR>')
+--
+-- testing
+--
+vim.opt.smoothscroll = true
+vim.opt.foldlevel = 99

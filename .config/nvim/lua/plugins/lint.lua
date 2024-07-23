@@ -7,7 +7,7 @@ return {
       lint.linters_by_ft = {
         markdown = { 'markdownlint' },
         python = { 'black' },
-        go = { 'golangci-lint' },
+        --go = { 'golangci-lint' },
         bash = { 'shellcheck' },
         rust = { 'rustfmt' },
       }

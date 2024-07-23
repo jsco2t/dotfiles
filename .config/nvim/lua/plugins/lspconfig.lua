@@ -221,11 +221,18 @@ return {
       vim.list_extend(ensure_installed, {
         'stylua', -- Used to format Lua code
         'shellcheck', -- used for bash script checking
+        'shellharden', -- another bash script checker
         'staticcheck', -- checks golang code
         'gofumpt', -- go formatting
         'goimports', -- organizes golang imports
+        'golines', -- fix long lines in go
+        'bash-language-server',
+        'golangci-lint',
         'pylint', -- formats/lints python
         'markdownlint', -- linter for markdown - requires node to be installed
+        'isort', -- python
+        'black', -- python
+        'rustfmt', -- for rust
       })
       require('mason-tool-installer').setup { ensure_installed = ensure_installed }
 

@@ -232,7 +232,7 @@ return {
         'markdownlint', -- linter for markdown - requires node to be installed
         'isort', -- python
         'black', -- python
-        'rustfmt', -- for rust
+        --'rustfmt', -- for rust
       })
       require('mason-tool-installer').setup { ensure_installed = ensure_installed }
 

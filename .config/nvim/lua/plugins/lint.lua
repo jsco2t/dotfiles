@@ -4,10 +4,11 @@ return {
     event = { 'BufReadPre', 'BufNewFile' },
     config = function()
       local lint = require 'lint'
+      -- see: https://github.com/mfussenegger/nvim-lint?tab=readme-ov-file#available-linters
       lint.linters_by_ft = {
         markdown = { 'markdownlint' },
         python = { 'black' },
-        --go = { 'golangci-lint' },
+        go = { 'golangcilint' },
         bash = { 'shellcheck' },
         rust = { 'rustfmt' },
       }

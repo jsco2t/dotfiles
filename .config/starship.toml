@@ -19,6 +19,7 @@ format = '[$ssh_symbol](fg:#68c156) in '
 truncation_length = 3
 truncate_to_repo = false
 format = "[$path]($style)[$read_only]($read_only_style)"
+
 [directory.substitutions]
 "Developer/sources/work" = "/󰳏/󱔠"
 "developer/sources/work" = "/󰳏/󱔠"
@@ -34,7 +35,7 @@ format = "[$path]($style)[$read_only]($read_only_style)"
 "Developer" = ""
 "developer" = ""
 #"~" = "󰋝"
-#"~" = "󰮧"
+#"~" = "/󰮧"
 #"~" = "⌂"
 
 [container]

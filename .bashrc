@@ -35,7 +35,7 @@ LANG=en_US.UTF-8
 LANGUAGE=en_US.UTF-8
 LC_ALL=en_US.UTF-8
 export editor=vim
-export PATH="$PATH:/usr/local/bin:/usr/local/go/bin"
+export PATH="$PATH:/usr/local/bin:/usr/local/go/bin:/usr/local/nvim-linux64/bin"
 
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm

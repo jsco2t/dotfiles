@@ -20,7 +20,7 @@ return {
       -- first key is the mode
       n = {
         ["\\"] = { ":Neotree reveal<CR>", desc = "NeoTree reveal" },
-        ["<Leader>\\"] = { ":Neotree toggle<CR>", desc = "NeoTree toggle" },
+        --["<Leader>\\"] = { ":Neotree reveal<CR>", desc = "NeoTree reveal" },
         ["-"] = { "<Cmd>split<CR>", desc = "Next buffer" },
       },
     },

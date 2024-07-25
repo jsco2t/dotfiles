@@ -6,11 +6,12 @@
 return {
   "AstroNvim/astrocommunity",
   { import = "astrocommunity.pack.lua" },
-  -- import/override with your plugins folder
-  --
+
+  -- statusline config
+  { import = "astrocommunity.recipes.heirline-mode-text-statusline" },
 
   -- tabline config
-  { import = "astrocommunity.recipes.heirline-mode-text-statusline" },
+  { import = "astrocommunity.bars-and-lines.bufferline-nvim" },
 
   -- themes
   { import = "astrocommunity.colorscheme.onedarkpro-nvim" },

@@ -12,6 +12,7 @@ return {
         spelllang = { "en" },
         signcolumn = "yes", -- sets vim.opt.signcolumn to yes
         wrap = false, -- sets vim.opt.wrap
+        --showtabline = 0,
       },
     },
     -- Mappings can be configured through AstroCore as well.

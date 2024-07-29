@@ -11,7 +11,8 @@ return {
   { import = "astrocommunity.recipes.heirline-mode-text-statusline" },
 
   -- tabline config
-  { import = "astrocommunity.bars-and-lines.bufferline-nvim" },
+  --{ import = "astrocommunity.bars-and-lines.bufferline-nvim" },
+  { import = "astrocommunity.recipes.disable-tabline" },
 
   -- themes
   { import = "astrocommunity.colorscheme.onedarkpro-nvim" },
@@ -26,4 +27,5 @@ return {
   { import = "astrocommunity.pack.go" },
   { import = "astrocommunity.pack.bash" },
   { import = "astrocommunity.pack.markdown" },
+  { import = "astrocommunity.recipes.telescope-lsp-mappings" },
 }

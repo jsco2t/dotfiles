@@ -20,6 +20,7 @@ return {
   { import = "astrocommunity.colorscheme.nordic-nvim" },
   { import = "astrocommunity.colorscheme.sonokai" },
   { import = "astrocommunity.colorscheme.tokyonight-nvim" },
+  { import = "astrocommunity.colorscheme.catppuccin" },
 
   -- dev tools
   { import = "astrocommunity.pack.rust" },

@@ -23,7 +23,7 @@ it only tracks files which are **explicitly** added to it. Meaning, by default, 
  
 ## Initial Setup
 
-The following are a set of bash script commands to run in your home directory (the root of your home directory). Note that there are two lines below (for `user.name` and `user.email` that need to be fixed prior to running the script. It's suggested the script file be named `.dotsetup.sh` as that will automatically be git-ignored.
+The following are a set of bash script commands to run in your home directory (the root of your home directory). Note that there are two lines below (for `user.name` and `user.email`) that need to be fixed prior to running the script. It's suggested the script file be named `.dotsetup.sh` as that will automatically be git-ignored.
 
 ```bash
 # alias a customized git command to "dot" to make it easier to work with the repo:

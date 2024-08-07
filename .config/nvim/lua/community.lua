@@ -8,10 +8,9 @@ return {
   { import = "astrocommunity.pack.lua" },
 
   -- statusline config
-  --{ import = "astrocommunity.recipes.heirline-mode-text-statusline" },
+  --{ import = "astrocommunity.recipes.heirline-mode-text-statusline" }, -- see statusline.lua - done manually
 
   -- tabline config
-  --{ import = "astrocommunity.bars-and-lines.bufferline-nvim" },
   { import = "astrocommunity.recipes.disable-tabline" },
 
   -- themes

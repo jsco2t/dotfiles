@@ -23,7 +23,38 @@ it only tracks files which are **explicitly** added to it. Meaning, by default, 
  
 ## Initial Setup
 
-The following are a set of bash script commands to run in your home directory (the root of your home directory).
+The following are a set of bash script commands to run in your home directory (the root of your home directory). Note that there are two lines below (for `user.name` and `user.email` that need to be fixed prior to running the script. It's suggested the script file be named `.dotsetup.sh` as that will automatically be git-ignored.
+
+```bash
+# alias a customized git command to "dot" to make it easier to work with the repo:
+alias dot='/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME'
+shopt -s expand_aliases
+
+# Have git ignore the `.dotfiles` folder as that's where the git repo config has been placed
+rm -fr .gitignore
+echo ".dotfiles" >> .gitignore
+echo ".dotsetup.sh" >> .gitignore
+
+# clone and configure the repo:
+rm -fr .dotfiles
+rm -fr .git
+git clone --bare https://github.com/jsco2t/dotfiles.git $HOME/.dotfiles
+
+# configure user for repo
+dot config --local status.showUntrackedFiles no
+dot config --local user.name "user name"
+dot config --local user.email "email@address"
+
+# post-clone cleanup
+alias dot='/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME'
+shopt -s expand_aliases
+dot fetch
+dot reset --hard origin/main
+dot branch --set-upstream-to=origin/main main
+dot pull origin main
+```
+
+If you are going to be performing development (ex: creating branches for development) you may want to clone the repository as a non-bare repo. The following should accomplish this. 
 
 ```bash
 # alias a customized git command to "dot" to make it easier to work with the repo:
@@ -66,3 +97,7 @@ dot pull
 ```
 
 And the `pull` command should work as expected.
+
+## Working with the `dotfiles` repo
+
+To help formalize working with this repository the `git` command is aliased to `dot` with the necessary configuration to work with the dotfiles repo. What this means in practice is that work you would typically do with `git` as it applies to this repo, you should use `dot` instead.

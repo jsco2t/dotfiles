@@ -100,4 +100,4 @@ And the `pull` command should work as expected.
 
 ## Working with the `dotfiles` repo
 
-To help formalize working with this repository the `git` command is aliased to `dot` with the necessary configuration to work with the dotfiles repo. What this means in practice is that when working with the dotfiles repo you need to use `dot` instead of `git`.
+To help formalize working with this repository the `git` command is aliased to `dot` with the necessary configuration to work with the dotfiles repo. What this means in practice is that when working with the dotfiles repo you need to use `dot` instead of `git` (`dot add`, `dot commit`, `dot push`, `dot pull`...etc).

@@ -24,7 +24,7 @@ return {
   config = function(_, opts)
     opts.sources = { "filesystem" }
     opts.source_selector = {
-      winbar = true,
+      --winbar = true,
       content_layout = "left",
     }
     require("neo-tree").setup(opts)

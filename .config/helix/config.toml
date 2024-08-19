@@ -1,0 +1,60 @@
+theme = "onedark"
+
+[editor]
+line-number = "absolute"
+mouse = true
+cursorline = true
+true-color = true
+color-modes = true
+text-width = 120
+rulers = [100]
+
+[editor.cursor-shape]
+insert = "bar"
+normal = "block"
+select = "underline"
+
+[editor.indent-guides]
+render = true
+character = "╎"
+
+[editor.file-picker]
+hidden = false # "Enables ignoring hidden files" - should be named "ignore_hidden_files" (or similar)
+ignore = false # hide items in ignore files
+git-ignore = false # hide items in git-ignore files
+
+[editor.statusline]
+left = ["mode", "spacer", "file-name", "file-modification-indicator"]
+center = ["version-control", "spacer", "diagnostics"]
+right = ["spinner", "file-encoding", "file-line-ending", "file-type", "position" ]
+separator = "│"
+mode.normal = "NORMAL"
+mode.insert = "INSERT"
+mode.select = "SELECT"
+
+[editor.lsp]
+enable = true
+display-messages = true
+auto-signature-help = true
+display-inlay-hints = true
+display-signature-help-docs = true
+snippets = true
+
+[editor.auto-save]
+focus-lost = true
+
+#[editor.whitespace]
+#render = "all"
+# or control each character
+[editor.whitespace.render]
+space = "all"
+tab = "all"
+nbsp = "none"
+nnbsp = "none"
+newline = "none"
+
+[editor.whitespace.characters]
+tab = "˗"
+
+[editor.gutters]
+layout = ["diff", "diagnostics", "line-numbers", "spacer"]

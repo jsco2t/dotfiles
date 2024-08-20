@@ -1,4 +1,4 @@
-theme = "onedark"
+theme = "01_custom"
 
 [editor]
 line-number = "absolute"
@@ -19,14 +19,20 @@ render = true
 character = "╎"
 
 [editor.file-picker]
-hidden = false # "Enables ignoring hidden files" - should be named "ignore_hidden_files" (or similar)
-ignore = false # hide items in ignore files
+hidden = false     # "Enables ignoring hidden files" - should be named "ignore_hidden_files" (or similar)
+ignore = false     # hide items in ignore files
 git-ignore = false # hide items in git-ignore files
 
 [editor.statusline]
 left = ["mode", "spacer", "file-name", "file-modification-indicator"]
 center = ["version-control", "spacer", "diagnostics"]
-right = ["spinner", "file-encoding", "file-line-ending", "file-type", "position" ]
+right = [
+  "spinner",
+  "file-encoding",
+  "file-line-ending",
+  "file-type",
+  "position",
+]
 separator = "│"
 mode.normal = "NORMAL"
 mode.insert = "INSERT"
@@ -58,3 +64,4 @@ tab = "˗"
 
 [editor.gutters]
 layout = ["diff", "diagnostics", "line-numbers", "spacer"]
+

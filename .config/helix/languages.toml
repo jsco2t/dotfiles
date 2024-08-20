@@ -63,7 +63,7 @@ command = "rust-analyzer"
 
 [language-server.ltex-ls.config]
 #ltex.disabledRules = { "en-US" = ["PROFANITY"], "en-GB" = ["PROFANITY"] }
-ltex.dictionary = { "en-US" = ["builtin"], "en-GB" = ["builtin"] }
+ltex.dictionary = { "en-US" = ["builtin", "golang"], "en-GB" = ["builtin", "golang"] }
 
 # languages
 # -----------------------------------------------------------------------------------
@@ -85,7 +85,7 @@ language-servers = ["gopls", "golangci-lint-lsp"]
 # TODO: gopls needs utf-8 offsets?
 indent = { tab-width = 4, unit = "\t" }
 formatter = { command = "gofumpt" }
-rulers = [ 120 ]
+rulers = [120]
 
 [language.debugger]
 name = "go"
@@ -444,3 +444,4 @@ indent = { tab-width = 2, unit = "  " }
 [[grammar]]
 name = "bash"
 source = { git = "https://github.com/tree-sitter/tree-sitter-bash", rev = "f8fb3274f72a30896075585b32b0c54cad65c086" }
+

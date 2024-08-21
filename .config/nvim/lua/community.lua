@@ -14,7 +14,7 @@ return {
   { import = "astrocommunity.recipes.disable-tabline" },
 
   -- themes
-  { import = "astrocommunity.colorscheme.nordic-nvim" },
+  -- { import = "astrocommunity.colorscheme.nordic-nvim" }, -- see /lua/plugins/theme.lua
   -- { import = "astrocommunity.colorscheme.sonokai" },
   -- { import = "astrocommunity.colorscheme.tokyonight-nvim" },
   -- { import = "astrocommunity.colorscheme.catppuccin" },
@@ -26,4 +26,7 @@ return {
   { import = "astrocommunity.pack.bash" },
   { import = "astrocommunity.pack.markdown" },
   { import = "astrocommunity.recipes.telescope-lsp-mappings" },
+
+  -- linting support
+  { import = "astrocommunity.lsp.nvim-lint" },
 }

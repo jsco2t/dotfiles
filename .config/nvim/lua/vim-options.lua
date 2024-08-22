@@ -18,3 +18,4 @@ vim.keymap.set("n", "<leader>nh", ":nohl<CR>", { desc = "Clear search highlights
 
 -- perf testing
 -- vim.o.cursorline = false
+vim.o.foldcolumn = "0"

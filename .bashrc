@@ -12,6 +12,14 @@ then
 fi
 export PATH
 
+# linux brew support
+
+if [ -d /home/linuxbrew/.linuxbrew/bin ]
+then
+    PATH="$PATH:/home/linuxbrew/.linuxbrew/bin"
+fi
+export PATH
+
 # Uncomment the following line if you don't like systemctl's auto-paging feature:
 # export SYSTEMD_PAGER=
 

@@ -1,15 +1,40 @@
+### COLORS ###
+# purple: #5f5fd7
+# bright-blue: #61afef
+# tmux-light-blue: #87afaf
+# wezterm-blue: #3785c4
+# light-blue: #87afaf
+# med-dark-grey 3a3a3a or 4b5263
+# tmux-yellow: #ffaf00
+# wezterm-yellow: #fd8b25
+# wezterm-cyan: #48afb5
+
+# [](bg:#3a3a3a fg:#000000)\
+# color references (tmux --> hex: http://www.calmar.ws/vim/256-xterm-24bit-rgb-color-chart.html)
+
+
 format = """
-$username\
-$hostname\
+$custom\
+$time\
+[](bg:#3a3a3a fg:#4e4e4e)\
 $directory\
+[](bg:#303030 fg:#3a3a3a)\
+$git_branch\
+$git_commit\
+$git_state\
+$git_status\
+[](bg:#303030 fg:#4e4e4e )\
+$kubernetes\
+[](bg:#303030 fg:#4e4e4e )\
+[ ](fg:#303030 bg:none)\
+$golang\
+$rust\
+$cmd_duration\
 $line_break\
 $status\
 $shell\
 $character
 """
-
-[username]
-format = '[$user]($style) on '
 
 [hostname]
 ssh_symbol = '⌨'
@@ -18,7 +43,8 @@ format = '[$ssh_symbol](fg:#68c156) in '
 [directory]
 truncation_length = 3
 truncate_to_repo = false
-format = "[$path]($style)[$read_only]($read_only_style)"
+style = "bg:#3a3a3a fg:#fd8b25"
+format = "[ $path ]($style)"
 
 [directory.substitutions]
 "Developer/sources/work" = "/󰳏/󱔠"
@@ -30,13 +56,70 @@ format = "[$path]($style)[$read_only]($read_only_style)"
 "developer/sources/learning" = "/󰳏/󰪶"
 "developer/sources/external" = "/󰳏/󰪶"
 "Developer/sources/external" = "/󰳏/󰪶"
-"Developer/sources" = "󰳏"
-"developer/sources" = "󰳏"
+"Developer/sources" = "//󰳏"
+"developer/sources" = "//󰳏"
 "Developer" = ""
 "developer" = ""
-#"~" = "󰋝"
-#"~" = "/󰮧"
-#"~" = "⌂"
+
+[package]
+disabled = true
+
+[time]
+disabled = false
+format = '[$time ](bg:#4e4e4e fg:#87afaf)'
 
 [container]
 disabled = true
+
+[cmd_duration]
+min_time = 2000
+format = '\(took [$duration]($style)\) '
+
+[kubernetes]
+disabled = false
+symbol = ' ⎈ '
+format = '[$symbol$context\($namespace\)]($style)'
+style = 'fg:#5f5fd7 bg:#303030'
+contexts = [{ context_pattern = "kind-ciq-dev", context_alias = "dev" }]
+
+[git_branch]
+symbol = ''
+format = '[ $symbol $branch ]($style)'
+style = 'fg:#48afb5 bg:#303030'
+
+[git_status]
+format = '[$all_status$ahead_behind]($style)'
+style = 'fg:#ffaf00 bg:#303030'
+
+[git_state]
+disabled = true
+
+[git_commit]
+format = '[ ]($style)'
+style = 'fg:#48afb5 bg:#303030'
+
+[golang]
+symbol = ' '
+style = 'fg:#48afb5'
+format = '[$symbol($version )]($style)'
+
+[rust]
+symbol = ' '
+style = 'fg:#fd8b25'
+format = '[$symbol($version )]($style)'
+
+[custom.ssh_icon]
+symbol = ' ⌨ '
+format = '[$symbol](bg:#4e4e4e fg:#87afaf)'
+when = 'if [[ "$SSH_TTY" != "" && "$SUDO_USER" == "" ]] then exit 0; fi; exit 1' # SSH_TTY is not accurately represented under sudo
+
+[custom.local_icon]
+symbol = ' ⛫ '
+format = '[$symbol](bg:#4e4e4e fg:#87afaf)'
+when = 'if [[ "$SSH_TTY" == "" && "$SUDO_USER" == "" ]] then exit 0; fi; exit 1' # SSH_TTY is not accurately represented under sudo
+
+[custom.root_icon]
+symbol = ' ☢ '
+style = ' bg:#4e4e4e fg:#fd8b25'
+format = "[$symbol]($style)"
+when = 'if [[ "$USER" == "root" || "$USER" == "admin" || "$USER" == "administrator" ]] then exit 0; fi; exit 1'

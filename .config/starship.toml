@@ -8,10 +8,7 @@
 # tmux-yellow: #ffaf00
 # wezterm-yellow: #fd8b25
 # wezterm-cyan: #48afb5
-
-# [](bg:#3a3a3a fg:#000000)\
 # color references (tmux --> hex: http://www.calmar.ws/vim/256-xterm-24bit-rgb-color-chart.html)
-
 
 format = """
 $custom\

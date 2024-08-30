@@ -1,62 +1,77 @@
-# .bashrc
+# -----------------------------------------------------------
+# bashrc
+# -----------------------------------------------------------
 
-# Source global definitions
+#
+# global environment
+#
 if [ -f /etc/bashrc ]; then
     . /etc/bashrc
 fi
 
-# User specific environment
-if ! [[ "$PATH" =~ "$HOME/.local/bin:$HOME/.bin:" ]]
-then
-    PATH="$HOME/.local/bin:$HOME/.bin:$PATH"
+#
+# local binpaths
+#
+if [ -d "$HOME/.local/bin" ]; then
+    PATH="$PATH:$HOME/.local/bin"
+    export PATH
 fi
-export PATH
 
+if [ -d "$HOME/.bin" ]; then
+    PATH="$PATH:$HOME/.bin"
+    export PATH
+fi
+
+if [ -d "$HOME/go/bin" ]; then
+    PATH="$PATH:$HOME/go/bin"
+    export PATH
+fi
+
+#
 # linux brew support
-
-if [ -d /home/linuxbrew/.linuxbrew/bin ]
-then
+#
+if [ -d /home/linuxbrew/.linuxbrew/bin ]; then
     PATH="$PATH:/home/linuxbrew/.linuxbrew/bin"
-fi
-export PATH
-
-# Uncomment the following line if you don't like systemctl's auto-paging feature:
-# export SYSTEMD_PAGER=
-
-# User specific aliases and functions
-if [ -d ~/.bashrc.d ]; then
-        for rc in ~/.bashrc.d/*; do
-                if [ -f "$rc" ]; then
-                        . "$rc"
-                fi
-        done
+    export PATH
 fi
 
-unset rc
+#
+# macos brew support
+#
+if [ -d "/opt/homebrew" ]; then
+    PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
+    PATH="$PATH:/opt/homebrew/bin"
+    PATH="$PATH:/opt/homebrew/sbin"
+    export PATH
+    export CPPFLAGS="-I/opt/homebrew/opt/openjdk/include"
+fi
 
 #
-# user customizations
+# env customizations
 #
-
-# env
 LANG=en_US.UTF-8
 LANGUAGE=en_US.UTF-8
 LC_ALL=en_US.UTF-8
 export editor=vim
-export PATH="$PATH:/usr/local/bin:/usr/local/go/bin:/usr/local/nvim-linux64/bin:$HOME/go/bin"
+export PATH="$PATH:/usr/local/bin:/usr/local/go/bin"
 
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
-[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+#
+# rust environment
+#
+if [ -f "$HOME/.cargo/env" ]; then
+    source "$HOME/.cargo/env"
+fi
 
-. "$HOME/.cargo/env"
-
-# ui
+#
+# ui customizations
+#
 export CLICOLOR=1
 export COLORTERM=truecolor
 eval "$(starship init bash)"
 
+#
 # aliases
+#
 export COLOR_MODE='--color=auto'
 alias python=python3
 alias pip=pip3
@@ -64,7 +79,16 @@ alias ll='ls -l ${COLOR_MODE}' # long
 alias ls='ls -laF ${COLOR_MODE}'
 alias k=kubectl
 
+#
+# node version manager
+#
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"                   # This loads nvm
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion" # This loads nvm bash_completion
+
+#
 # history
+#
 export HISTFILE=~/.bash_history
 export HISTFILESIZE=100000
 export HISTSIZE=1000
@@ -74,7 +98,26 @@ export HISTIGNORE="cd *:history"
 shopt -s histappend
 
 #
+# command completion support
+#
+[ -f "$HOME/.fzf.bash" ] && source "$HOME/.fzf.bash"
+
+#
 # dotfiles support
 #
 alias dot='/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME'
 
+#
+# bat customizations
+#   to see built in themes `bat --list-themes`
+#
+export BAT_THEME=Coldark-Dark
+
+#
+# local overrides
+#
+
+# local env customizations
+if [ -f "$HOME/.bashrc.local" ]; then
+    . "$HOME/.bashrc.local"
+fi

@@ -53,10 +53,10 @@ format = "[ $path ]($style)"
 "developer/sources/learning" = "/󰳏/󰪶"
 "developer/sources/external" = "/󰳏/󰪶"
 "Developer/sources/external" = "/󰳏/󰪶"
-"Developer/sources" = "//󰳏"
-"developer/sources" = "//󰳏"
-"Developer" = ""
-"developer" = ""
+"Developer/sources" = "/⌨/󰳏"
+"developer/sources" = "/⌨/󰳏"
+"Developer" = "⌨"
+"developer" = "⌨"
 
 [package]
 disabled = true

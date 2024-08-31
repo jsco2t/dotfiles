@@ -108,15 +108,15 @@ format = '[$symbol($version )]($style)'
 [custom.ssh_icon]
 symbol = ' ⌨ '
 format = '[$symbol](bg:#4e4e4e fg:#87afaf)'
-when = 'if [[ "$SSH_TTY" != "" && "$SUDO_USER" == "" ]] then exit 0; fi; exit 1' # SSH_TTY is not accurately represented under sudo
+when = 'if [[ "$SSH_TTY" != "" && "$SUDO_USER" == "" ]]; then exit 0; fi; exit 1' # SSH_TTY is not accurately represented under sudo
 
 [custom.local_icon]
 symbol = ' ⛫ '
 format = '[$symbol](bg:#4e4e4e fg:#87afaf)'
-when = 'if [[ "$SSH_TTY" == "" && "$SUDO_USER" == "" ]] then exit 0; fi; exit 1' # SSH_TTY is not accurately represented under sudo
+when = 'if [[ "$SSH_TTY" == "" && "$SUDO_USER" == "" ]]; then exit 0; fi; exit 1' # SSH_TTY is not accurately represented under sudo
 
 [custom.root_icon]
 symbol = ' ☢ '
 style = ' bg:#4e4e4e fg:#fd8b25'
 format = "[$symbol]($style)"
-when = 'if [[ "$USER" == "root" || "$USER" == "admin" || "$USER" == "administrator" ]] then exit 0; fi; exit 1'
+when = 'if [[ "$USER" == "root" || "$USER" == "admin" || "$USER" == "administrator" ]]; then exit 0; fi; exit 1'

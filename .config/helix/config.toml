@@ -24,8 +24,16 @@ ignore = false     # hide items in ignore files
 git-ignore = false # hide items in git-ignore files
 
 [editor.statusline]
-left = ["mode", "spacer", "file-name", "file-modification-indicator"]
-center = ["version-control", "spacer", "diagnostics"]
+left = [
+  "mode",
+  "spacer",
+  "file-name",
+  "file-modification-indicator",
+  "version-control",
+  "spacer",
+  "diagnostics"
+]
+center = ["spacer"]
 right = [
   "spinner",
   "file-encoding",

@@ -76,3 +76,12 @@ layout = ["diff", "diagnostics", "line-numbers", "spacer"]
 [editor.soft-wrap]
 enable = true
 wrap-at-text-width = true
+
+
+# key mapping
+# ------------------------------------------------------------------------
+[keys.insert]
+C-s = ["save_selection", ":w"]
+
+[keys.normal]
+C-s = ["save_selection", ":w"]

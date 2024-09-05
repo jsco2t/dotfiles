@@ -1,6 +1,5 @@
 # language servers
 # -----------------------------------------------------------------------------------
-
 [language-server]
 bash-language-server = { command = "bash-language-server", args = ["start"] }
 bufls = { command = "bufls", args = ["serve"] }
@@ -9,7 +8,7 @@ docker-langserver = { command = "docker-langserver", args = ["--stdio"] }
 docker-compose-langserver = { command = "docker-compose-langserver", args = [
   "--stdio",
 ] }
-markdown-oxide = { command = "markdown-oxide" }
+#marksman = { command = "marksman", args = ["server"] }
 pylsp = { command = "pylsp" }
 pyright = { command = "pyright-langserver", args = ["--stdio"], config = {} }
 basedpyright = { command = "basedpyright-langserver", args = [
@@ -58,12 +57,10 @@ command = "clippy"
 [language-server.rust-analyzer]
 command = "rust-analyzer"
 
-# spellcheck 'allowed words' hack
+# spellcheck and grammar
 # -----------------------------------------------------------------------------------
-
-[language-server.ltex-ls.config]
-#ltex.disabledRules = { "en-US" = ["PROFANITY"], "en-GB" = ["PROFANITY"] }
-ltex.dictionary = { "en-US" = ["builtin", "golang"], "en-GB" = ["builtin", "golang"] }
+[language-server.vale]
+command = "vale-ls"
 
 # languages
 # -----------------------------------------------------------------------------------
@@ -129,7 +126,8 @@ args = { mode = "core", program = "{0}", coreFilePath = "{1}" }
 
 [[grammar]]
 name = "go"
-source = { git = "https://github.com/tree-sitter/tree-sitter-go", rev = "64457ea6b73ef5422ed1687178d4545c3e91334a" }
+#source = { git = "https://github.com/tree-sitter/tree-sitter-go", rev = "64457ea6b73ef5422ed1687178d4545c3e91334a" }
+source = { git = "https://github.com/tree-sitter/tree-sitter-go" }
 
 [[language]]
 name = "gomod"
@@ -143,7 +141,8 @@ indent = { tab-width = 4, unit = "\t" }
 
 [[grammar]]
 name = "gomod"
-source = { git = "https://github.com/camdencheek/tree-sitter-go-mod", rev = "e8f51f8e4363a3d9a427e8f63f4c1bbc5ef5d8d0" }
+#source = { git = "https://github.com/camdencheek/tree-sitter-go-mod", rev = "e8f51f8e4363a3d9a427e8f63f4c1bbc5ef5d8d0" }
+source = { git = "https://github.com/camdencheek/tree-sitter-go-mod" }
 
 [[language]]
 name = "gotmpl"
@@ -158,7 +157,8 @@ rulers = [120]
 
 [[grammar]]
 name = "gotmpl"
-source = { git = "https://github.com/dannylongeuay/tree-sitter-go-template", rev = "395a33e08e69f4155156f0b90138a6c86764c979" }
+#source = { git = "https://github.com/dannylongeuay/tree-sitter-go-template", rev = "395a33e08e69f4155156f0b90138a6c86764c979" }
+source = { git = "https://github.com/dannylongeuay/tree-sitter-go-template" }
 
 [[language]]
 name = "gowork"
@@ -173,7 +173,8 @@ rulers = [120]
 
 [[grammar]]
 name = "gowork"
-source = { git = "https://github.com/omertuc/tree-sitter-go-work", rev = "6dd9dd79fb51e9f2abc829d5e97b15015b6a8ae2" }
+#source = { git = "https://github.com/omertuc/tree-sitter-go-work", rev = "6dd9dd79fb51e9f2abc829d5e97b15015b6a8ae2" }
+source = { git = "https://github.com/omertuc/tree-sitter-go-work" }
 
 [[language]]
 name = "templ"
@@ -186,7 +187,8 @@ language-servers = ["templ"]
 
 [[grammar]]
 name = "templ"
-source = { git = "https://github.com/vrischmann/tree-sitter-templ", rev = "db662414ccd6f7c78b1e834e7abe11c224b04759" }
+#source = { git = "https://github.com/vrischmann/tree-sitter-templ", rev = "db662414ccd6f7c78b1e834e7abe11c224b04759" }
+source = { git = "https://github.com/vrischmann/tree-sitter-templ" }
 
 #
 # markdown
@@ -194,9 +196,12 @@ source = { git = "https://github.com/vrischmann/tree-sitter-templ", rev = "db662
 
 [[language]]
 name = "markdown"
-language-servers = ["markdown-oxide", "ltex-ls"]
+language-servers = ["vale", "marksman"]
+file-types = ["md", "mdx"]
+formatter = { command = 'prettier', args = ["--parser", "markdown"] }
 text-width = 100
 rulers = [100]
+auto-format = true
 
 #
 # toml
@@ -267,7 +272,8 @@ indent = { tab-width = 2, unit = "  " }
 
 [[grammar]]
 name = "toml"
-source = { git = "https://github.com/ikatyang/tree-sitter-toml", rev = "7cff70bbcbbc62001b465603ca1ea88edd668704" }
+#source = { git = "https://github.com/ikatyang/tree-sitter-toml", rev = "7cff70bbcbbc62001b465603ca1ea88edd668704" }
+source = { git = "https://github.com/ikatyang/tree-sitter-toml" }
 
 #
 # yaml
@@ -281,10 +287,14 @@ comment-token = "#"
 indent = { tab-width = 2, unit = "  " }
 language-servers = ["yaml-language-server", "ansible-language-server"]
 injection-regex = "yml|yaml"
+formatter = { command = 'prettier', args = ["--parser", "yaml"] }
+auto-format = true
+
 
 [[grammar]]
 name = "yaml"
-source = { git = "https://github.com/ikatyang/tree-sitter-yaml", rev = "0e36bed171768908f331ff7dff9d956bae016efb" }
+#source = { git = "https://github.com/ikatyang/tree-sitter-yaml", rev = "0e36bed171768908f331ff7dff9d956bae016efb" }
+source = { git = "https://github.com/ikatyang/tree-sitter-yaml" }
 
 #
 # json
@@ -320,10 +330,12 @@ file-types = [
 language-servers = ["vscode-json-language-server"]
 auto-format = true
 indent = { tab-width = 2, unit = "  " }
+formatter = { command = 'prettier', args = ["--parser", "json"] }
 
 [[grammar]]
 name = "json"
-source = { git = "https://github.com/tree-sitter/tree-sitter-json", rev = "73076754005a460947cafe8e03a8cf5fa4fa2938" }
+#source = { git = "https://github.com/tree-sitter/tree-sitter-json", rev = "73076754005a460947cafe8e03a8cf5fa4fa2938" }
+source = { git = "https://github.com/tree-sitter/tree-sitter-json" }
 
 #
 # python
@@ -358,7 +370,8 @@ indent = { tab-width = 4, unit = "    " }
 
 [[grammar]]
 name = "python"
-source = { git = "https://github.com/tree-sitter/tree-sitter-python", rev = "4bfdd9033a2225cc95032ce77066b7aeca9e2efc" }
+#source = { git = "https://github.com/tree-sitter/tree-sitter-python", rev = "4bfdd9033a2225cc95032ce77066b7aeca9e2efc" }
+source = { git = "https://github.com/tree-sitter/tree-sitter-python" }
 
 #
 # starlark / bazel
@@ -443,5 +456,5 @@ indent = { tab-width = 2, unit = "  " }
 
 [[grammar]]
 name = "bash"
-source = { git = "https://github.com/tree-sitter/tree-sitter-bash", rev = "f8fb3274f72a30896075585b32b0c54cad65c086" }
-
+#source = { git = "https://github.com/tree-sitter/tree-sitter-bash", rev = "f8fb3274f72a30896075585b32b0c54cad65c086" }
+source = { git = "https://github.com/tree-sitter/tree-sitter-bash" }

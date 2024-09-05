@@ -7,7 +7,7 @@ cursorline = true
 true-color = true
 color-modes = true
 text-width = 120
-rulers = [100]
+rulers = [120]
 
 [editor.cursor-shape]
 insert = "bar"
@@ -73,3 +73,6 @@ tab = "˗"
 [editor.gutters]
 layout = ["diff", "diagnostics", "line-numbers", "spacer"]
 
+[editor.soft-wrap]
+enable = true
+wrap-at-text-width = true

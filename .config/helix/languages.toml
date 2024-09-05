@@ -8,7 +8,7 @@ docker-langserver = { command = "docker-langserver", args = ["--stdio"] }
 docker-compose-langserver = { command = "docker-compose-langserver", args = [
   "--stdio",
 ] }
-#marksman = { command = "marksman", args = ["server"] }
+marksman = { command = "marksman", args = ["server", "--verbose", "0"] }
 pylsp = { command = "pylsp" }
 pyright = { command = "pyright-langserver", args = ["--stdio"], config = {} }
 basedpyright = { command = "basedpyright-langserver", args = [
@@ -56,6 +56,11 @@ command = "clippy"
 
 [language-server.rust-analyzer]
 command = "rust-analyzer"
+
+[language-server.markdownlint]
+command = "markdownlint"
+args = [ "--stdin", "--json" ]
+#markdownlint = { command = "markdownlint", args = [ "-j", "-s" ] }
 
 # spellcheck and grammar
 # -----------------------------------------------------------------------------------
@@ -202,6 +207,10 @@ formatter = { command = 'prettier', args = ["--parser", "markdown"] }
 text-width = 100
 rulers = [100]
 auto-format = true
+indent = { tab-width = 2, unit = "  " }
+block-comment-tokens = { start = "<!--", end = "-->" }
+#scope = "text.markdown"
+#roots = []
 
 #
 # toml

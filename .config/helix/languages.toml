@@ -57,10 +57,8 @@ command = "clippy"
 [language-server.rust-analyzer]
 command = "rust-analyzer"
 
-[language-server.markdownlint]
-command = "markdownlint"
-args = [ "--stdin", "--json" ]
-#markdownlint = { command = "markdownlint", args = [ "-j", "-s" ] }
+[language-server.efm]
+command = "efm-langserver"
 
 # spellcheck and grammar
 # -----------------------------------------------------------------------------------
@@ -201,7 +199,7 @@ source = { git = "https://github.com/vrischmann/tree-sitter-templ" }
 
 [[language]]
 name = "markdown"
-language-servers = ["vale", "marksman"]
+language-servers = ["vale", "marksman", { name = "efm", only-features = [ "diagnostics" ] }]
 file-types = ["md", "mdx"]
 formatter = { command = 'prettier', args = ["--parser", "markdown"] }
 text-width = 100

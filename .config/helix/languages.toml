@@ -62,8 +62,12 @@ command = "efm-langserver"
 
 # spellcheck and grammar
 # -----------------------------------------------------------------------------------
-[language-server.vale]
-command = "vale-ls"
+#[language-server.vale]
+#command = "vale-ls"
+
+[language-server.harper-ls]
+command = "harper-ls"
+args = ["--stdio"]
 
 # languages
 # -----------------------------------------------------------------------------------
@@ -199,7 +203,7 @@ source = { git = "https://github.com/vrischmann/tree-sitter-templ" }
 
 [[language]]
 name = "markdown"
-language-servers = ["vale", "marksman", { name = "efm", only-features = [ "diagnostics" ] }]
+language-servers = ["harper-ls", "marksman", { name = "efm", only-features = [ "diagnostics" ] }]
 file-types = ["md", "mdx"]
 formatter = { command = 'prettier', args = ["--parser", "markdown"] }
 text-width = 100

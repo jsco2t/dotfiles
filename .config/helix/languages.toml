@@ -62,9 +62,6 @@ command = "efm-langserver"
 
 # spellcheck and grammar
 # -----------------------------------------------------------------------------------
-#[language-server.vale]
-#command = "vale-ls"
-
 [language-server.harper-ls]
 command = "harper-ls"
 args = ["--stdio"]

@@ -17,10 +17,6 @@ cargo install taplo-cli --locked --features lsp
 # rust
 rustup component add rust-analyzer
 
-# markdown
-cargo install --git https://github.com/Feel-ix-343/markdown-oxide.git markdown-oxide
-brew install ltex-ls
-
 # ansible
 npm i -g @ansible/ansible-language-server
 
@@ -45,6 +41,8 @@ npm i -g yaml-language-server@next
 # markdown linting support
 brew install markdownlint-cli
 brew install efm-langserver
+brew install prettier
+brew install marksman
 
 # adding harper (use instead of vale)
 cargo install harper-ls --locked

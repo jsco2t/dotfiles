@@ -42,16 +42,6 @@ brew install hashicorp/tap/terraform-ls
 # yaml
 npm i -g yaml-language-server@next
 
-# vale (spelling, grammar, style linting for written content)
-# brew install vale
-
-# The `vale-ls` tool will also need to be installed. The easy way to do this is:
-#  - Clone: https://github.com/errata-ai/vale-ls
-#  - Navigate into the `vale-ls` directory
-#  - Run:
-#    cargo install --path .
-#
-
 # markdown linting support
 brew install markdownlint-cli
 brew install efm-langserver

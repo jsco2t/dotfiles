@@ -12,7 +12,7 @@ Linux)
 
     if [ "$ID" == "rocky" ]; then
       echo "[INFO] OS detected as Rocky Linux, using DNF"
-      sudo dnf update && sudo dnf upgrade
+      sudo dnf update && sudo dnf upgrade -y
     else
       echo "[INFO] OS defaulting to debian based OS"
       sudo apt update && sudo apt full-upgrade -y && sudo apt autoremove -y

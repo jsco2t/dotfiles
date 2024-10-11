@@ -29,4 +29,7 @@ return {
 
   -- linting support
   { import = "astrocommunity.lsp.nvim-lint" },
+
+  -- issues and diagnostics
+  { import = "astrocommunity.diagnostics.trouble-nvim" },
 }

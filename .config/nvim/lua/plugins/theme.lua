@@ -16,7 +16,7 @@ return {
           palette.magenta.base = "#625eac"
           palette.magenta.bright = "#7b78b9"
           palette.magenta.dim = "#514d96"
-          palette.orange.bright = "#CB775D" --"#80B3B2" --"#fbd07b" --"#EBCB8B" -- used for `normal` statusline indicator
+          palette.orange.bright = "#CB775D" --made to match dark style as the bright version was too pale (IMHO)
           return palette
         end,
       }

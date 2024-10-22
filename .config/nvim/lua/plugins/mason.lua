@@ -16,6 +16,7 @@ return {
       opts.ensure_installed = require("astrocore").list_insert_unique(opts.ensure_installed, {
         "editorconfig-checker",
         "golangci_lint",
+        "goimports",
       })
     end,
   },
@@ -38,7 +39,14 @@ return {
         "golangci_lint",
         "markdownlint",
         "editorconfig-checker",
+        "gotestsum",
       })
     end,
   },
 }
+
+-- BUG: missing from clean install:
+--
+--  gofumpt
+--  gotestsum
+--  staticcheck

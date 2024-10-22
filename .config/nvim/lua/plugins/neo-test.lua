@@ -110,13 +110,19 @@ return {
         watching = "W",
       }
     end
-    -- local adapters = {
-    --   require "neotest-golang", -- Registration
-    -- }
   end,
   config = function(_, opts)
+    local nconfig = {
+      runner = "gotestsum",
+      -- default args include `-race` (race detection) which doesn't appear to be well
+      -- supported on arm64
+      go_test_args = {
+        "-v",
+        "-count=1",
+      },
+    }
     opts.adapters = {
-      require "neotest-golang",
+      require "neotest-golang"(nconfig),
     }
     vim.diagnostic.config({
       virtual_text = {
@@ -127,5 +133,6 @@ return {
       },
     }, vim.api.nvim_create_namespace "neotest")
     require("neotest").setup(opts)
+    require("neotest.logging"):set_level(vim.log.levels.DEBUG)
   end,
 }

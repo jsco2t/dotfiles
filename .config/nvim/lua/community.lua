@@ -5,7 +5,7 @@
 ---@type LazySpec
 return {
   "AstroNvim/astrocommunity",
-  { import = "astrocommunity.pack.lua" },
+  --{ import = "astrocommunity.pack.lua" }, -- see: lua/plugins/community-pack-lua.lua
 
   -- statusline config
   --{ import = "astrocommunity.recipes.heirline-mode-text-statusline" }, -- see statusline.lua - done manually

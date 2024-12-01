@@ -6,6 +6,128 @@ return {
     opts = {},
   },
 
+  -- mason lsp config helper
+  {
+    "williamboman/mason-lspconfig.nvim",
+    event = { "BufReadPre", "BufNewFile" },
+    config = function()
+      require("mason-lspconfig").setup {
+        ensure_installed = {
+          "lua_ls",
+          "rust_analyzer",
+          "gopls",
+          "golangci_lint_ls",
+        },
+      }
+    end
+  },
+
+  -- added functionality version of null-ls
+  {
+    "jay-babu/mason-null-ls.nvim",
+    event = { "BufReadPre", "BufNewFile" },
+    dependencies = {
+      "williamboman/mason.nvim",
+      "nvimtools/none-ls.nvim",
+    },
+    config = function()
+      require("mason-null-ls").setup({
+        ensure_installed = {
+          "stylua",
+          "jq",
+          "gomodifytags",
+          "iferr",
+          "impl",
+          "gotests",
+          "goimports",
+        },
+        methods = {
+          diagnostics = true,
+          formatting = true,
+          code_actions = true,
+          completion = true,
+          hover = true,
+        },
+      })
+    end,
+  },
+
+  -- tools installer with mason
+  {
+    "WhoIsSethDaniel/mason-tool-installer.nvim",
+    --lazy = true,
+    config = function()
+      require("mason-tool-installer").setup {
+        ensure_installed = {
+          "lua_ls",
+          "rust_analyzer",
+          "delve",
+          "gopls",
+          "gomodifytags",
+          "gotests",
+          "gotestsum",
+          "golangci-lint",
+          "golangci-lint-langserver",
+          "gofumpt",
+          "iferr",
+          "impl",
+          "goimports",
+          "bash-language-server",
+          "shellcheck",
+          "editorconfig-checker",
+          "shellcheck",
+          "shfmt",
+          "staticcheck",
+        },
+      }
+    end
+  },
+
+  -- debugger support
+  {
+    "leoluz/nvim-dap-go",
+    ft = "go",
+    dependencies = {
+      "mfussenegger/nvim-dap",
+      {
+        "jay-babu/mason-nvim-dap.nvim",
+        optional = true,
+        opts = function(_, opts)
+          opts.ensure_installed = { "delve" }
+        end,
+      },
+    },
+    opts = {},
+  },
+
+  -- go lsp support
+  {
+    "olexsmir/gopher.nvim",
+    ft = "go",
+    dependencies = {
+      "nvim-lua/plenary.nvim",
+      "nvim-treesitter/nvim-treesitter",
+      "mfussenegger/nvim-dap",
+      { "williamboman/mason.nvim", optional = true }, -- by default use Mason for go dependencies
+    },
+    build = function()
+      vim.cmd.GoInstallDeps()
+    end,
+    config = function()
+      require("gopher").setup {
+        commands = {
+          go = "go",
+          gomodifytags = "gomodifytags",
+          gotests = "gotests",
+          impl = "impl",
+          iferr = "iferr",
+          dlv = "dlv",
+        },
+      }
+    end,
+    opts = {},
+  },
+
   -- use current buffer as completion source
   {
     'hrsh7th/cmp-buffer',
@@ -86,11 +208,71 @@ return {
         end,
       })
 
+      local lspconfig = require('lspconfig')
+      lspconfig.rust_analyzer.setup {
+        -- Server-specific settings. See `:help lspconfig-setup`
+        settings = {
+          ['rust-analyzer'] = {},
+        },
+      }
+
+      lspconfig.gopls.setup({
+        capabilities = lsp_defaults.capabilities,
+        flags = { debounce_text_changes = 200 },
+        settings = {
+          gopls = {
+            usePlaceholders = true,
+            gofumpt = true,
+            analyses = {
+              ST1003 = true,
+              fieldalignment = false,
+              fillreturns = true,
+              nilness = true,
+              nonewvars = true,
+              shadow = true,
+              undeclaredname = true,
+              unreachable = true,
+              unusedparams = true,
+              unusedwrite = true,
+              useany = true,
+            },
+            codelenses = {
+              gc_details = true,
+              generate = true,
+              regenerate_cgo = true,
+              run_govulncheck = true,
+              test = true,
+              tidy = true,
+              upgrade_dependency = true,
+              vendor = true,
+            },
+            buildFlags = { "-tags", "integration" },
+            completeUnimported = true,
+            diagnosticsDelay = "500ms",
+            matcher = "Fuzzy",
+            semanticTokens = true,
+            staticcheck = true,
+            symbolMatcher = "fuzzy",
+            hints = {
+              assignVariableTypes = true,
+              compositeLiteralFields = true,
+              compositeLiteralTypes = true,
+              constantValues = true,
+              functionTypeParameters = true,
+              parameterNames = true,
+              rangeVariableTypes = true,
+            },
+          },
+        },
+      })
+
+      lspconfig.golangci_lint_ls.setup({ capabilities = lsp_defaults.capabilities })
+
       require('mason-lspconfig').setup({
 
         -- select any language servers which should be pre-installed
         ensure_installed = {
-          'lua_ls', 'rust_analyzer',
+          'lua_ls', 'rust_analyzer', 'gopls',
         },
 
         handlers = {
@@ -102,5 +284,73 @@ return {
         }
       })
     end
+  },
+
+  {
+    "AstroNvim/astrolsp",
+    optional = true,
+    ---@type AstroLSPOpts
+    opts = {
+      features = {
+        codelens = true,        -- enable/disable codelens refresh on start
+        inlay_hints = true,     -- enable/disable inlay hints on start
+        semantic_tokens = true, -- enable/disable semantic token highlighting
+        signature_help = true,
+      },
+      formatting = {
+        format_on_save = {
+          enabled = true,
+        },
+      },
+      ---@diagnostic disable-next-line: missing-fields
+      config = {
+        gopls = {
+          settings = {
+            gopls = {
+              analyses = {
+                ST1003 = true,
+                fieldalignment = false,
+                fillreturns = true,
+                nilness = true,
+                nonewvars = true,
+                shadow = true,
+                undeclaredname = true,
+                unreachable = true,
+                unusedparams = true,
+                unusedwrite = true,
+                useany = true,
+              },
+              codelenses = {
+                gc_details = true, -- Show a code lens toggling the display of gc's choices.
+                generate = true,   -- show the `go generate` lens.
+                regenerate_cgo = true,
+                test = true,
+                tidy = true,
+                upgrade_dependency = true,
+                vendor = true,
+              },
+              hints = {
+                assignVariableTypes = true,
+                compositeLiteralFields = true,
+                compositeLiteralTypes = true,
+                constantValues = true,
+                functionTypeParameters = true,
+                parameterNames = true,
+                rangeVariableTypes = true,
+              },
+              buildFlags = { "-tags", "integration" },
+              completeUnimported = true,
+              diagnosticsDelay = "500ms",
+              gofumpt = true,
+              matcher = "Fuzzy",
+              semanticTokens = true,
+              staticcheck = true,
+              symbolMatcher = "fuzzy",
+              usePlaceholders = true,
+            },
+          },
+        },
+      },
+    },
   },
 }

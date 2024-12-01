@@ -1,3 +1,4 @@
+-- more info: https://github.com/nvim-lualine/lualine.nvim
 return {
   {
     "nvim-lualine/lualine.nvim",
@@ -6,6 +7,7 @@ return {
       "nvim-tree/nvim-web-devicons",
     },
     config = function()
+      -- based on https://github.com/AlexvZyl/nordic.nvim
       local colors = {
         blue   = '#88c0d0',
         cyan   = '#80b3b2',
@@ -65,9 +67,6 @@ return {
           lualine_z = {}
         },
       })
-      --vim.api.nvim_set_hl(0, "lualine_a_normal", {
-      --  bg = "#FFFFFF",
-      --})
     end,
   },
 }

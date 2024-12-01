@@ -6,10 +6,39 @@ return {
       "nvim-tree/nvim-web-devicons",
     },
     config = function()
+      local colors = {
+        blue   = '#88c0d0',
+        cyan   = '#80b3b2',
+        green  = '#97b67c',
+        black  = '#191d24',
+        white  = '#e5e9f0',
+        red    = '#bf616a',
+        purple = '#7b78b9',
+        grey   = '#2e3440',
+      }
+      local custom_theme = {
+        normal = {
+          a = { fg = colors.black, bg = colors.green },
+          b = { fg = colors.white, bg = colors.grey },
+          c = { fg = colors.white },
+        },
+
+        insert = { a = { fg = colors.black, bg = colors.blue } },
+        visual = { a = { fg = colors.black, bg = colors.purple } },
+        replace = { a = { fg = colors.black, bg = colors.red } },
+
+        inactive = {
+          a = { fg = colors.white, bg = colors.black },
+          b = { fg = colors.white, bg = colors.grey },
+          c = { fg = colors.white },
+        },
+      }
       require("lualine").setup({
         options = {
           globalstatus = true,
-          theme = 'auto',
+          theme = custom_theme,
+          --theme = 'nordic',
+          -- theme = 'auto', --theme = 'nord',
         },
         sections = {
           lualine_a = { 'mode' },
@@ -24,7 +53,7 @@ return {
             },
             'filetype'
           },
-          lualine_y = { 'searchcount' },
+          lualine_y = { 'filesize', 'searchcount' },
           lualine_z = { 'location' }
         },
         inactive_sections = {
@@ -36,6 +65,9 @@ return {
           lualine_z = {}
         },
       })
+      --vim.api.nvim_set_hl(0, "lualine_a_normal", {
+      --  bg = "#FFFFFF",
+      --})
     end,
   },
 }

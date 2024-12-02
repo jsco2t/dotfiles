@@ -4,4 +4,5 @@ return {
   --{ "rebelot/heirline.nvim", enabled = false }, -- customized statusline.lua has resolved most the perf issues
   { "lukas-reineke/indent-blankline.nvim", enabled = false },
   { "kevinhwang91/nvim-ufo", enabled = false },
+  { "hadolint/hadolint", enabled = false },
 }

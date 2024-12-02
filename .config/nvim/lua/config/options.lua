@@ -26,3 +26,4 @@ vim.opt.clipboard = "unnamedplus" -- Sync with system clipboard
 vim.opt.cursorline = true -- Enable highlighting of the current line
 vim.opt.shiftwidth = 2 -- Size of an indent
 vim.opt.virtualedit = "block" -- Allow cursor to move where there is no text in visual block mode
+vim.opt.relativenumber = false

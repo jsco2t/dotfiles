@@ -29,7 +29,7 @@ return {
           completion = true,
           hover = true,
         },
-        automatic_installation = true,
+        automatic_installation = false,
       }
     end,
   },

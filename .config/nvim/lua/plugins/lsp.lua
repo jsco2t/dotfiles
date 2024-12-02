@@ -57,6 +57,7 @@ return {
           "shellcheck",
           "shfmt",
           "staticcheck",
+          "markdownlint",
         },
       }
     end,

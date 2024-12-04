@@ -1,10 +1,10 @@
 return {
   "nvim-neo-tree/neo-tree.nvim",
   dependencies = {
-			"nvim-lua/plenary.nvim",
-			"nvim-tree/nvim-web-devicons", -- not strictly required, but recommended
-			"MunifTanjim/nui.nvim",
-		},
+    "nvim-lua/plenary.nvim",
+    "nvim-tree/nvim-web-devicons", -- not strictly required, but recommended
+    "MunifTanjim/nui.nvim",
+  },
 
   keys = {
     { "\\", ":Neotree reveal<CR>", { desc = "NeoTree reveal" } },
@@ -27,6 +27,7 @@ return {
         },
       },
     },
+    close_if_last_window = true,
     window = {
       width = 30,
       mappings = {
@@ -44,9 +45,7 @@ return {
           desc = "Copy Path to Clipboard",
         },
         ["O"] = {
-          function(state)
-            require("lazy.util").open(state.tree:get_node().path, { system = true })
-          end,
+          function(state) require("lazy.util").open(state.tree:get_node().path, { system = true }) end,
           desc = "Open with System Application",
         },
         ["P"] = { "toggle_preview", config = { use_float = false } },

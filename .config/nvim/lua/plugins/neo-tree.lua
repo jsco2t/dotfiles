@@ -5,7 +5,6 @@ return {
     "nvim-tree/nvim-web-devicons", -- not strictly required, but recommended
     "MunifTanjim/nui.nvim",
   },
-
   keys = {
     { "\\", ":Neotree reveal<CR>", { desc = "NeoTree reveal" } },
     { "<leader>e", ":Neotree reveal<CR>", { desc = "NeoTree reveal" } },
@@ -27,6 +26,7 @@ return {
         },
       },
     },
+    close_if_last_window = false,
     window = {
       width = 30,
       mappings = {

@@ -62,4 +62,28 @@ return {
       }
     end,
   },
+  -- none ls config
+  {
+    "nvimtools/none-ls.nvim",
+    opts = function(_, opts)
+      local nls = require "null-ls"
+      opts.root_dir = opts.root_dir
+        or require("null-ls.utils").root_pattern(".null-ls-root", ".neoconf.json", "Makefile", ".git")
+      opts.sources = vim.list_extend(opts.sources or {}, {
+        -- see: https://github.com/nvimtools/none-ls.nvim/blob/main/doc/BUILTINS.md
+        nls.builtins.diagnostics.buf, -- protobuf
+        nls.builtins.formatting.buf,
+        nls.builtins.diagnostics.buildifier, -- bazel build files
+        nls.builtins.formatting.buildifier,
+        nls.builtins.formatting.stylua,
+        nls.builtins.formatting.shfmt,
+        nls.builtins.diagnostics.checkmake, -- makefile linter
+        nls.builtins.diagnostics.editorconfig_checker, -- conform with editor configs
+        -- should be pulled in via it's own ls server nls.builtins.diagnostics.golangci_lint, -- golangci-lint support
+        nls.builtins.diagnostics.protolint, -- protobuf linter
+        nls.builtins.formatting.protolint,
+        nls.builtins.formatting.golines, -- shorten long go lines
+      })
+    end,
+  },
 }

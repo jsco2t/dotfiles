@@ -2,14 +2,11 @@ return {
   {
     "folke/noice.nvim",
     opts = {
-      -- use to disable:
-      -- cmdline = {
-      --   view = "cmdline",
-      --   format = {
-      --     cmdline = false,
-      --   },
-      -- },
       -- use to use the noice cmdline, but do not use the pop-up ui for it.
+      presets = {
+        bottom_search = true,
+        command_palette = true,
+      },
       cmdline = {
         view = "cmdline", -- other option is cmdline_popup, see: https://github.com/folke/noice.nvim
       },
@@ -230,14 +227,18 @@ return {
       dashboard = {
         enabled = true,
       },
+      lazygit = { enabled = true },
+      notify = { enaled = true },
       notifier = {
         enabled = true,
         timeout = 5000,
       },
-      terminal = { enabled = true },
       quickfile = { enabled = true },
+      rename = { enabled = true },
       statuscolumn = { enabled = true },
+      terminal = { enabled = true },
       words = { enabled = true },
+      win = { enabled = true },
       styles = {
         notification = {
           wo = { wrap = true }, -- Wrap notifications

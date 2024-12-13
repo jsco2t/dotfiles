@@ -232,6 +232,9 @@ return {
         enabled = true,
         timeout = 5000,
       },
+      indent = {
+        enabled = false,
+      },
       quickfile = { enabled = true },
       rename = { enabled = true },
       statuscolumn = { enabled = true },

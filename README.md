@@ -48,9 +48,9 @@ dot config --local user.email "email@address"
 # post-clone cleanup
 alias dot='/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME'
 shopt -s expand_aliases
+
 dot fetch
-dot reset --hard origin/main
-dot branch --set-upstream-to=origin/main main
+dot reset --hard
 dot pull origin main
 ```
 

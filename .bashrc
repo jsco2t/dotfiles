@@ -6,44 +6,44 @@
 # global environment
 #
 if [ -f /etc/bashrc ]; then
-    . /etc/bashrc
+	. /etc/bashrc
 fi
 
 #
 # local binpaths
 #
 if [ -d "$HOME/.local/bin" ]; then
-    PATH="$PATH:$HOME/.local/bin"
-    export PATH
+	PATH="$PATH:$HOME/.local/bin"
+	export PATH
 fi
 
 if [ -d "$HOME/.bin" ]; then
-    PATH="$PATH:$HOME/.bin"
-    export PATH
+	PATH="$PATH:$HOME/.bin"
+	export PATH
 fi
 
 if [ -d "$HOME/go/bin" ]; then
-    PATH="$PATH:$HOME/go/bin"
-    export PATH
+	PATH="$PATH:$HOME/go/bin"
+	export PATH
 fi
 
 #
 # linux brew support
 #
 if [ -d /home/linuxbrew/.linuxbrew/bin ]; then
-    PATH="$PATH:/home/linuxbrew/.linuxbrew/bin"
-    export PATH
+	PATH="$PATH:/home/linuxbrew/.linuxbrew/bin"
+	export PATH
 fi
 
 #
 # macos brew support
 #
 if [ -d "/opt/homebrew" ]; then
-    PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
-    PATH="$PATH:/opt/homebrew/bin"
-    PATH="$PATH:/opt/homebrew/sbin"
-    export PATH
-    export CPPFLAGS="-I/opt/homebrew/opt/openjdk/include"
+	PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
+	PATH="$PATH:/opt/homebrew/bin"
+	PATH="$PATH:/opt/homebrew/sbin"
+	export PATH
+	export CPPFLAGS="-I/opt/homebrew/opt/openjdk/include"
 fi
 
 #
@@ -59,7 +59,7 @@ export PATH="$PATH:/usr/local/bin:/usr/local/go/bin"
 # rust environment
 #
 if [ -f "$HOME/.cargo/env" ]; then
-    source "$HOME/.cargo/env"
+	source "$HOME/.cargo/env"
 fi
 
 #
@@ -114,10 +114,17 @@ alias dot='/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME'
 export BAT_THEME=Coldark-Dark
 
 #
+# direnv support
+#
+if [ -x "$(command -v direnv)" ]; then
+	eval "$(direnv hook zsh)"
+fi
+
+#
 # local overrides
 #
 
 # local env customizations
 if [ -f "$HOME/.bashrc.local" ]; then
-    . "$HOME/.bashrc.local"
+	. "$HOME/.bashrc.local"
 fi

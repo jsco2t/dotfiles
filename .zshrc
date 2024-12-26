@@ -109,6 +109,13 @@ alias dot='/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME'
 export BAT_THEME=Coldark-Dark
 
 #
+# direnv support
+#
+if [ -x "$(command -v direnv)" ]; then
+  eval "$(direnv hook zsh)"
+fi
+
+#
 # local overrides
 #
 

@@ -117,7 +117,7 @@ export BAT_THEME=Coldark-Dark
 # direnv support
 #
 if [ -x "$(command -v direnv)" ]; then
-	eval "$(direnv hook zsh)"
+	eval "$(direnv hook bash)"
 fi
 
 #

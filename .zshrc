@@ -25,7 +25,7 @@ fi
 # linux brew support
 #
 if [ -d /home/linuxbrew/.linuxbrew/bin ]; then
-    PATH="$PATH:/home/linuxbrew/.linuxbrew/bin"
+    PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
     export PATH
 fi
 
@@ -34,8 +34,8 @@ fi
 #
 if [ -d "/opt/homebrew" ]; then
   PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
-  PATH="$PATH:/opt/homebrew/bin"
-  PATH="$PATH:/opt/homebrew/sbin"
+  PATH="/opt/homebrew/bin:$PATH"
+  PATH="/opt/homebrew/sbin:$PATH"
   export PATH
   export CPPFLAGS="-I/opt/homebrew/opt/openjdk/include"
 fi

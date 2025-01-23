@@ -40,8 +40,8 @@ fi
 #
 if [ -d "/opt/homebrew" ]; then
 	PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
-	PATH="$PATH:/opt/homebrew/bin"
-	PATH="$PATH:/opt/homebrew/sbin"
+	PATH="/opt/homebrew/bin:$PATH"
+	PATH="/opt/homebrew/sbin:$PATH"
 	export PATH
 	export CPPFLAGS="-I/opt/homebrew/opt/openjdk/include"
 fi
@@ -128,3 +128,4 @@ fi
 if [ -f "$HOME/.bashrc.local" ]; then
 	. "$HOME/.bashrc.local"
 fi
+. "$HOME/.cargo/env"

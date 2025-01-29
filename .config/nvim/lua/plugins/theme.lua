@@ -1,26 +1,26 @@
--- No idea if this is the "right" way to override palette colors. This is
--- what I got working after studying the source.
---
--- Original theme was installed with astrocommunity.colorscheme.nordic-nvim.
--- More info about the theme can be found here: https://github.com/AlexvZyl/nordic.nvim/tree/main
---
 return {
+  -- {
+  --   'navarasu/onedark.nvim',
+  --   priority = 1000, -- Ensure it loads first
+  --   init = function()
+  --     vim.cmd.colorscheme 'onedark'
+  --   end,
+  -- },
   {
-    "AlexvZyl/nordic.nvim",
-    lazy = false,
+    'navarasu/onedark.nvim',
     priority = 1000,
-    config = function()
-      require("nordic").setup {
-        -- theme matching colors can be found here: https://github.com/AlexvZyl/nordic.nvim/blob/main/lua/nordic/colors/nordic.lua
-        on_palette = function(palette)
-          palette.magenta.base = "#625eac"
-          palette.magenta.bright = "#7b78b9"
-          palette.magenta.dim = "#514d96"
-          palette.orange.bright = "#CB775D" --made to match dark style as the bright version was too pale (IMHO)
-          return palette
-        end,
+    init = function()
+      require('onedark').setup {
+        style = 'darker',
+        colors = {
+          -- https://github.com/navarasu/onedark.nvim/blob/master/lua/onedark/palette.lua
+          purple = '#726fb5',
+          --purple = '#625eac', -- previous theme
+          --purple = '#7b78b9', -- lighter
+          --purple = '#514d96', -- darker
+        },
       }
-      require("nordic").load()
+      vim.cmd.colorscheme 'onedark'
     end,
   },
 }

@@ -1,19 +1,44 @@
--- [[ custom keymaps ]]
+-- [[ Basic Keymaps ]]
+--  See `:help vim.keymap.set()`
+
+-- Set highlight on search, but clear on pressing <Esc> in normal mode
+vim.opt.hlsearch = true
+vim.keymap.set('n', '<Esc>', '<cmd>nohlsearch<CR>')
+
+-- Diagnostic keymaps
+vim.keymap.set('n', '[d', vim.diagnostic.goto_prev, { desc = 'Go to previous [D]iagnostic message' })
+vim.keymap.set('n', ']d', vim.diagnostic.goto_next, { desc = 'Go to next [D]iagnostic message' })
+vim.keymap.set('n', '<leader>e', vim.diagnostic.open_float, { desc = 'Show diagnostic [E]rror messages' })
+vim.keymap.set('n', '<leader>q', vim.diagnostic.setloclist, { desc = 'Open diagnostic [Q]uickfix list' })
+
+-- Exit terminal mode in the builtin terminal with a shortcut that is a bit easier
+-- for people to discover. Otherwise, you normally need to press <C-\><C-n>, which
+-- is not what someone will guess without a bit more experience.
+--
+-- NOTE: This won't work in all terminal emulators/tmux/etc. Try your own mapping
+-- or just use <C-\><C-n> to exit terminal mode
+vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
+
+-- TIP: Disable arrow keys in normal mode
+-- vim.keymap.set('n', '<left>', '<cmd>echo "Use h to move!!"<CR>')
+-- vim.keymap.set('n', '<right>', '<cmd>echo "Use l to move!!"<CR>')
+-- vim.keymap.set('n', '<up>', '<cmd>echo "Use k to move!!"<CR>')
+-- vim.keymap.set('n', '<down>', '<cmd>echo "Use j to move!!"<CR>')
+
+-- Keybinds to make split navigation easier.
+--  Use CTRL+<hjkl> to switch between windows
+--
+--  See `:help wincmd` for a list of all window commands
+vim.keymap.set('n', '<C-h>', '<C-w><C-h>', { desc = 'Move focus to the left window' })
+vim.keymap.set('n', '<C-l>', '<C-w><C-l>', { desc = 'Move focus to the right window' })
+vim.keymap.set('n', '<C-j>', '<C-w><C-j>', { desc = 'Move focus to the lower window' })
+vim.keymap.set('n', '<C-k>', '<C-w><C-k>', { desc = 'Move focus to the upper window' })
+
+-- [[ Custom keymaps ]]
 --
 
---- reflow text
-vim.keymap.set("n", "<leader>ww", "gwip", { desc = "reflow text" })
+-- reflow text
+vim.keymap.set('n', '<leader>ww', 'gwip', { desc = 'reflow text' })
 
 -- clear search highlights
-vim.keymap.set("n", "<leader>nh", ":nohl<CR>", { desc = "Clear search highlights" })
-
--- buffer navigation (can also use `[b` and `]b`)
-vim.keymap.set("n", "<S-Tab>", ":bprev<CR>", { desc = "previous buffer", noremap = true })
-vim.keymap.set("n", "<Tab>", ":bnext<CR>", { desc = "next buffer", noremap = true })
-vim.keymap.set("n", "<leader>b", ":FzfLua buffers<CR>", { desc = "Show buffers", noremap = true })
-vim.keymap.set("n", "<leader>bs", ":FzfLua buffers<CR>", { desc = "Show buffers", noremap = true })
-
--- telescope utilities
-vim.keymap.set("n", "<leader>k", ":FzfLua keymaps<CR>", { desc = "Show keymaps", noremap = true })
-vim.keymap.set("n", "<leader>s", ":FzfLua lsp_document_symbols<CR>", { desc = "Show doc symbols", noremap = true })
-vim.keymap.set("n", "<leader>D", ":FzfLua diagnostics_document<CR>", { desc = "Show diagnostics", noremap = true })
+vim.keymap.set('n', '<leader>dh', ':nohl<CR>', { desc = 'Clear search highlights' })

@@ -4,11 +4,10 @@ return {
     opts = {}, -- for default options, refer to the configuration section for custom setup.
     cmd = 'Trouble',
     keys = {
-      { '<leader>x', '', desc = '[x]trouble' },
       {
         '<leader>xX',
         '<cmd>Trouble diagnostics toggle focus=true<cr>',
-        desc = 'Diagnostics (Trouble)',
+        desc = 'Workspace Diagnostics (Trouble)',
       },
       {
         '<leader>xx',

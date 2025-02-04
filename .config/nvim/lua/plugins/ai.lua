@@ -18,7 +18,6 @@ return {
     lazy = false,
     -- See Commands section for default commands if you want to lazy load on them
     keys = {
-      { '<leader>a', '', desc = '[A]I' },
       { '<leader>ac', '<cmd>CopilotChat<cr>', desc = 'CopilotChat - Open chat' },
       { '<leader>ar', '<cmd>CopilotChatReview<cr>', desc = 'CopilotChat - Review code' },
       { '<leader>ae', '<cmd>CopilotChatExplain<cr>', desc = 'CopilotChat - Explain code' },

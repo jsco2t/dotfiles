@@ -9,12 +9,13 @@ return { -- Useful plugin to show you pending keybinds.
       { '<leader>a', group = '[A]I' },
       { '<leader>c', group = '[C]ode' },
       { '<leader>d', group = '[D]ocument' },
+      { '<leader>e', group = '[E]rrors and Diagnostics' },
+      { '<leader>f', group = '[F]iles' },
       { '<leader>r', group = '[R]ename' },
       { '<leader>s', group = '[S]earch' },
       { '<leader>w', group = '[W]orkspace' },
       { '<leader>t', group = '[T]oggle' },
       { '<leader>h', group = 'Git [H]unk', mode = { 'n', 'v' } },
-      { '<leader>x', group = '[x]trouble' },
     }
   end,
 }

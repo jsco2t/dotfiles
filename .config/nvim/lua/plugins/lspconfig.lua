@@ -164,12 +164,14 @@ return {
         gopls = {
           settings = {
             gopls = {
-              gofumpt = true,
+              env = {
+                GOPACKAGESDRIVER = './tools/gopackagesdriver.sh',
+              },
               codelenses = {
                 gc_details = false,
-                generate = true,
-                regenerate_cgo = true,
-                run_govulncheck = true,
+                generate = false,
+                regenerate_cgo = false,
+                run_govulncheck = false,
                 test = true,
                 tidy = true,
                 upgrade_dependency = true,
@@ -184,17 +186,29 @@ return {
                 parameterNames = true,
                 rangeVariableTypes = true,
               },
-              analyses = {
-                --fieldalignment = true,
-                nilness = true,
-                unusedparams = true,
-                unusedwrite = true,
-                useany = true,
-              },
+              -- defaults from gopls for analyzer's looks fine
+              -- analyses = {
+              --   --fieldalignment = true,
+              --   nilness = true,
+              --   unusedparams = true,
+              --   unusedwrite = true,
+              --   useany = true,
+              --   assign = true,
+              --   bools = true,
+              -- },
               usePlaceholders = true,
               completeUnimported = true,
-              staticcheck = true,
-              directoryFilters = { '-.git', '-.vscode', '-.idea', '-.vscode-test', '-node_modules' },
+              directoryFilters = {
+                '-.git',
+                '-.vscode',
+                '-.idea',
+                '-.vscode-test',
+                '-node_modules',
+                '-bazel-bin',
+                '-bazel-out',
+                '-bazel-testlogs',
+                '-baze-mypkg',
+              },
               semanticTokens = true,
             },
           },
@@ -238,7 +252,7 @@ return {
         'goimports', -- organizes golang imports
         'golines', -- fix long lines in go
         'bash-language-server',
-        'golangci-lint',
+        --'golangci-lint',
         'pylint', -- formats/lints python
         'markdownlint', -- linter for markdown - requires node to be installed
         'isort', -- python
@@ -251,7 +265,7 @@ return {
         ensure_installed = {
           'rust_analyzer',
           'gopls',
-          'golangci_lint_ls',
+          --'golangci_lint_ls',
         },
         automatic_installation = true,
         handlers = {
@@ -269,54 +283,6 @@ return {
   },
 
   {
-    'nvimtools/none-ls.nvim',
-    optional = true,
-    dependencies = {
-      {
-        'williamboman/mason.nvim',
-        opts = { ensure_installed = { 'gomodifytags', 'impl' } },
-      },
-    },
-    opts = function(_, opts)
-      local nls = require 'null-ls'
-      opts.sources = vim.list_extend(opts.sources or {}, {
-        -- more info: https://github.com/nvimtools/none-ls.nvim/blob/main/doc/BUILTINS.md
-        -- code actions
-        nls.builtins.code_actions.gomodifytags,
-        nls.builtins.code_actions.impl,
-        -- diagnostics
-        nls.builtins.diagnostics.ansiblelint,
-        nls.builtins.diagnostics.buf,
-        nls.builtins.diagnostics.buildifier,
-        nls.builtins.diagnostics.checkmake,
-        nls.builtins.diagnostics.golangci_lint,
-        nls.builtins.diagnostics.markdownlint,
-        nls.builtins.diagnostics.protolint,
-        nls.builtins.diagnostics.pylint,
-        nls.builtins.diagnostics.staticcheck,
-        nls.builtins.diagnostics.yamllint,
-        -- formatting
-        nls.builtins.formatting.black,
-        nls.builtins.formatting.buf,
-        nls.builtins.formatting.buildifier,
-        nls.builtins.formatting.cmake_format,
-        nls.builtins.formatting.gofmt,
-        nls.builtins.formatting.gofumpt,
-        nls.builtins.formatting.goimports,
-        nls.builtins.formatting.goimports_reviser,
-        nls.builtins.formatting.golines,
-        nls.builtins.formatting.markdownlint,
-        nls.builtins.formatting.opentofu_fmt,
-        nls.builtins.formatting.prettier,
-        nls.builtins.formatting.protolint,
-        nls.builtins.formatting.shellharden,
-        nls.builtins.formatting.shfmt,
-        nls.builtins.formatting.yamlfmt,
-      })
-    end,
-  },
-
-  {
     'jay-babu/mason-null-ls.nvim',
     event = { 'BufReadPre', 'BufNewFile' },
     dependencies = {
@@ -324,6 +290,9 @@ return {
       'nvimtools/none-ls.nvim',
     },
     config = function()
+      local null_ls = require 'null-ls'
+      null_ls.setup()
+
       require('mason-null-ls').setup {
         ensure_installed = {},
         methods = {
@@ -333,158 +302,91 @@ return {
           completion = true,
           hover = true,
         },
-        automatic_installation = true,
-        handlers = {},
+        automatic_installation = false,
+        handlers = {
+          function() end, -- disables automatic setup of all null-ls sources !! IMPORTANT !!
+          golangci_lint = function(source_name, methods)
+            null_ls.register(null_ls.builtins.diagnostics.golangci_lint.with {
+              condition = function(utils)
+                return utils.root_has_file { 'BUILD.bazel' } == false
+              end,
+            })
+          end,
+
+          staticcheck = function(source_name, methods)
+            null_ls.register(null_ls.builtins.diagnostics.staticcheck.with {
+              condition = function(utils)
+                return utils.root_has_file { 'BUILD.bazel' } == false
+              end,
+            })
+          end,
+
+          ansiblelint = function(source_name, methods)
+            null_ls.register(null_ls.builtins.diagnostics.ansiblelint)
+          end,
+          buf = function(source_name, methods)
+            null_ls.register(null_ls.builtins.diagnostics.buf)
+          end,
+          buildifier = function(source_name, methods)
+            null_ls.register(null_ls.builtins.diagnostics.buildifier)
+          end,
+          markdownlint = function(source_name, methods)
+            null_ls.register(null_ls.builtins.diagnostics.markdownlint)
+          end,
+          protolint = function(source_name, methods)
+            null_ls.register(null_ls.builtins.diagnostics.protolint)
+          end,
+          pylint = function(source_name, methods)
+            null_ls.register(null_ls.builtins.diagnostics.pylint)
+          end,
+          yamllint = function(source_name, methods)
+            null_ls.register(null_ls.builtins.diagnostics.yamllint)
+          end,
+
+          black = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.black)
+          end,
+          buf_fmt = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.buf)
+          end,
+          buildifier_fmt = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.buildifier)
+          end,
+          gofmt = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.gofmt)
+          end,
+          goimports = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.goimports)
+          end,
+          goimports_reviser = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.goimports_reviser)
+          end,
+          golines = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.golines)
+          end,
+          markdownlint_fmt = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.markdownlint)
+          end,
+          opentofu_fmt = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.opentofu_fmt)
+          end,
+          prettier = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.prettier)
+          end,
+          protolint_fmt = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.protolint)
+          end,
+          shellharden = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.shellharden)
+          end,
+          shfmt = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.shfmt)
+          end,
+          yamlfmt = function(source_name, methods)
+            null_ls.register(null_ls.builtins.formatting.yamlfmt)
+          end,
+        },
       }
     end,
   },
 }
-
--- return {
---   {
---     'nvim-treesitter/nvim-treesitter',
---     opts = { ensure_installed = { 'go', 'gomod', 'gowork', 'gosum' } },
---   },
---   {
---     'neovim/nvim-lspconfig',
---     opts = {
---       servers = {
---         gopls = {
---           settings = {
---             gopls = {
---               gofumpt = true,
---               codelenses = {
---                 gc_details = false,
---                 generate = true,
---                 regenerate_cgo = true,
---                 run_govulncheck = true,
---                 test = true,
---                 tidy = true,
---                 upgrade_dependency = true,
---                 vendor = true,
---               },
---               hints = {
---                 assignVariableTypes = true,
---                 compositeLiteralFields = true,
---                 compositeLiteralTypes = true,
---                 constantValues = true,
---                 functionTypeParameters = true,
---                 parameterNames = true,
---                 rangeVariableTypes = true,
---               },
---               analyses = {
---                 fieldalignment = true,
---                 nilness = true,
---                 unusedparams = true,
---                 unusedwrite = true,
---                 useany = true,
---               },
---               usePlaceholders = true,
---               completeUnimported = true,
---               staticcheck = true,
---               directoryFilters = { '-.git', '-.vscode', '-.idea', '-.vscode-test', '-node_modules' },
---               semanticTokens = true,
---             },
---           },
---         },
---       },
---       setup = {
---         gopls = function(_, opts)
---           -- workaround for gopls not supporting semanticTokensProvider
---           -- https://github.com/golang/go/issues/54531#issuecomment-1464982242
---
---           opts.lsp.on_attach(function(client, _)
---             if not client.server_capabilities.semanticTokensProvider then
---               local semantic = client.config.capabilities.textDocument.semanticTokens
---               client.server_capabilities.semanticTokensProvider = {
---                 full = true,
---                 legend = {
---                   tokenTypes = semantic.tokenTypes,
---                   tokenModifiers = semantic.tokenModifiers,
---                 },
---                 range = true,
---               }
---             end
---           end, 'gopls')
---           -- end workaround
---         end,
---       },
---     },
---   },
---   -- Ensure Go tools are installed
---   {
---     'williamboman/mason.nvim',
---     opts = { ensure_installed = { 'goimports', 'gofumpt' } },
---   },
---   {
---     'nvimtools/none-ls.nvim',
---     optional = true,
---     dependencies = {
---       {
---         'williamboman/mason.nvim',
---         opts = { ensure_installed = { 'gomodifytags', 'impl' } },
---       },
---     },
---     opts = function(_, opts)
---       local nls = require 'null-ls'
---       opts.sources = vim.list_extend(opts.sources or {}, {
---         nls.builtins.code_actions.gomodifytags,
---         nls.builtins.code_actions.impl,
---         nls.builtins.formatting.goimports,
---         nls.builtins.formatting.gofumpt,
---       })
---     end,
---   },
---   {
---     'stevearc/conform.nvim',
---     optional = true,
---     opts = {
---       formatters_by_ft = {
---         go = { 'goimports', 'gofumpt' },
---       },
---     },
---   },
---   {
---     'mfussenegger/nvim-dap',
---     optional = true,
---     dependencies = {
---       {
---         'williamboman/mason.nvim',
---         opts = { ensure_installed = { 'delve' } },
---       },
---       {
---         'leoluz/nvim-dap-go',
---         opts = {},
---       },
---     },
---   },
---   {
---     'nvim-neotest/neotest',
---     optional = true,
---     dependencies = {
---       'fredrikaverpil/neotest-golang',
---     },
---     opts = {
---       adapters = {
---         ['neotest-golang'] = {
---           -- Here we can set options for neotest-golang, e.g.
---           -- go_test_args = { "-v", "-race", "-count=1", "-timeout=60s" },
---           dap_go_enabled = true, -- requires leoluz/nvim-dap-go
---         },
---       },
---     },
---   },
---
---   -- Filetype icons
---   {
---     'echasnovski/mini.icons',
---     opts = {
---       file = {
---         ['.go-version'] = { glyph = '', hl = 'MiniIconsBlue' },
---       },
---       filetype = {
---         gotmpl = { glyph = '󰟓', hl = 'MiniIconsGrey' },
---       },
---     },
---   },
--- }

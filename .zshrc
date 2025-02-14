@@ -116,6 +116,11 @@ if [ -x "$(command -v direnv)" ]; then
 fi
 
 #
+# fuzzball cli support
+#
+export FUZZBALL_INSECURE=true
+
+#
 # local overrides
 #
 

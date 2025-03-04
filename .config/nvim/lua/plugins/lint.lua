@@ -7,7 +7,6 @@ return {
       -- see: https://github.com/mfussenegger/nvim-lint?tab=readme-ov-file#available-linters
       lint.linters_by_ft = {
         markdown = { 'markdownlint' },
-        python = { 'black' },
         go = { 'golangcilint' },
         bash = { 'shellcheck' },
         rust = { 'rustfmt' },

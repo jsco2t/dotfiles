@@ -94,6 +94,8 @@ vim.o.laststatus = 3
 --  See `:help hlsearch`
 vim.keymap.set('n', '<Esc>', '<cmd>nohlsearch<CR>')
 
+vim.o.exrc = true
+
 --
 -- testing
 --

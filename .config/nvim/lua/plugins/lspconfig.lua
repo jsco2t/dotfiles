@@ -142,7 +142,7 @@ return {
             end, '[T]oggle Inlay [H]ints')
           end
 
-          if client and client.name == 'gopls' then
+          if client and client.name == 'gopls' and not client.server_capabilities.semanticTokensProvider then
             local semantic = client.config.capabilities.textDocument.semanticTokens
             if semantic then
               client.server_capabilities.semanticTokensProvider = {
@@ -164,9 +164,6 @@ return {
         gopls = {
           settings = {
             gopls = {
-              env = {
-                GOPACKAGESDRIVER = './tools/gopackagesdriver.sh',
-              },
               codelenses = {
                 gc_details = false,
                 generate = false,
@@ -257,7 +254,7 @@ return {
         'markdownlint', -- linter for markdown - requires node to be installed
         'isort', -- python
         'black', -- python
-        'rustfmt', -- for rust
+        'rustfmt',
       })
       require('mason-tool-installer').setup { ensure_installed = ensure_installed }
 

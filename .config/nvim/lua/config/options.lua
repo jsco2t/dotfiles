@@ -3,6 +3,7 @@ vim.g.have_nerd_font = true
 
 -- Setup autoformatting
 vim.g.autoformat = true
+vim.g.editorconfig = true
 
 -- [[ Setting options ]]
 -- See `:help vim.opt`

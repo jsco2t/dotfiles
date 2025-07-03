@@ -17,6 +17,8 @@ return {
           'rust_analyzer',
           'gopls',
           'golangci_lint_ls',
+          'yamllint',
+          'yamlls',
         },
       }
     end,
@@ -137,7 +139,7 @@ return {
           -- This may be unwanted, since they displace some of your code
           vim.lsp.inlay_hint.enable(true, { bufnr = event.buf })
           if client and client.supports_method(vim.lsp.protocol.Methods.textDocument_inlayHint) then
-            map('<leader>th', function()
+            map('<leader>Th', function()
               vim.lsp.inlay_hint.enable(not vim.lsp.inlay_hint.is_enabled { bufnr = event.buf })
             end, '[T]oggle Inlay [H]ints')
           end
@@ -210,6 +212,8 @@ return {
             },
           },
         },
+        yamllint = {},
+        yamlls = {},
         pyright = {},
         rust_analyzer = {},
         lua_ls = {
@@ -255,6 +259,7 @@ return {
         'isort', -- python
         'black', -- python
         'rustfmt',
+        'yamllint',
       })
       require('mason-tool-installer').setup { ensure_installed = ensure_installed }
 
@@ -265,6 +270,7 @@ return {
           --'golangci_lint_ls',
         },
         automatic_installation = true,
+        automatic_enable = true,
         handlers = {
           function(server_name)
             local server = servers[server_name] or {}
@@ -272,7 +278,8 @@ return {
             -- by the server configuration above. Useful when disabling
             -- certain features of an LSP (for example, turning off formatting for tsserver)
             server.capabilities = vim.tbl_deep_extend('force', {}, capabilities, server.capabilities or {})
-            require('lspconfig')[server_name].setup(server)
+            require('lspconfig')[server_name].setup {}
+            --require('lspconfig')[server_name].setup(server)
           end,
         },
       }
@@ -379,9 +386,10 @@ return {
           shfmt = function(source_name, methods)
             null_ls.register(null_ls.builtins.formatting.shfmt)
           end,
-          yamlfmt = function(source_name, methods)
-            null_ls.register(null_ls.builtins.formatting.yamlfmt)
-          end,
+          -- yamlfmt handled by yamlls
+          -- yamlfmt = function(source_name, methods)
+          --   null_ls.register(null_ls.builtins.formatting.yamlfmt)
+          -- end,
         },
       }
     end,

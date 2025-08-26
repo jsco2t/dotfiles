@@ -36,3 +36,24 @@ vim.keymap.set('n', '<C-k>', '<C-w><C-k>', { desc = 'Move focus to the upper win
 -- vim.keymap.set("n", "<C-S-l>", "<C-w>L", { desc = "Move window to the right" })
 -- vim.keymap.set("n", "<C-S-j>", "<C-w>J", { desc = "Move window to the lower" })
 -- vim.keymap.set("n", "<C-S-k>", "<C-w>K", { desc = "Move window to the upper" })
+
+-- Go somewhere keymaps
+--vim.keymap.set('n', 'key-map', 'what to do', { desc = 'some description' })
+vim.keymap.set('n', 'gd', vim.lsp.buf.definition, { desc = 'Goto Definition' })
+vim.keymap.set('n', 'gr', vim.lsp.buf.references, { desc = 'Goto References' })
+vim.keymap.set('n', 'gi', vim.lsp.buf.implementation, { desc = 'Goto Implementation' })
+vim.keymap.set('n', 'gy', vim.lsp.buf.type_definition, { desc = 'Goto T[y]pe Definition' })
+vim.keymap.set('n', 'gD', vim.lsp.buf.declaration, { desc = 'Goto Declaration' })
+vim.keymap.set('n', '<leader>gd', vim.lsp.buf.definition, { desc = 'Goto Definition' })
+vim.keymap.set('n', '<leader>gr', vim.lsp.buf.references, { desc = 'Goto References' })
+vim.keymap.set('n', '<leader>gi', vim.lsp.buf.implementation, { desc = 'Goto Implementation' })
+vim.keymap.set('n', '<leader>gy', vim.lsp.buf.type_definition, { desc = 'Goto T[y]pe Definition' })
+vim.keymap.set('n', '<leader>gD', vim.lsp.buf.declaration, { desc = 'Goto Declaration' })
+
+-- Signature/Hover keymaps
+vim.keymap.set('n', 'K', function()
+  return vim.lsp.buf.hover()
+end, { desc = 'Hover/Info' })
+vim.keymap.set('n', 'gK', function()
+  return vim.lsp.buf.signature_help()
+end, { desc = 'Signature Help' })

@@ -40,6 +40,9 @@ require 'options'
 -- [[ Basic Keymaps ]]
 require 'keymaps'
 
+-- [[ Autocommands ]]
+require 'autocommands'
+
 -- [[ lazy bootstrapping ]]
 require 'lazy-bootstrap'
 

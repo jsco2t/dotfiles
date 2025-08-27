@@ -82,6 +82,15 @@ vim.o.laststatus = 3
 -- indent
 vim.opt.smartindent = true -- Insert indents automatically
 vim.opt.tabstop = 2 -- Number of spaces tabs count for
+vim.opt.expandtab = true -- Use spaces instead of tabs
+vim.opt.shiftwidth = 2 -- Size of an indent
 
 -- color config
 vim.opt.termguicolors = true -- True color support
+
+-- setup autoformatting support
+vim.g.autoformat = true
+vim.g.editorconfig = true
+
+-- virtual edit support
+vim.opt.virtualedit = 'block'

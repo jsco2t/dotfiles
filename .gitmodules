@@ -1,0 +1,3 @@
+[submodule "/home/ruser/.config/nvim/pack/nvim/start/nvim-lspconfig"]
+	path = /home/ruser/.config/nvim/pack/nvim/start/nvim-lspconfig
+	url = https://github.com/neovim/nvim-lspconfig.git

@@ -9,32 +9,16 @@ return {
     'nvim-tree/nvim-web-devicons', -- not strictly required, but recommended
     'MunifTanjim/nui.nvim',
   },
-  lazy = false, -- neo-tree will lazily load itself
-  cmd = 'Neotree',
+  lazy = false,
   keys = {
-    { '\\', ':Neotree reveal<CR>', { desc = 'NeoTree reveal' } },
+    { '\\', ':Neotree reveal<CR>', desc = 'NeoTree reveal', silent = true },
   },
   opts = {
-    window = {
-      width = 30,
-    },
     filesystem = {
       window = {
         mappings = {
           ['\\'] = 'close_window',
         },
-      },
-      filtered_items = {
-        hide_hidden = false,
-        hide_dotfiles = false,
-        hide_gitignored = false,
-        never_show = {
-          '.DS_Store',
-          'thumbs.db',
-        },
-      },
-      follow_current_file = {
-        enabled = true,
       },
     },
   },

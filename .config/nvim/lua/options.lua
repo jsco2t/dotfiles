@@ -94,3 +94,12 @@ vim.g.editorconfig = true
 
 -- virtual edit support
 vim.opt.virtualedit = 'block'
+
+-- allow local config files to be loaded when found in directories:
+vim.o.exrc = true
+
+--
+-- performance testing
+--
+vim.opt.smoothscroll = true
+vim.opt.lazyredraw = true

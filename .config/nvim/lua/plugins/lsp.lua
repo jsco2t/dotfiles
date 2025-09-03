@@ -27,7 +27,7 @@ return {
     },
     config = function()
       require('mason-lspconfig').setup {
-        automatic_enable = true,
+        automatic_enable = false,
       }
 
       vim.api.nvim_create_autocmd('LspAttach', {
@@ -187,6 +187,7 @@ return {
           'staticcheck',
           'impl',
           'golangci-lint-langserver',
+          'gomodifytags',
           -- shell
           'shellcheck',
           'shfmt',
@@ -203,8 +204,6 @@ return {
           'yaml-language-server',
           -- proto's
           'protols',
-          -- bazel
-          'bzl',
         },
         run_on_start = true, -- install on startup if missing
         auto_update = true, -- uncomment to disable periodic updates

@@ -10,6 +10,9 @@ return {
   },
   {
     'nvimtools/none-ls.nvim',
+    cond = function()
+      return vim.fn.filereadable './tools/gopackagesdriver.sh' == 0
+    end,
     optional = true,
     dependencies = {
       {

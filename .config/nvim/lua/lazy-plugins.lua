@@ -38,6 +38,9 @@ require('lazy').setup({
 
 -- pack plugins
 -- https://github.com/neovim/nvim-lspconfig/blob/master/doc/configs.md
+--
+-- tools here need to be installed via `plugins/lsp.lua`
+--
 vim.lsp.enable 'pyright'
 vim.lsp.enable 'ruff'
 vim.lsp.enable 'pylsp'

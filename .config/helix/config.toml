@@ -1,4 +1,4 @@
-theme = "01_custom"
+theme = "zed_onedark"
 
 [editor]
 line-number = "absolute"
@@ -7,7 +7,8 @@ cursorline = true
 true-color = true
 color-modes = true
 text-width = 120
-rulers = [120]
+rulers = [100]
+auto-format = true
 
 [editor.cursor-shape]
 insert = "bar"
@@ -23,53 +24,6 @@ hidden = false     # "Enables ignoring hidden files" - should be named "ignore_h
 ignore = false     # hide items in ignore files
 git-ignore = false # hide items in git-ignore files
 
-[editor.statusline]
-left = [
-  "mode",
-  "spacer",
-  "file-name",
-  "file-modification-indicator",
-  "version-control",
-  "spacer",
-  "diagnostics"
-]
-center = ["spacer"]
-right = [
-  "spinner",
-  "file-encoding",
-  "file-line-ending",
-  "file-type",
-  "position",
-]
-separator = "│"
-mode.normal = "NORMAL"
-mode.insert = "INSERT"
-mode.select = "SELECT"
-
-[editor.lsp]
-enable = true
-display-messages = true
-auto-signature-help = true
-display-inlay-hints = true
-display-signature-help-docs = true
-snippets = true
-
-[editor.auto-save]
-focus-lost = true
-
-#[editor.whitespace]
-#render = "all"
-# or control each character
-[editor.whitespace.render]
-space = "all"
-tab = "all"
-nbsp = "none"
-nnbsp = "none"
-newline = "none"
-
-[editor.whitespace.characters]
-tab = "˗"
-
 [editor.gutters]
 layout = ["diff", "diagnostics", "line-numbers", "spacer"]
 
@@ -77,11 +31,43 @@ layout = ["diff", "diagnostics", "line-numbers", "spacer"]
 enable = true
 wrap-at-text-width = true
 
+[editor.statusline]
+left = [
+  "mode",
+  "spinner",
+  "file-name",
+  "file-modification-indicator",
+  "version-control",
+]
+center = ["spacer"]
+right = [
+  "diagnostics",
+  "read-only-indicator",
+  "file-encoding",
+  "file-line-ending",
+  "file-type",
+  "position",
+  "total-line-numbers",
+]
 
-# key mapping
-# ------------------------------------------------------------------------
-[keys.insert]
-C-s = ["save_selection", ":w"]
+[editor.auto-save]
+focus-lost = true
 
-[keys.normal]
-C-s = ["save_selection", ":w"]
+[editor.lsp]
+display-messages = true
+display-inlay-hints = true # may have perf impact
+
+[editor.inline-diagnostics]
+cursor-line = "hint"
+
+[editor.whitespace.render]
+space = "all"
+tab = "none"
+nbsp = "all"
+nnbsp = "none"
+newline = "none"
+
+[editor.whitespace.characters]
+space = "·"
+nbsp = "◦"
+#tab = "◦"

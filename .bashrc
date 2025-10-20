@@ -134,3 +134,8 @@ if [ -f "$HOME/.bashrc.local" ]; then
 	. "$HOME/.bashrc.local"
 fi
 . "$HOME/.cargo/env"
+
+# Added by LM Studio CLI (lms)
+export PATH="$PATH:/Users/jscott/.lmstudio/bin"
+# End of LM Studio CLI section
+

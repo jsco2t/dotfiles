@@ -128,3 +128,8 @@ export FUZZBALL_INSECURE=true
 if [[ -f "$HOME/.zshrc.local" ]]; then
   source "$HOME/.zshrc.local"
 fi
+
+# Added by LM Studio CLI (lms)
+export PATH="$PATH:/Users/jscott/.lmstudio/bin"
+# End of LM Studio CLI section
+

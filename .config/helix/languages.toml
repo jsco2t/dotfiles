@@ -1,38 +1,24 @@
-# language servers
-# -----------------------------------------------------------------------------------
-[language-server]
-marksman = { command = "marksman", args = ["server", "--verbose", "0"] }
-
-[language-server.efm]
-command = "efm-langserver"
-
-# spellcheck and grammar
-# -----------------------------------------------------------------------------------
-[language-server.harper-ls]
-command = "harper-ls"
-args = ["--stdio"]
-
-# languages
-# -----------------------------------------------------------------------------------
-
 #
-# markdown
-#
+# golang
+# 
+[language-server.gopls.config]
+gofumpt = true
+# language-servers = ["gopls", "golangci-lint2-langserver"]
+
+# [language-server.golangci-lint2-langserver]
+# command = "golangci-lint-langserver"
+
+# [language-server.golangci-lint2-langserver.config]
+# command = [
+#   "golangci-lint",
+#   "run",
+#   "--output.json.path",
+#   "stdout",
+#   "--show-stats=false",
+#   "--issues-exit-code=1",
+# ]
+
 [[language]]
-name = "markdown"
-language-servers = [
-  "harper-ls",
-  "marksman",
-  { name = "efm", only-features = [
-    "diagnostics",
-  ] },
-]
-file-types = ["md", "mdx"]
-formatter = { command = 'prettier', args = ["--parser", "markdown"] }
-text-width = 100
-rulers = [100]
+name = "go"
 auto-format = true
-indent = { tab-width = 2, unit = "  " }
-block-comment-tokens = { start = "<!--", end = "-->" }
-#scope = "text.markdown"
-#roots = []
+formatter = ["gofumpt"] # gofmt would also work

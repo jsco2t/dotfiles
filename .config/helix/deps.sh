@@ -3,11 +3,10 @@
 # more info: https://github.com/helix-editor/helix/wiki/Language-Server-Configurations
 
 # go
-go install golang.org/x/tools/gopls@latest                             # LSP
-go install github.com/go-delve/delve/cmd/dlv@latest                    # Debugger
-go install golang.org/x/tools/cmd/goimports@latest                     # Formatter
-go install github.com/nametake/golangci-lint-langserver@latest         # Linter
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.60.1 # Linter (required by previous)
+go install golang.org/x/tools/gopls@latest          # LSP
+go install github.com/go-delve/delve/cmd/dlv@latest # Debugger
+go install golang.org/x/tools/cmd/goimports@latest  # Formatter
+brew install golangci-lint
 go install mvdan.cc/gofumpt@latest
 go install honnef.co/go/tools/cmd/staticcheck@latest
 

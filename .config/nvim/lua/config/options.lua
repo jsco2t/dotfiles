@@ -1,3 +1,8 @@
+-- Options are automatically loaded before lazy.nvim startup
+-- Default options that are always set: https://github.com/LazyVim/LazyVim/blob/main/lua/lazyvim/config/options.lua
+-- Add any additional options here
+--
+
 -- [[ Setting options ]]
 -- See `:help vim.o`
 -- NOTE: You can change these options as you wish!
@@ -7,10 +12,10 @@
 vim.o.number = true
 -- You can also add relative line numbers, to help with jumping.
 --  Experiment for yourself to see if you like it!
--- vim.o.relativenumber = true
+vim.o.relativenumber = false
 
 -- Enable mouse mode, can be useful for resizing splits for example!
-vim.o.mouse = 'a'
+vim.o.mouse = "a"
 
 -- Don't show the mode, since it's already in the status line
 vim.o.showmode = false
@@ -20,7 +25,7 @@ vim.o.showmode = false
 --  Remove this option if you want your OS clipboard to remain independent.
 --  See `:help 'clipboard'`
 vim.schedule(function()
-  vim.o.clipboard = 'unnamedplus'
+  vim.o.clipboard = "unnamedplus"
 end)
 
 -- Enable break indent
@@ -34,7 +39,7 @@ vim.o.ignorecase = true
 vim.o.smartcase = true
 
 -- Keep signcolumn on by default
-vim.o.signcolumn = 'yes'
+vim.o.signcolumn = "yes"
 
 -- Decrease update time
 vim.o.updatetime = 250
@@ -54,12 +59,12 @@ vim.o.splitbelow = true
 --  It is very similar to `vim.o` but offers an interface for conveniently interacting with tables.
 --   See `:help lua-options`
 --   and `:help lua-options-guide`
-vim.opt.showbreak = '➥'
-vim.opt.listchars = { tab = '˗˗', trail = '·', space = '◦' } -- whitespace replacement characters
+vim.opt.showbreak = "➥"
+vim.opt.listchars = { tab = "˗˗", trail = "·", space = "◦" } -- whitespace replacement characters
 vim.opt.list = true -- show whitespace characters
 
 -- Preview substitutions live, as you type!
-vim.o.inccommand = 'split'
+vim.o.inccommand = "split"
 
 -- Show which line your cursor is on
 vim.o.cursorline = true
@@ -74,7 +79,7 @@ vim.o.confirm = true
 
 -- spelling
 vim.opt.spell = true
-vim.opt.spelllang = { 'en' }
+vim.opt.spelllang = { "en" }
 
 -- support global statusline
 vim.o.laststatus = 3
@@ -93,7 +98,7 @@ vim.g.autoformat = true
 vim.g.editorconfig = true
 
 -- virtual edit support
-vim.opt.virtualedit = 'block'
+vim.opt.virtualedit = "block"
 
 -- allow local config files to be loaded when found in directories:
 vim.o.exrc = true

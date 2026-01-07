@@ -22,3 +22,21 @@ gofumpt = true
 name = "go"
 auto-format = true
 formatter = ["gofumpt"] # gofmt would also work
+
+#
+# markdown
+# 
+[language-server.harper-ls]
+command = "harper-ls"
+args = ["--stdio"]
+
+# does not seem to add value over `formatter implementation below`
+#[language-server.dprint-ls]
+#command = "dprint"
+#args = ["lsp"]
+
+[[language]]
+name = "markdown"
+language-servers = ["marksman", "harper-ls"]
+formatter = { command = "dprint", args = ["fmt", "--stdin", "md"] }
+auto-format = true

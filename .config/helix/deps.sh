@@ -45,3 +45,7 @@ brew install marksman
 
 # adding harper (use instead of vale)
 cargo install harper-ls --locked
+#brew install harper
+
+# markdown/code formatting
+brew install dprint

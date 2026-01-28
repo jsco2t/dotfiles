@@ -1,13 +1,19 @@
 #
 # golang
 #
-[language-server.gopls.config]
-gofumpt = true
+
+# Language server: gopls
+# Install: go install golang.org/x/tools/gopls@latest
+[language-server.gopls]
+command = "gopls"
 
 [[language]]
 name = "go"
 auto-format = true
-formatter = { command = "gofumpt" }
+language-servers = ["gopls"]
+# Formatter: goimports (formats + manages imports)
+# Install: go install golang.org/x/tools/cmd/goimports@latest
+formatter = { command = "goimports" }
 
 [language.indent]
 tab-width = 4
@@ -16,12 +22,22 @@ unit = "\t"
 #
 # markdown
 #
+
+# tools:
+#  cargo install dprint
+#  cargo install --locked harper-ls
+#  cargo install --locked --git https://github.com/Feel-ix-343/markdown-oxide.git markdown-oxide
+
 [language-server.harper-ls]
 command = "harper-ls"
 args = ["--stdio"]
 
+[language-server.markdown-oxide]
+command = "markdown-oxide"
+
 [[language]]
 name = "markdown"
-language-servers = ["marksman", "harper-ls"]
+file-types = ["md", "markdown", "mdc"]
+language-servers = ["markdown-oxide", "harper-ls"]
 formatter = { command = "dprint", args = ["fmt", "--stdin", "md"] }
 auto-format = true

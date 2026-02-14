@@ -181,6 +181,7 @@ args = ["--stdio"]
 name = "docker-compose"
 auto-format = true
 language-servers = ["docker-compose-langserver"]
+formatter = { command = "yamlfmt", args = ["-in"] }
 
 #
 # python

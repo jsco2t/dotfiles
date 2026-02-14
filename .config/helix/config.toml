@@ -9,6 +9,8 @@ color-modes = true
 text-width = 120
 rulers = [100]
 auto-format = true
+scrolloff = 5
+bufferline = "multiple"
 
 [editor.cursor-shape]
 insert = "bar"

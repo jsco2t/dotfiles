@@ -63,6 +63,126 @@ tab-width = 4
 unit = "    "
 
 #
+# toml
+#
+
+# Language server + formatter: taplo
+# Install:
+#   cargo install taplo-cli --locked --features lsp   # Linux/macOS (cargo)
+#   brew install taplo                                  # macOS (Homebrew)
+#   npm install -g @taplo/cli                           # any platform (npm)
+[language-server.taplo]
+command = "taplo"
+args = ["lsp", "stdio"]
+
+[[language]]
+name = "toml"
+auto-format = true
+language-servers = ["taplo"]
+formatter = { command = "taplo", args = ["format", "-"] }
+# Workaround for taplo workspace root detection issue
+# https://github.com/tamasfe/taplo/issues/580
+roots = ["."]
+
+#
+# yaml
+#
+
+# Language server: yaml-language-server
+# Install:
+#   npm install -g yaml-language-server   # any platform (npm)
+#   brew install yaml-language-server      # macOS (Homebrew)
+#   pacman -S yaml-language-server         # Arch Linux
+[language-server.yaml-language-server]
+command = "yaml-language-server"
+args = ["--stdio"]
+
+[language-server.yaml-language-server.config.yaml]
+format = { enable = true }
+validation = true
+
+[language-server.yaml-language-server.config.yaml.schemas]
+"https://json.schemastore.org/github-workflow.json" = ".github/workflows/*.{yml,yaml}"
+"https://raw.githubusercontent.com/ansible-community/schemas/main/f/ansible-tasks.json" = "roles/{tasks,handlers}/*.{yml,yaml}"
+"https://raw.githubusercontent.com/ansible-community/schemas/main/f/ansible-playbook.json" = "playbooks/*.{yml,yaml}"
+
+[[language]]
+name = "yaml"
+auto-format = true
+language-servers = ["yaml-language-server"]
+# Formatter: yamlfmt (Google's YAML formatter)
+# Install: go install github.com/google/yamlfmt/cmd/yamlfmt@latest
+#   brew install yamlfmt              # macOS (Homebrew)
+formatter = { command = "yamlfmt", args = ["-in"] }
+
+#
+# ansible
+#
+# Ansible is not a built-in language in Helix — ansible files are handled as
+# YAML with ansible-specific JSON schemas (configured above in yaml-language-server).
+# The ansible-language-server is installed but not wired up because Helix lacks
+# a built-in tree-sitter grammar for ansible as a distinct language type.
+#
+# Install (for future use if Helix adds ansible support):
+#   npm install -g @ansible/ansible-language-server   # any platform (npm)
+#   pip install ansible-language-server                # any platform (pip)
+#   brew install ansible-language-server               # macOS (Homebrew)
+[language-server.ansible-language-server]
+command = "ansible-language-server"
+args = ["--stdio"]
+
+#
+# json
+#
+
+# Language server: vscode-json-language-server (from vscode-langservers-extracted)
+# Install:
+#   npm install -g vscode-langservers-extracted   # any platform (npm)
+[language-server.vscode-json-language-server]
+command = "vscode-json-language-server"
+args = ["--stdio"]
+
+[language-server.vscode-json-language-server.config]
+provideFormatter = true
+
+[[language]]
+name = "json"
+auto-format = true
+language-servers = ["vscode-json-language-server"]
+
+#
+# docker
+#
+
+# Language server: docker-langserver
+# Install:
+#   npm install -g dockerfile-language-server-nodejs   # any platform (npm)
+[language-server.docker-langserver]
+command = "docker-langserver"
+args = ["--stdio"]
+
+[[language]]
+name = "dockerfile"
+auto-format = true
+language-servers = ["docker-langserver"]
+
+#
+# docker-compose
+#
+
+# Language server: docker-compose-langserver
+# Install:
+#   npm install -g @microsoft/compose-language-service   # any platform (npm)
+[language-server.docker-compose-langserver]
+command = "docker-compose-langserver"
+args = ["--stdio"]
+
+[[language]]
+name = "docker-compose"
+auto-format = true
+language-servers = ["docker-compose-langserver"]
+
+#
 # python
 #
 

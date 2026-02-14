@@ -84,6 +84,20 @@ python_install() {
     fi
 }
 
+# Install an npm global package (respects --upgrade flag)
+npm_install() {
+    local pkg="$1"
+    if npm ls -g "$pkg" &>/dev/null; then
+        if $UPGRADE; then
+            npm i -g "$pkg"
+        else
+            return 0
+        fi
+    else
+        npm i -g "$pkg"
+    fi
+}
+
 # Install a brew package (respects --upgrade flag)
 brew_install() {
     local pkg="$1"
@@ -165,6 +179,8 @@ if has go; then
     # Linters
     go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
     go install honnef.co/go/tools/cmd/staticcheck@latest
+    # YAML formatter
+    go install github.com/google/yamlfmt/cmd/yamlfmt@latest
     # General-purpose language server (used for markdown linting integration)
     go install github.com/mattn/efm-langserver@latest
     # Helm chart LSP
@@ -218,11 +234,13 @@ fi
 if has npm; then
     info "Installing npm tools..."
 
-    npm i -g @ansible/ansible-language-server  # Ansible LSP
-    npm i -g vscode-langservers-extracted       # JSON, HTML, CSS LSPs
-    npm i -g yaml-language-server@next          # YAML LSP
-    npm i -g markdownlint-cli                   # Markdown linter
-    npm i -g prettier                           # Multi-language formatter
+    npm_install @ansible/ansible-language-server  # Ansible LSP
+    npm_install vscode-langservers-extracted       # JSON, HTML, CSS LSPs
+    npm_install dockerfile-language-server-nodejs  # Dockerfile LSP
+    npm_install @microsoft/compose-language-service # Docker Compose LSP
+    npm_install yaml-language-server               # YAML LSP
+    npm_install markdownlint-cli                   # Markdown linter
+    npm_install prettier                           # Multi-language formatter
 
     success "npm tools done"
 else

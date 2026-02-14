@@ -44,13 +44,24 @@ left = [
 center = ["spacer"]
 right = [
   "diagnostics",
+  "selections",
+  "separator",
   "read-only-indicator",
+  "file-indent-style",
   "file-encoding",
   "file-line-ending",
+  "separator",
   "file-type",
+  "separator",
   "position",
   "total-line-numbers",
 ]
+mode.normal = "NORMAL"
+mode.insert = "INSERT"
+mode.select = "SELECT"
+diagnostics = ["warning", "error"]
+workspace-diagnostics = ["warning", "error"]
+separator = "│"
 
 [editor.auto-save]
 focus-lost = true

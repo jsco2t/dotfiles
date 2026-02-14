@@ -38,9 +38,16 @@ EOF
 
 for arg in "$@"; do
     case "$arg" in
-        --upgrade|-u) UPGRADE=true ;;
-        --help|-h) usage; exit 0 ;;
-        *) echo "Unknown option: $arg"; usage; exit 1 ;;
+        --upgrade | -u) UPGRADE=true ;;
+        --help | -h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            usage
+            exit 1
+            ;;
     esac
 done
 
@@ -48,9 +55,9 @@ done
 # Helpers
 # ---------------------------------------------------------------------------
 
-has()     { command -v "$1" &>/dev/null; }
-info()    { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
-warn()    { printf '\033[1;33mWARN:\033[0m %s\n' "$1"; }
+has() { command -v "$1" &>/dev/null; }
+info() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
+warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$1"; }
 success() { printf '\033[1;32m✓\033[0m %s\n' "$1"; }
 
 # Install a Python CLI tool via uv > pipx > pip (respects --upgrade flag)
@@ -140,10 +147,10 @@ fi
 info "Checking prerequisites..."
 
 MISSING=()
-has go      || MISSING+=("go")
-has cargo   || MISSING+=("cargo (install via rustup)")
-has rustup  || MISSING+=("rustup")
-has npm     || MISSING+=("npm")
+has go || MISSING+=("go")
+has cargo || MISSING+=("cargo (install via rustup)")
+has rustup || MISSING+=("rustup")
+has npm || MISSING+=("npm")
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
     warn "Missing toolchains (some sections will be skipped):"
@@ -181,6 +188,8 @@ if has go; then
     go install honnef.co/go/tools/cmd/staticcheck@latest
     # YAML formatter
     go install github.com/google/yamlfmt/cmd/yamlfmt@latest
+    # Shell formatter
+    go install mvdan.cc/sh/v3/cmd/shfmt@latest
     # General-purpose language server (used for markdown linting integration)
     go install github.com/mattn/efm-langserver@latest
     # Helm chart LSP
@@ -234,13 +243,14 @@ fi
 if has npm; then
     info "Installing npm tools..."
 
-    npm_install @ansible/ansible-language-server  # Ansible LSP
-    npm_install vscode-langservers-extracted       # JSON, HTML, CSS LSPs
-    npm_install dockerfile-language-server-nodejs  # Dockerfile LSP
+    npm_install @ansible/ansible-language-server    # Ansible LSP
+    npm_install vscode-langservers-extracted        # JSON, HTML, CSS LSPs
+    npm_install dockerfile-language-server-nodejs   # Dockerfile LSP
     npm_install @microsoft/compose-language-service # Docker Compose LSP
-    npm_install yaml-language-server               # YAML LSP
-    npm_install markdownlint-cli                   # Markdown linter
-    npm_install prettier                           # Multi-language formatter
+    npm_install yaml-language-server                # YAML LSP
+    npm_install bash-language-server                # Bash LSP
+    npm_install markdownlint-cli                    # Markdown linter
+    npm_install prettier                            # Multi-language formatter
 
     success "npm tools done"
 else
@@ -253,8 +263,8 @@ fi
 
 info "Installing Python tools..."
 
-python_install python-lsp-server  # Python LSP
-python_install black              # Python formatter
+python_install python-lsp-server # Python LSP
+python_install black             # Python formatter
 
 success "Python tools done"
 
@@ -268,6 +278,8 @@ info "Installing brew-only tools..."
 brew_install hashicorp/tap/terraform-ls || true
 # Markdown LSP (written in F#/.NET — no language installer)
 brew_install marksman || true
+# Shell linter (used by bash-language-server for diagnostics)
+brew_install shellcheck || true
 
 success "All done."
 

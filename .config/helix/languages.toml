@@ -41,3 +41,44 @@ file-types = ["md", "markdown", "mdc"]
 language-servers = ["markdown-oxide", "harper-ls"]
 formatter = { command = "dprint", args = ["fmt", "--stdin", "md"] }
 auto-format = true
+
+#
+# rust
+#
+
+# Language server: rust-analyzer
+# Install: rustup component add rust-analyzer
+[language-server.rust-analyzer]
+command = "rust-analyzer"
+
+[[language]]
+name = "rust"
+auto-format = true
+language-servers = ["rust-analyzer"]
+# Formatter: rustfmt (included with Rust toolchain)
+formatter = { command = "rustfmt" }
+
+[language.indent]
+tab-width = 4
+unit = "    "
+
+#
+# python
+#
+
+# Language server: pylsp
+# Install: pip install python-lsp-server
+[language-server.pylsp]
+command = "pylsp"
+
+[[language]]
+name = "python"
+auto-format = true
+language-servers = ["pylsp"]
+# Formatter: black
+# Install: pip install black
+formatter = { command = "black", args = ["-", "--quiet"] }
+
+[language.indent]
+tab-width = 4
+unit = "    "

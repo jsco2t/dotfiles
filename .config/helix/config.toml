@@ -61,7 +61,8 @@ mode.insert = "INSERT"
 mode.select = "SELECT"
 diagnostics = ["warning", "error"]
 workspace-diagnostics = ["warning", "error"]
-separator = "│"
+#separator = "│"
+separator = "︙"
 
 [editor.auto-save]
 focus-lost = true

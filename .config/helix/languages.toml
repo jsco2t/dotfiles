@@ -184,6 +184,30 @@ language-servers = ["docker-compose-langserver"]
 formatter = { command = "yamlfmt", args = ["-in"] }
 
 #
+# bash
+#
+
+# Language server: bash-language-server
+# Install:
+#   npm install -g bash-language-server   # any platform (npm)
+# Integrates with shellcheck (if on PATH) for linting diagnostics.
+# Install shellcheck:
+#   brew install shellcheck               # macOS (Homebrew)
+#   dnf install ShellCheck                # Fedora/RHEL
+#   apt install shellcheck                # Debian/Ubuntu
+[language-server.bash-language-server]
+command = "bash-language-server"
+args = ["start"]
+
+[[language]]
+name = "bash"
+auto-format = true
+language-servers = ["bash-language-server"]
+# Formatter: shfmt
+# Install: go install mvdan.cc/sh/v3/cmd/shfmt@latest
+formatter = { command = "shfmt", args = ["-i", "4", "-ci"] }
+
+#
 # python
 #
 

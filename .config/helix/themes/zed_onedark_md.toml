@@ -1,0 +1,20 @@
+inherits = "zed_onedark"
+
+# Different colors per heading level
+"markup.heading.1" = { fg = "cyan", modifiers = ["bold"] }
+"markup.heading.2" = { fg = "orange", modifiers = ["bold"] }
+"markup.heading.3" = { fg = "yellow", modifiers = ["bold"] }
+"markup.heading.4" = { fg = "green" }
+"markup.heading.5" = { fg = "cyan" }
+"markup.heading.6" = { fg = "purple" }
+"markup.heading.marker" = { fg = "light-gray" }
+
+# Code blocks get a subtle background
+"markup.raw.block" = { fg = "green", bg = "#2a2e36" }
+
+# Task lists
+"markup.list.checked" = { fg = "green" }
+"markup.list.unchecked" = { fg = "light-gray" }
+
+# Reference links
+"markup.link.label" = { fg = "blue" }

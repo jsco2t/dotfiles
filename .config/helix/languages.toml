@@ -163,7 +163,7 @@ args = ["--stdio"]
 
 [[language]]
 name = "dockerfile"
-auto-format = true
+#auto-format = true # <-------- !! causes `hx` to hang on `:wq`
 language-servers = ["docker-langserver"]
 
 #

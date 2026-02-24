@@ -1,0 +1,12 @@
+[[plugin.deps]]
+use = "yazi-rs/plugins:vcs-files"
+rev = "b224ddf"
+hash = "f6e6a829c6dc6c900a75bebe422a5c33"
+
+[[plugin.deps]]
+use = "yazi-rs/plugins:git"
+rev = "b224ddf"
+hash = "270915fa8282a19908449530ff66f7e2"
+
+[flavor]
+deps = []

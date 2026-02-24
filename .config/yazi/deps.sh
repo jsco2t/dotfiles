@@ -146,3 +146,7 @@ if $UPGRADE; then
 else
     info "Install complete. Run with --upgrade to update existing tools."
 fi
+
+info "Installing plugins..."
+ya pkg add yazi-rs/plugins:git
+ya pkg add yazi-rs/plugins:vcs-files

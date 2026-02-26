@@ -85,3 +85,8 @@ newline = "none"
 space = "·"
 nbsp = "◦"
 #tab = "◦"
+
+# yank path to clipboard
+[keys.normal.space]
+l = ":sh printf \"\\033]52;;$(realpath '%{buffer_name}' | base64)\\007\" > /dev/tty"
+L = ":sh printf \"\\033Ptmux;\\033\\033]52;;$(realpath '%{buffer_name}' | base64)\\007\\033\\134\" > /dev/tty"

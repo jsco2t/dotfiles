@@ -20,7 +20,6 @@ if [ -d "$HOME/go/bin" ]; then
     export PATH
 fi
 
-
 #
 # linux brew support
 #
@@ -33,11 +32,11 @@ fi
 # macos brew support
 #
 if [ -d "/opt/homebrew" ]; then
-  PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
-  PATH="/opt/homebrew/bin:$PATH"
-  PATH="/opt/homebrew/sbin:$PATH"
-  export PATH
-  export CPPFLAGS="-I/opt/homebrew/opt/openjdk/include"
+    PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
+    PATH="/opt/homebrew/bin:$PATH"
+    PATH="/opt/homebrew/sbin:$PATH"
+    export PATH
+    export CPPFLAGS="-I/opt/homebrew/opt/openjdk/include"
 fi
 
 #
@@ -46,14 +45,14 @@ fi
 export LANG=en_US.UTF-8
 LANGUAGE=en_US.UTF-8
 LC_ALL=en_US.UTF-8
-export EDITOR=nvim
+export EDITOR=hx
 export PATH="$PATH:/usr/local/bin:/usr/local/go/bin"
 
 #
 # rust environment
 #
 if [ -f "$HOME/.cargo/env" ]; then
-  source "$HOME/.cargo/env"
+    source "$HOME/.cargo/env"
 fi
 
 #
@@ -84,7 +83,6 @@ export NVM_DIR="$([ -z "${XDG_CONFIG_HOME-}" ] && printf %s "${HOME}/.nvm" || pr
 #
 [ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
 
-
 # to install `krew`, run:
 # (
 #  set -x; cd "$(mktemp -d)" &&
@@ -112,7 +110,7 @@ export BAT_THEME=Coldark-Dark
 # direnv support
 #
 if [ -x "$(command -v direnv)" ]; then
-  eval "$(direnv hook zsh)"
+    eval "$(direnv hook zsh)"
 fi
 
 #
@@ -126,10 +124,9 @@ export FUZZBALL_INSECURE=true
 
 # local env customizations
 if [[ -f "$HOME/.zshrc.local" ]]; then
-  source "$HOME/.zshrc.local"
+    source "$HOME/.zshrc.local"
 fi
 
 # Added by LM Studio CLI (lms)
 export PATH="$PATH:/Users/jscott/.lmstudio/bin"
 # End of LM Studio CLI section
-

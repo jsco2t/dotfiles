@@ -20,6 +20,22 @@ By default, review unstaged changes from `git diff`. The user may specify differ
 
 **Idiomatic Code Usage**: Evaluate if the code represents idiomatic language patterns for the source language. Additionally, look for opportunities to make use of modern language features.
 
+**Silent Failure Hunter**: Look for cases where error values are not checked or errors are ignored (apparently by design) but not logged (and should be).
+
+**Test Quality**: Verify that test code is straightforward, highly reliable, and provides valuable insight into the quality of the code being tested. Verify that critical codepaths are covered by tests.
+
+## Process Guidance
+
+- Gather all of the changes to be reviewed.
+
+- Create sub-agents - each tasked with **one** of the review responsibilities above.
+
+- Have those sub agents review the code identified to be reviewed and report back.
+
+- Use the main AI thread to process the results and produce a report.
+
+- No agent should make code changes. This is a review only task.
+
 ## Confidence Scoring
 
 Rate each potential issue on a scale from 0-100:

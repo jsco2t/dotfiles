@@ -130,3 +130,6 @@ fi
 # Added by LM Studio CLI (lms)
 export PATH="$PATH:/Users/jscott/.lmstudio/bin"
 # End of LM Studio CLI section
+
+# claude-nod
+export CLAUDE_NOD_TOKEN=$(cat /Users/jscott/.config/claude-nod/token)

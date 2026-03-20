@@ -4,64 +4,52 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture Overview
 
-This is a personal Neovim configuration based on kickstart.nvim. The configuration uses Lazy.nvim as the plugin manager and follows a modular structure.
+This is a personal Neovim configuration built on [LazyVim](https://www.lazyvim.org/) with [Lazy.nvim](https://github.com/folke/lazy.nvim) as the plugin manager.
 
 ### Key Structure
-- `init.lua` - Main entry point, sets leader key and loads all modules in order
-- `lua/options.lua` - Core vim options and settings 
-- `lua/keymaps.lua` - Basic keybindings and LSP mappings
-- `lua/autocommands.lua` - Auto-commands (currently just yank highlighting)
-- `lua/lazy-bootstrap.lua` - Lazy.nvim plugin manager bootstrap
-- `lua/lazy-plugins.lua` - Main plugin configuration, imports from plugins/ directories
-- `lua/plugins/` - Individual plugin configurations organized by functionality
-- `lua/plugins/lang/` - Language-specific plugin configurations
-- `pack/nvim/start/nvim-lspconfig/` - LSP configurations (pack plugin)
+- `init.lua` — Entry point, loads `config.lazy`
+- `lua/config/lazy.lua` — Lazy.nvim bootstrap and plugin spec (extras, defaults, performance)
+- `lua/config/options.lua` — Options that differ from LazyVim defaults (loaded before plugins)
+- `lua/config/keymaps.lua` — Custom keymaps (loaded on VeryLazy)
+- `lua/config/autocommands.lua` — Custom autocommands (loaded on VeryLazy)
+- `lua/plugins/` — User plugin specs (merged with LazyVim defaults)
 
-### Plugin Management
+### Language Support
 
-Uses Lazy.nvim plugin manager:
-- Plugin definitions in `lua/plugins/*.lua` files
-- Language-specific plugins in `lua/plugins/lang/*.lua`
-- Mason tool installer manages LSP servers and formatters
-- Pack plugins used for some LSP servers (see lazy-plugins.lua)
+Configured via LazyVim extras in `lua/config/lazy.lua`:
+- **Go** (`lang.go`) — gopls, gofumpt, goimports
+- **Rust** (`lang.rust`) — rust-analyzer
+- **Python** (`lang.python`) — pyright, ruff
+- **Markdown** (`lang.markdown`) — marksman
+- **JSON** (`lang.json`) — jsonls + schemastore
+- **YAML** (`lang.yaml`) — yamlls
+- **TOML** (`lang.toml`) — taplo
+- **Docker** (`lang.docker`) — dockerls, docker-compose-ls
 
-### LSP Configuration
+Custom (no LazyVim extra):
+- **Bash/Shell** (`plugins/lang-bash.lua`) — bashls, shellcheck, shfmt
 
-LSP setup handled in multiple places:
-- Pack LSP servers enabled directly in `lazy-plugins.lua` (pyright, ruff, pylsp, gopls, etc.)
-- Conditional gopls loading based on project-specific configs
-- Mason-based LSP server installation in `plugins/lsp.lua`
-- Language-specific LSP configs in `plugins/lang/*.lua`
+### Plugin Customizations (`lua/plugins/`)
+- `colorscheme.lua` — onedark theme (darker variant, custom purple)
+- `disabled.lua` — Disables noice.nvim and bufferline
+- `lang-bash.lua` — Bash LSP, linting, formatting
+
+### File Explorer
+- Uses **snacks.explorer** (LazyVim default for install_version 8)
+- Toggle: `<leader>e`
 
 ### Development Commands
-
-Plugin management:
-- `:Lazy` - Open plugin manager
-- `:Lazy update` - Update all plugins
-- `:MasonUpdate` - Update Mason registry
-
-Tool management:
-- `:Mason` - Open Mason interface for installing tools
-- `:ConformInfo` - Check formatter status
-
-Configuration reset:
-- `./reset-nvim.sh` - Completely reset nvim data, state, and cache directories
-
-### Key Features
-
-- Telescope fuzzy finder with extensive search capabilities
-- LSP with auto-completion via blink.cmp
-- Auto-formatting via conform.nvim (stylua, gofumpt, shfmt, etc.)
-- Treesitter syntax highlighting
-- Git integration via gitsigns
-- Terminal integration
-- Language support: Lua, Go, Python, Rust, YAML, Protocol Buffers, Shell, Markdown
+- `:Lazy` — Plugin manager UI
+- `:Lazy update` — Update all plugins
+- `:Mason` — Tool installer UI
+- `:ConformInfo` — Check formatter status
+- `./reset-nvim.sh` — Reset nvim data, state, and cache
 
 ### Configuration Notes
-
 - Leader key: `<space>`
 - Nerd Font required for icons
 - Local config file support via `exrc` option
-- Spell checking enabled by default
-- Clipboard synced with OS
-- Auto-format on save (disabled for C/C++)
+- Spell checking enabled
+- SSH-aware: animations disabled over SSH, clipboard handled by LazyVim
+- No DAP configured (preference for CLI debugging)
+- Disabled plugins: noice.nvim, bufferline, netrwPlugin

@@ -3,57 +3,44 @@
 # -----------------------------------------------------------
 
 #
-# local binpaths
+# PATH configuration
 #
-if [ -d "$HOME/.local/bin" ]; then
-    PATH="$PATH:$HOME/.local/bin"
-    export PATH
-fi
+# All PATH modifications in one block. Platform-specific entries
+# are guarded by directory existence checks.
+#
 
-if [ -d "$HOME/.bin" ]; then
-    PATH="$PATH:$HOME/.bin"
-    export PATH
-fi
+# homebrew (macOS: /opt/homebrew, Linux: /home/linuxbrew)
+[ -d "/opt/homebrew/opt/openjdk/bin" ] && PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
+[ -d "/opt/homebrew/sbin" ] && PATH="/opt/homebrew/sbin:$PATH"
+[ -d "/opt/homebrew/bin" ] && PATH="/opt/homebrew/bin:$PATH"
+[ -d "/home/linuxbrew/.linuxbrew/bin" ] && PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
 
-if [ -d "$HOME/go/bin" ]; then
-    PATH="$PATH:$HOME/go/bin"
-    export PATH
-fi
+# pyenv (shims added here; full init is lazy-loaded below)
+export PYENV_ROOT="$HOME/.pyenv"
+[ -d "$PYENV_ROOT/shims" ] && PATH="$PYENV_ROOT/shims:$PATH"
+[ -d "$PYENV_ROOT/bin" ] && PATH="$PYENV_ROOT/bin:$PATH"
 
-#
-# linux brew support
-#
-if [ -d /home/linuxbrew/.linuxbrew/bin ]; then
-    PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
-    export PATH
-fi
+# rust
+[ -d "$HOME/.cargo/bin" ] && PATH="$HOME/.cargo/bin:$PATH"
 
-#
-# macos brew support
-#
-if [ -d "/opt/homebrew" ]; then
-    PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
-    PATH="/opt/homebrew/bin:$PATH"
-    PATH="/opt/homebrew/sbin:$PATH"
-    export PATH
-    export CPPFLAGS="-I/opt/homebrew/opt/openjdk/include"
-fi
+# go
+[ -d "/usr/local/go/bin" ] && PATH="$PATH:/usr/local/go/bin"
+[ -d "$HOME/go/bin" ] && PATH="$PATH:$HOME/go/bin"
+
+# user local paths
+[ -d "$HOME/.local/bin" ] && PATH="$PATH:$HOME/.local/bin"
+[ -d "$HOME/.bin" ] && PATH="$PATH:$HOME/.bin"
+
+PATH="$PATH:/usr/local/bin"
+export PATH
 
 #
-# env configuration
+# environment
 #
 export LANG=en_US.UTF-8
 LANGUAGE=en_US.UTF-8
 LC_ALL=en_US.UTF-8
 export EDITOR=hx
-export PATH="$PATH:/usr/local/bin:/usr/local/go/bin"
-
-#
-# rust environment
-#
-if [ -f "$HOME/.cargo/env" ]; then
-    source "$HOME/.cargo/env"
-fi
 
 #
 # ui customizations
@@ -63,48 +50,20 @@ export COLORTERM=truecolor
 eval "$(starship init zsh)"
 
 #
-# aliases
+# tools / utilities
 #
-export COLOR_MODE='--color=auto'
-alias python=python3
-alias pip=pip3
-alias ll='ls -l ${COLOR_MODE}' # long
-alias ls='ls -laF ${COLOR_MODE}'
-alias k=kubectl
+source "$HOME/.bin/shell_utils/loader"
 
 #
-# nvm (node version manager) support
+# pyenv (lazy-loaded to avoid ~1.5s startup cost)
 #
-export NVM_DIR="$([ -z "${XDG_CONFIG_HOME-}" ] && printf %s "${HOME}/.nvm" || printf %s "${XDG_CONFIG_HOME}/nvm")"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" # This loads nvm
-
-#
-# command completion support
-#
-[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
-
-# to install `krew`, run:
-# (
-#  set -x; cd "$(mktemp -d)" &&
-#  OS="$(uname | tr '[:upper:]' '[:lower:]')" &&
-#  ARCH="$(uname -m | sed -e 's/x86_64/amd64/' -e 's/\(arm\)\(64\)\?.*/\1\2/' -e 's/aarch64$/arm64/')" &&
-#  KREW="krew-${OS}_${ARCH}" &&
-#  curl -fsSLO "https://github.com/kubernetes-sigs/krew/releases/latest/download/${KREW}.tar.gz" &&
-#  tar zxvf "${KREW}.tar.gz" &&
-#  ./"${KREW}" install krew
-#)
-export PATH="${KREW_ROOT:-$HOME/.krew}/bin:$PATH"
-
-#
-# dotfiles support
-#
-alias dot='/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME'
-
-#
-# bat customizations
-#   to see built in themes `bat --list-themes`
-#
-export BAT_THEME=Coldark-Dark
+if [ -d "$PYENV_ROOT" ]; then
+    pyenv() {
+        unset -f pyenv
+        eval "$(command pyenv init - zsh)"
+        pyenv "$@"
+    }
+fi
 
 #
 # direnv support
@@ -114,22 +73,83 @@ if [ -x "$(command -v direnv)" ]; then
 fi
 
 #
-# fuzzball cli support
+# fzf support
 #
+[ -f "$HOME/.fzf.zsh" ] && source "$HOME/.fzf.zsh"
+
+#
+# ssh agent
+#
+HOSTID=$(hostname)
+HOSTID=$(echo "$HOSTID" | sed 's/[ -.]/_/g')
+HOSTID=$(echo "$HOSTID" | tr '[:upper:]' '[:lower:]')
+export SSH_AUTH_SOCK="$HOME/.ssh/ssh-agent.$HOSTID.sock"
+
+/usr/bin/ssh-add -l >&/dev/null
+if [ $? -eq 2 ]; then
+    /usr/bin/ssh-agent -a "$SSH_AUTH_SOCK" >/dev/null
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        /usr/bin/ssh-add --apple-load-keychain
+    fi
+elif [ ! -S "$SSH_AUTH_SOCK" ]; then
+    /usr/bin/ssh-agent -a "$SSH_AUTH_SOCK" >/dev/null
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        /usr/bin/ssh-add --apple-load-keychain
+    fi
+fi
+
+#
+# zsh plugins
+#
+# syntax highlighting: https://github.com/zsh-users/zsh-syntax-highlighting
+# autosuggestions: https://github.com/zsh-users/zsh-autosuggestions
+zshBaseUtilPath="/usr/local/share"
+zshAltUtilPath="/opt/homebrew/share"
+
+if [[ -f "$zshBaseUtilPath/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
+    source "$zshBaseUtilPath/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+    export ZSH_HIGHLIGHT_HIGHLIGHTERS_DIR="$zshBaseUtilPath/zsh-syntax-highlighting/highlighters"
+elif [[ -f "$zshAltUtilPath/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
+    source "$zshAltUtilPath/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+    export ZSH_HIGHLIGHT_HIGHLIGHTERS_DIR="$zshAltUtilPath/zsh-syntax-highlighting/highlighters"
+fi
+
+if [[ -f "$zshBaseUtilPath/zsh-autosuggestions/zsh-autosuggestions.zsh" ]]; then
+    source "$zshBaseUtilPath/zsh-autosuggestions/zsh-autosuggestions.zsh"
+    export ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE="fg=cyan,bold"
+    export ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE="15"
+elif [[ -f "$zshAltUtilPath/zsh-autosuggestions/zsh-autosuggestions.zsh" ]]; then
+    source "$zshAltUtilPath/zsh-autosuggestions/zsh-autosuggestions.zsh"
+    export ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE="fg=cyan,bold"
+    export ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE="15"
+fi
+
+#
+# zsh completion system
+#
+if [ -d "/opt/homebrew/share/zsh/site-functions" ]; then
+    FPATH="/opt/homebrew/share/zsh/site-functions:${FPATH}"
+elif [ -d "/home/linuxbrew/.linuxbrew/share/zsh/site-functions" ]; then
+    FPATH="/home/linuxbrew/.linuxbrew/share/zsh/site-functions:${FPATH}"
+fi
+autoload -Uz compinit
+compinit
+
+#
+# aliases
+#
+alias dot='/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME'
+
+#
+# environment
+#
+export BAT_THEME=Coldark-Dark
 export FUZZBALL_INSECURE=true
+export GOPRIVATE=github.com/ctrliq/*,github.com/ctrl-cmd/*,gitlab.com/ciq-inc/,go.ciq.dev/*,bitbucket.org/ciqinc/*,go.ciq.dev
 
 #
 # local overrides
 #
-
-# local env customizations
 if [[ -f "$HOME/.zshrc.local" ]]; then
     source "$HOME/.zshrc.local"
 fi
-
-# Added by LM Studio CLI (lms)
-export PATH="$PATH:/Users/jscott/.lmstudio/bin"
-# End of LM Studio CLI section
-
-# claude-nod
-export CLAUDE_NOD_TOKEN=$(cat /Users/jscott/.config/claude-nod/token)

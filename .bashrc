@@ -6,61 +6,48 @@
 # global environment
 #
 if [ -f /etc/bashrc ]; then
-	. /etc/bashrc
+    . /etc/bashrc
 fi
 
 #
-# local binpaths
+# PATH configuration
 #
-if [ -d "$HOME/.local/bin" ]; then
-	PATH="$PATH:$HOME/.local/bin"
-	export PATH
-fi
+# All PATH modifications in one block. Platform-specific entries
+# are guarded by directory existence checks.
+#
 
-if [ -d "$HOME/.bin" ]; then
-	PATH="$PATH:$HOME/.bin"
-	export PATH
-fi
+# homebrew (macOS: /opt/homebrew, Linux: /home/linuxbrew)
+[ -d "/opt/homebrew/opt/openjdk/bin" ] && PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
+[ -d "/opt/homebrew/sbin" ] && PATH="/opt/homebrew/sbin:$PATH"
+[ -d "/opt/homebrew/bin" ] && PATH="/opt/homebrew/bin:$PATH"
+[ -d "/home/linuxbrew/.linuxbrew/bin" ] && PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
 
-if [ -d "$HOME/go/bin" ]; then
-	PATH="$PATH:$HOME/go/bin"
-	export PATH
-fi
+# pyenv (shims added here; full init is lazy-loaded below)
+export PYENV_ROOT="$HOME/.pyenv"
+[ -d "$PYENV_ROOT/shims" ] && PATH="$PYENV_ROOT/shims:$PATH"
+[ -d "$PYENV_ROOT/bin" ] && PATH="$PYENV_ROOT/bin:$PATH"
 
-#
-# linux brew support
-#
-if [ -d /home/linuxbrew/.linuxbrew/bin ]; then
-	PATH="$PATH:/home/linuxbrew/.linuxbrew/bin"
-	export PATH
-fi
+# rust
+[ -d "$HOME/.cargo/bin" ] && PATH="$HOME/.cargo/bin:$PATH"
 
-#
-# macos brew support
-#
-if [ -d "/opt/homebrew" ]; then
-	PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
-	PATH="/opt/homebrew/bin:$PATH"
-	PATH="/opt/homebrew/sbin:$PATH"
-	export PATH
-	export CPPFLAGS="-I/opt/homebrew/opt/openjdk/include"
-fi
+# go
+[ -d "/usr/local/go/bin" ] && PATH="$PATH:/usr/local/go/bin"
+[ -d "$HOME/go/bin" ] && PATH="$PATH:$HOME/go/bin"
+
+# user local paths
+[ -d "$HOME/.local/bin" ] && PATH="$PATH:$HOME/.local/bin"
+[ -d "$HOME/.bin" ] && PATH="$PATH:$HOME/.bin"
+
+PATH="$PATH:/usr/local/bin"
+export PATH
 
 #
-# env customizations
+# environment
 #
-LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
 LANGUAGE=en_US.UTF-8
 LC_ALL=en_US.UTF-8
-export editor=vim
-export PATH="$PATH:/usr/local/bin:/usr/local/go/bin"
-
-#
-# rust environment
-#
-if [ -f "$HOME/.cargo/env" ]; then
-	source "$HOME/.cargo/env"
-fi
+export EDITOR=hx
 
 #
 # ui customizations
@@ -70,21 +57,64 @@ export COLORTERM=truecolor
 eval "$(starship init bash)"
 
 #
-# aliases
+# tools / utilities
 #
-export COLOR_MODE='--color=auto'
-alias python=python3
-alias pip=pip3
-alias ll='ls -l ${COLOR_MODE}' # long
-alias ls='ls -laF ${COLOR_MODE}'
-alias k=kubectl
+source "$HOME/.bin/shell_utils/loader"
 
 #
-# node version manager
+# pyenv (lazy-loaded to avoid ~1.5s startup cost)
 #
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"                   # This loads nvm
-[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion" # This loads nvm bash_completion
+if [ -d "$PYENV_ROOT" ]; then
+    pyenv() {
+        unset -f pyenv
+        eval "$(command pyenv init - bash)"
+        pyenv "$@"
+    }
+fi
+
+#
+# direnv support
+#
+if [ -x "$(command -v direnv)" ]; then
+    eval "$(direnv hook bash)"
+fi
+
+#
+# fzf support
+#
+[ -f "$HOME/.fzf.bash" ] && source "$HOME/.fzf.bash"
+
+#
+# ssh agent
+#
+HOSTID=$(hostname)
+HOSTID=$(echo "$HOSTID" | sed 's/[ -.]/_/g')
+HOSTID=$(echo "$HOSTID" | tr '[:upper:]' '[:lower:]')
+export SSH_AUTH_SOCK="$HOME/.ssh/ssh-agent.$HOSTID.sock"
+
+/usr/bin/ssh-add -l >&/dev/null
+if [ $? -eq 2 ]; then
+    /usr/bin/ssh-agent -a "$SSH_AUTH_SOCK" >/dev/null
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        /usr/bin/ssh-add --apple-load-keychain
+    fi
+elif [ ! -S "$SSH_AUTH_SOCK" ]; then
+    /usr/bin/ssh-agent -a "$SSH_AUTH_SOCK" >/dev/null
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        /usr/bin/ssh-add --apple-load-keychain
+    fi
+fi
+
+#
+# bash completion
+#
+if ! shopt -oq posix; then
+    if [ -f /usr/share/bash-completion/bash_completion ]; then
+        . /usr/share/bash-completion/bash_completion
+    elif [ -f /etc/bash_completion ]; then
+        . /etc/bash_completion
+    fi
+fi
 
 #
 # history
@@ -98,44 +128,20 @@ export HISTIGNORE="cd *:history"
 shopt -s histappend
 
 #
-# command completion support
-#
-[ -f "$HOME/.fzf.bash" ] && source "$HOME/.fzf.bash"
-
-#
-# dotfiles support
+# aliases
 #
 alias dot='/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME'
 
 #
-# bat customizations
-#   to see built in themes `bat --list-themes`
+# environment
 #
 export BAT_THEME=Coldark-Dark
-
-#
-# direnv support
-#
-if [ -x "$(command -v direnv)" ]; then
-	eval "$(direnv hook bash)"
-fi
-
-#
-# fuzzball cli support
-#
 export FUZZBALL_INSECURE=true
+export GOPRIVATE=github.com/ctrliq/*,github.com/ctrl-cmd/*,gitlab.com/ciq-inc/,go.ciq.dev/*,bitbucket.org/ciqinc/*,go.ciq.dev
 
 #
 # local overrides
 #
-
-# local env customizations
 if [ -f "$HOME/.bashrc.local" ]; then
-	. "$HOME/.bashrc.local"
+    . "$HOME/.bashrc.local"
 fi
-. "$HOME/.cargo/env"
-
-# Added by LM Studio CLI (lms)
-export PATH="$PATH:/Users/jscott/.lmstudio/bin"
-# End of LM Studio CLI section
-

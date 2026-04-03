@@ -1,0 +1,20 @@
+#
+# shell cleanup commands
+#
+alias cl="clear;echo '';ls -l;echo '';pwd;echo ''"
+
+#
+# custom dir/ls commands
+# requires: brew install tree (https://linux.die.net/man/1/tree)
+#
+
+# Helper: _tree_cmd <flags> [dir] [depth]
+_tree_cmd() {
+  local flags="$1"
+  tree $flags "${2:-.}" --dirsfirst -L "${3:-2}"
+}
+
+lt()  { _tree_cmd "-aphC"  "$1" "$2"; }  # permissions, human-readable, color
+lta() { _tree_cmd "-aphDC" "$1" "$2"; }  # + date modified
+ltd() { _tree_cmd "-aDtC"  "$1" "$2"; }  # dirs only, sorted by date
+lts() { _tree_cmd "-at"    "$1" "$2"; }  # all, sorted by date

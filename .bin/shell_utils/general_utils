@@ -1,0 +1,33 @@
+#
+# General-purpose shell utilities
+#
+
+# mkcd: create a directory and cd into it
+mkcd() { mkdir -p "$1" && cd "$1"; }
+
+# path: display PATH entries one-per-line
+path() { echo "$PATH" | tr ':' '\n'; }
+
+# serve: quick HTTP server in current dir (default port 8000)
+serve() { python3 -m http.server "${1:-8000}"; }
+
+# listening: show processes listening on a port (macOS)
+listening() {
+  if [ -n "$1" ]; then
+    lsof -iTCP:"$1" -sTCP:LISTEN
+  else
+    lsof -iTCP -sTCP:LISTEN
+  fi
+}
+
+# weather: quick weather forecast
+weather() { curl -s "wttr.in/${1:-}?format=3"; }
+
+# retry: repeat a command until it succeeds (with delay)
+retry() {
+  local delay="${1:-2}"; shift
+  until "$@"; do
+    echo "retrying in ${delay}s..."
+    sleep "$delay"
+  done
+}

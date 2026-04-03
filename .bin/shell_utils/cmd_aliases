@@ -1,0 +1,147 @@
+#
+# colorized command output
+#
+
+# enable color support of ls and also add handy aliases
+if [ -x /usr/bin/dircolors ]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+fi
+export COLOR_MODE='--color=auto'
+alias grep='grep ${COLOR_MODE}'
+alias egrep='grep -E ${COLOR_MODE}'
+alias fgrep='grep -F ${COLOR_MODE}'
+alias zgrep='zgrep ${COLOR_MODE}'
+
+#
+# customized `ls` handling
+#
+alias ll='ls -l ${COLOR_MODE}'
+alias ls='ls -laF ${COLOR_MODE}'
+alias l='/bin/ls -F ${COLOR_MODE}'
+
+#
+# utility directory commands
+#
+alias home='cd ~ ; clear'
+alias c='clear'
+
+#
+# handling md5 checks
+#
+if ! [ -x "$(command -v md5)" ]; then
+    md5() { echo "$1" | md5sum | awk '{print $1}'; }
+fi
+
+#
+# Tool aliases
+#
+alias python='python3'
+alias pip='pip3'
+alias hasher='~/.bin/shell_utils/hasher.py'
+alias dot_status='~/.bin/shell_utils/dot_status.sh'
+alias dot_update='~/.bin/shell_utils/dot_update.sh'
+alias json_pp='~/.bin/shell_utils/json_pp.py'
+alias epoch='~/.bin/shell_utils/epoch.py'
+alias colima_restart='colima stop; sleep 5; colima start'
+alias dir='yazzi'
+
+#
+# k8s
+#
+alias k8s_shorts='cat << EOF
+#######################################
+[K8S SHORTCUTS]
+
+k:      kubectl {params}
+kns:    kubens {namespace} # selects a default namespace for cmds
+kgp:    kubectl get pods {params}
+kgs:    kubectl get svc {params}
+kgi:    kubectl get ing {params}
+kgj:    kubectl get jobs {params}
+kgcm:   kubectl get configmaps {params}
+kl:     kubectl logs {params}
+kgd:    kubectl get deployment {params}
+kdp:    kubectl describe pod {params}
+kdd:    kubectl describe deployment {params}
+kds:    kubectl describe service {params}
+kdi:    kubectl describe ingress {params}
+kdj:    kubectl describe job {params}
+kgn:    kubectl get namespaces
+kgss:   kubectl get statefulset {params}
+kdss:   kubectl describe statefulset {params}
+ktp:    kubectl top pod {params}
+ktn:    kubectl top node {params}
+kgm:    kubectl get deployments,po,svc,ing,jobs
+klcon:  kubectl config get-contexts
+kcon:   kubectl config use-context {params}
+krew:   kubectl krew {params}
+ktop:   kubectl ktop
+kbash:  kubectl exec -it {podname} -- bash
+kexec:  kubectl exec -it {podname} -- {command...}
+
+#######################################
+EOF
+'
+alias kh='k8s_shorts'
+alias k8s='k8s_shorts'
+alias k='kubectl'
+alias kns='kubens'
+alias kgp='kubectl get pods'
+alias kgs='kubectl get svc'
+alias kgi='kubectl get ingress'
+alias kgj='kubectl get jobs'
+alias kgd='kubectl get deployment'
+alias kgcm='kubectl get configmaps'
+alias kl='kubectl logs'
+alias kdp='kubectl describe pod'
+alias kdd='kubectl describe deployment'
+alias kds='kubectl describe service'
+alias kdi='kubectl describe ingress'
+alias kdj='kubectl describe job'
+alias kgn='kubectl get namespaces'
+alias kgss='kubectl get statefulset'
+alias kdss='kubectl describe statefulset'
+alias ktp='kubectl top pod'
+alias ktn='kubectl top node'
+alias kgm='kubectl get deployments,po,svc,ing,jobs'
+alias klcon='kubectl config get-contexts'
+alias kcon='kubectl config use-context'
+alias krew='kubectl krew'
+alias ktop='kubectl ktop'
+kexec() { local pod="$1"; shift; kubectl exec -it "$pod" -- "$@"; }
+kbash() { kexec "$1" bash; }
+
+#
+# git aliases
+#
+alias git_shorts='cat << EOF
+#######################################
+[GIT SHORTCUTS]
+
+gpr:    git pull --rebase=true
+gp:     git pull
+gu:     git push # "git up"
+gs:     git status
+ga:     git add
+gc:     git commit
+gac:    git commit -a -m {message}
+gd:     git diff
+gb:     git branch
+gco:    git checkout
+gl:     git log --oneline -20
+
+#######################################
+EOF
+'
+alias git_help='git_shorts'
+alias gpr='git pull --rebase=true'
+alias gp='git pull'
+alias gu='git push'
+alias gs='git status'
+alias ga='git add'
+alias gc='git commit'
+alias gac='git commit -a -m'
+alias gd='git diff'
+alias gb='git branch'
+alias gco='git checkout'
+alias gl='git log --oneline -20'

@@ -1,0 +1,20 @@
+#
+# Load shell utilities
+# Auto-sources all shell config files in this directory.
+# Skips: the loader itself, standalone scripts (.sh), and non-shell files (.py).
+#
+SHELL_UTILS_DIR="${BASH_SOURCE[0]:-${(%):-%x}}"
+SHELL_UTILS_DIR="$(cd "$(dirname "$SHELL_UTILS_DIR")" && pwd)"
+
+for _su_file in "$SHELL_UTILS_DIR"/*; do
+  [ -f "$_su_file" ] || continue
+  case "$_su_file" in
+    */loader) continue ;;
+    *.sh)     continue ;;
+    *.py)     continue ;;
+  esac
+  source "$_su_file"
+done
+
+unset _su_file SHELL_UTILS_DIR
+

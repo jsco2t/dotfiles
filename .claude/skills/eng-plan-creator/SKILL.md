@@ -1,12 +1,12 @@
 ---
-name: feature-research
-description: Perform in-depth research on a feature using Jira, Confluence, and codebase analysis. Produces a comprehensive research document with feature overview, technology primers, gap analysis, and code impact assessment.
+name: eng-plan-creator
+description: Perform in-depth research on a feature using Jira, Confluence, and codebase analysis. Produces a comprehensive engineering/development implementation plan with feature overview, technology primers, gap analysis, code impact assessment, and high-level implementation plan
 argument-hint: "<feature description or Jira/Confluence URLs>"
 ---
 
-# Feature Research Skill
+# Engineering Plan Creator Skill
 
-You are conducting in-depth feature research. Your goal is to produce a comprehensive research document that will serve as the foundation for implementation planning.
+Your goal is to produce a comprehensive engineering research and implementation plan that will serve as the foundation for in-depth (task level) planning. This document is one part feature research and one part high-level specification.
 
 ## Input
 
@@ -19,6 +19,7 @@ $ARGUMENTS
 ### Step 1: Extract and Identify Resources
 
 First, identify all resources provided:
+
 - **Jira Issues**: Look for URLs like `https://*.atlassian.net/browse/*` or issue keys like `PROJ-123`
 - **Confluence Pages**: Look for URLs like `https://*.atlassian.net/wiki/*`
 - **Feature Description**: Any plain text describing the feature
@@ -28,29 +29,34 @@ First, identify all resources provided:
 If Jira or Confluence links are present, use the Atlassian MCP tools to gather comprehensive information:
 
 **For Jira Issues:**
+
 - Use `mcp__plugin_atlassian_atlassian__getJiraIssue` to fetch issue details
 - Use `mcp__plugin_atlassian_atlassian__getJiraIssueRemoteIssueLinks` to find linked Confluence pages
 - Look at linked issues, subtasks, and epic relationships
 - Review comments for additional context and decisions
 
 **For Confluence Pages:**
+
 - Use `mcp__plugin_atlassian_atlassian__getConfluencePage` to fetch page content
 - Use `mcp__plugin_atlassian_atlassian__getConfluencePageDescendants` for child pages
 - Check for linked requirements, design docs, or technical specifications
 
 **For Discovery:**
+
 - Use `mcp__plugin_atlassian_atlassian__search` to find related documentation
 - Search for related issues, decisions, and historical context
 
 ### Step 3: Analyze the Codebase
 
 Study the existing codebase to understand:
+
 - Current architecture and patterns in use
 - Existing implementations of similar features
 - Code areas that will likely need modification
 - Dependencies and integrations that may be affected
 
 Use the Explore agent or direct file searches to:
+
 - Find relevant source files
 - Understand existing patterns and conventions
 - Identify integration points
@@ -59,9 +65,18 @@ Use the Explore agent or direct file searches to:
 ### Step 4: Research Technologies
 
 For any technologies critical to the feature:
+
 - Use WebSearch to gather current documentation and best practices
 - Use Context7 MCP tools to fetch library documentation if applicable
 - Summarize key concepts the team needs to understand
+
+### Step 5: High-level Engineering Plan
+
+Develop a road-map for implementing the feature:
+
+- High level objectives and requirements
+- Overview of code level changes that need to happen
+- Clarify any gaps or blocking issues which prevent implementation
 
 ## Output Document Structure
 
@@ -70,7 +85,7 @@ Ask the user where to save the research document if no path was specified in the
 Create a comprehensive markdown document with the following structure:
 
 ```markdown
-# Feature Research: [Feature Name]
+# Engineering Specification: [Feature Name]
 
 **Research Date:** [Date]
 **Source Issues:** [List of Jira issues researched]
@@ -80,22 +95,26 @@ Create a comprehensive markdown document with the following structure:
 
 ## Executive Summary
 
-[2-3 paragraph summary of the feature, its purpose, and key findings]
+[2-3 paragraph summary of the feature, its purpose, key findings, and implementation roadmap]
 
 ---
 
 ## 1. Feature Overview
 
 ### 1.1 Goals and Objectives
+
 [What the feature aims to accomplish]
 
 ### 1.2 User Stories / Requirements
+
 [Key requirements extracted from Jira/Confluence]
 
 ### 1.3 Acceptance Criteria
+
 [Specific criteria that define "done"]
 
 ### 1.4 Delivery Requirements
+
 [Timeline, milestones, dependencies on other work]
 
 ---
@@ -103,12 +122,15 @@ Create a comprehensive markdown document with the following structure:
 ## 2. Technical Context
 
 ### 2.1 Technologies Involved
+
 [List of technologies, frameworks, protocols this feature requires]
 
 ### 2.2 Architecture Considerations
+
 [How this fits into the existing system architecture]
 
 ### 2.3 Integration Points
+
 [External systems, APIs, or services this will interact with]
 
 ---
@@ -122,14 +144,17 @@ Create a comprehensive markdown document with the following structure:
 **What it is:** [Brief description]
 
 **Key Concepts:**
+
 - [Concept 1]
 - [Concept 2]
 
 **Relevant Features for This Implementation:**
+
 - [Feature 1 and why it matters]
 - [Feature 2 and why it matters]
 
 **Resources:**
+
 - [Link to official documentation]
 - [Link to relevant guides]
 
@@ -141,10 +166,10 @@ Create a comprehensive markdown document with the following structure:
 
 ### 4.1 Files Requiring Modification
 
-| File Path | Change Type | Description |
-|-----------|-------------|-------------|
-| `path/to/file.go` | Modify | [What needs to change] |
-| `path/to/new.go` | Create | [New file purpose] |
+| File Path         | Change Type | Description            |
+| ----------------- | ----------- | ---------------------- |
+| `path/to/file.go` | Modify      | [What needs to change] |
+| `path/to/new.go`  | Create      | [New file purpose]     |
 
 ### 4.2 Functions/Components Affected
 
@@ -152,12 +177,15 @@ Create a comprehensive markdown document with the following structure:
 - `ComponentName` - [What modifications are needed]
 
 ### 4.3 Database/Schema Changes
+
 [If applicable, describe any data model changes]
 
 ### 4.4 API Changes
+
 [If applicable, describe any API additions or modifications]
 
 ### 4.5 Testing Considerations
+
 [What types of tests will be needed]
 
 ---
@@ -166,8 +194,8 @@ Create a comprehensive markdown document with the following structure:
 
 ### 5.1 Missing Information
 
-| # | Gap | Impact | Suggested Resolution |
-|---|-----|--------|---------------------|
+| # | Gap              | Impact           | Suggested Resolution          |
+| - | ---------------- | ---------------- | ----------------------------- |
 | 1 | [What's missing] | [Why it matters] | [Who to ask or where to look] |
 
 ### 5.2 Open Questions
@@ -189,12 +217,15 @@ Create a comprehensive markdown document with the following structure:
 ## 6. Recommendations
 
 ### 6.1 Implementation Approach
+
 [High-level recommended approach]
 
 ### 6.2 Risk Areas
+
 [Potential challenges or areas of concern]
 
 ### 6.3 Suggested Next Steps
+
 1. [Step 1]
 2. [Step 2]
 3. [Step 3]
@@ -204,9 +235,11 @@ Create a comprehensive markdown document with the following structure:
 ## Appendix
 
 ### A. Raw Notes
+
 [Any additional notes or context gathered during research]
 
 ### B. Related Links
+
 [All URLs referenced during research]
 ```
 
@@ -225,6 +258,7 @@ If no output path is specified in the arguments, ask the user:
 "I've completed the feature research. Where would you like me to save the research document?
 
 Suggested locations based on this project:
+
 - `docs/research/[feature-name]-research.md`
 - `[feature-name]-research.md` (current directory)
 

@@ -1,12 +1,12 @@
 ---
-name: feature-design-researcher
-description: Design companion to /feature-research. Reviews feature research, performs architectural analysis with user input on design choices, produces a design document with rationale, and updates the original research docs upon approval.
+name: eng-design-creator
+description: Design companion to /eng-plan-creator. Reviews feature research, performs architectural analysis with user input on design choices, produces a design document with rationale, and updates the original research docs upon approval.
 argument-hint: "<path to feature research document>"
 ---
 
-# Feature Design Researcher Skill
+# Engineering Design Researcher Skill
 
-You are conducting in-depth architectural design research for a feature. Your goal is to bridge the gap between feature research (the "what") and task planning (the "when/who") by producing a comprehensive design document (the "how").
+You are conducting in-depth architectural design research for a feature. Your goal is to bridge the gap between a high level engineering implementation plan (the "what") and task planning (the "when/who") by producing a comprehensive design document (the "how").
 
 ## Input
 
@@ -35,6 +35,7 @@ First, identify the feature research document:
 - **If neither**: Ask the user for the path to the feature research document
 
 Read the document thoroughly. Extract:
+
 - Feature requirements and acceptance criteria
 - Technical context and architecture considerations
 - Codebase impact analysis (files, APIs, schemas)
@@ -42,6 +43,7 @@ Read the document thoroughly. Extract:
 - Any recommendations already made
 
 If the research document references Jira issues or Confluence pages, fetch them for additional context:
+
 - Use `mcp__plugin_atlassian_atlassian__getJiraIssue` for issue details
 - Use `mcp__plugin_atlassian_atlassian__getConfluencePage` for linked docs
 - Use `mcp__plugin_atlassian_atlassian__search` for related decisions or ADRs
@@ -51,27 +53,32 @@ If the research document references Jira issues or Confluence pages, fetch them 
 Go beyond the research document's codebase impact analysis. Study the existing codebase to understand:
 
 **Patterns in Use:**
+
 - Use the Explore agent or direct file searches to find existing patterns
 - Identify the dominant architectural patterns (repository pattern, service layers, event-driven, etc.)
 - Catalog how similar features have been implemented
 - Note which patterns are idiomatic and which are legacy
 
 **Interface Boundaries:**
+
 - Map existing interfaces that the new feature will interact with
 - Identify where new interfaces should be introduced for testability
 - Document how dependency injection is currently handled
 
 **Data Flow:**
+
 - Trace how data moves through the system for related features
 - Identify where the new feature plugs into existing data flows
 - Note serialization boundaries (protobuf, JSON, database)
 
 **Error Handling Patterns:**
+
 - How does the codebase handle errors today?
 - What error types and wrapping conventions are in use?
 - How are errors surfaced to users?
 
 **Configuration and Feature Flags:**
+
 - How is configuration managed for existing features?
 - Are there feature flag patterns to follow?
 
@@ -109,22 +116,26 @@ After gathering user input, incorporate their decisions into the design.
 The test strategy is a first-class part of the design, not an afterthought. Document:
 
 **Unit Test Approach:**
+
 - What are the key units to test?
 - What interfaces need mocks? (prefer standard Go testing constructs and testify)
 - What table-driven test patterns apply?
 - Where is embedded Postgres needed vs. mock data?
 
 **Integration Test Approach:**
+
 - What integration points need testing?
 - What test fixtures or environments are needed?
 - How do integration tests map to the Kind test environments?
 
 **Test Boundaries:**
+
 - What is tested at each layer?
 - Where do you test behavior vs. implementation?
 - What edge cases are critical to cover?
 
 **Test Infrastructure:**
+
 - Any new test helpers or utilities needed?
 - Shared test fixtures or factories?
 - Mock implementations to create?
@@ -144,6 +155,7 @@ After producing the design document, present a summary to the user and ask for a
 3. Ask explicitly: "Do you approve this design, or would you like changes?"
 
 Use the AskUserQuestion tool with options:
+
 - **Approved** - Design is accepted as-is
 - **Changes needed** - User wants modifications (ask for specifics)
 - **Major rework** - Fundamental approach needs reconsideration
@@ -170,17 +182,19 @@ Use the AskUserQuestion tool with options:
 **Status:** Approved
 
 ### Key Design Decisions
+
 - [Decision 1]: [Chosen approach]
 - [Decision 2]: [Chosen approach]
 - [Decision 3]: [Chosen approach]
 
 ### Test Strategy Summary
+
 [1-2 paragraph summary of the testing approach]
 ```
 
 ## Output Document Structure
 
-```markdown
+````markdown
 # Feature Design: [Feature Name]
 
 **Design Date:** [Date]
@@ -199,12 +213,15 @@ Use the AskUserQuestion tool with options:
 ## 1. Design Context
 
 ### 1.1 Requirements Summary
+
 [Brief recap of what the feature needs to do, extracted from research]
 
 ### 1.2 Constraints
+
 [Technical, business, or organizational constraints that bound the design space]
 
 ### 1.3 Existing Patterns
+
 [Summary of relevant patterns found in the codebase that this design should follow or extend]
 
 ---
@@ -212,6 +229,7 @@ Use the AskUserQuestion tool with options:
 ## 2. Architectural Design
 
 ### 2.1 High-Level Architecture
+
 [Describe the overall approach — how components fit together, data flows, key abstractions]
 
 [Include ASCII diagrams where they aid understanding]
@@ -219,31 +237,39 @@ Use the AskUserQuestion tool with options:
 ### 2.2 Component Design
 
 #### 2.2.1 [Component Name]
+
 **Responsibility:** [What this component does]
 **Package:** [Where it lives in the codebase]
 **Key Interfaces:**
+
 ```go
 // [Interface description]
 type [InterfaceName] interface {
     [Method signatures with comments]
 }
 ```
+````
 
 **Dependencies:**
+
 - [What it depends on and how those are injected]
 
 [Repeat for each significant component]
 
 ### 2.3 Data Model
+
 [Database schema changes, protobuf message definitions, or data structures]
 
 ### 2.4 API Design
+
 [New or modified API endpoints, gRPC services, or internal interfaces]
 
 ### 2.5 Error Handling
+
 [How errors are created, wrapped, propagated, and surfaced in this feature]
 
 ### 2.6 Configuration
+
 [New configuration options, defaults, and how they're loaded]
 
 ---
@@ -256,8 +282,8 @@ type [InterfaceName] interface {
 
 **Options Considered:**
 
-| Option | Pros | Cons | Complexity |
-|--------|------|------|------------|
+| Option    | Pros   | Cons   | Complexity   |
+| --------- | ------ | ------ | ------------ |
 | A: [Name] | [Pros] | [Cons] | Low/Med/High |
 | B: [Name] | [Pros] | [Cons] | Low/Med/High |
 
@@ -272,21 +298,25 @@ type [InterfaceName] interface {
 ## 4. Test Strategy
 
 ### 4.1 Test Philosophy
+
 [Overall approach to testing this feature]
 
 ### 4.2 Unit Tests
 
-| Component | Test Focus | Mock Dependencies | Approach |
-|-----------|-----------|-------------------|----------|
-| [Component] | [What to verify] | [What to mock] | [Table-driven / etc.] |
+| Component   | Test Focus       | Mock Dependencies | Approach              |
+| ----------- | ---------------- | ----------------- | --------------------- |
+| [Component] | [What to verify] | [What to mock]    | [Table-driven / etc.] |
 
 ### 4.3 Integration Tests
+
 [What integration scenarios to test and how]
 
 ### 4.4 Test Infrastructure
+
 [New test helpers, fixtures, or mock implementations needed]
 
 ### 4.5 Coverage Goals
+
 [Specific coverage targets or critical paths that must be covered]
 
 ---
@@ -305,11 +335,12 @@ type [InterfaceName] interface {
 
 ### 6.1 Technical Risks
 
-| Risk | Impact | Likelihood | Mitigation |
-|------|--------|------------|------------|
+| Risk   | Impact       | Likelihood   | Mitigation       |
+| ------ | ------------ | ------------ | ---------------- |
 | [Risk] | High/Med/Low | High/Med/Low | [How to address] |
 
 ### 6.2 Design Assumptions
+
 [Assumptions made during design that should be validated during implementation]
 
 ---
@@ -319,8 +350,8 @@ type [InterfaceName] interface {
 [Anything deferred or needing further investigation before implementation begins]
 
 1. [Item] - [Why it's open and what resolves it]
-```
 
+```
 ## Important Guidelines
 
 1. **Always trace back to research** - Every design decision should connect to a requirement or finding from the research document
@@ -329,3 +360,4 @@ type [InterfaceName] interface {
 4. **Respect existing patterns** - Unless there's a strong reason to deviate, follow the patterns already established in the codebase
 5. **Keep it buildable** - The design should be implementable in the current codebase without requiring major refactoring of unrelated code
 6. **Ask, don't assume** - When a design choice has real trade-offs, ask the user rather than making assumptions about their priorities
+```

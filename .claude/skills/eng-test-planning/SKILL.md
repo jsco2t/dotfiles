@@ -1,7 +1,7 @@
 ---
 name: feature-test-planning
-description: Analyze a feature research document and produce a detailed test plan section. Reviews the feature spec, studies existing test patterns in the codebase, and appends a test plan with specific test cases, rationale, and implementation guidance — written from the perspective of an expert test developer.
-argument-hint: "<path to feature research document>"
+description: Analyze an engineering implementation planning document and produce a detailed test plan section. Reviews the feature spec, studies existing test patterns in the codebase, and appends a test plan with specific test cases, rationale, and implementation guidance — written from the perspective of an expert test developer.
+argument-hint: "<path to engineering planning document>"
 ---
 
 # Feature Test Planning Skill
@@ -39,12 +39,14 @@ First, identify the feature research document:
 - **If neither**: Ask the user for the path to the feature research document
 
 Read the document thoroughly. Extract:
+
 - Feature requirements and acceptance criteria
 - Codebase impact analysis (files to create or modify)
 - Architecture considerations and integration points
 - Any existing testing considerations mentioned in the research or design documents
 
 Also check for companion documents in the same directory:
+
 - `<feature-name>-design.md` — may contain a test strategy to build upon
 - `<feature-name>-tasks.md` — may inform which components need tests
 
@@ -53,11 +55,13 @@ Also check for companion documents in the same directory:
 Before proposing any test cases, study how the codebase currently tests similar functionality:
 
 **Test Organization:**
+
 - Use the Explore agent or direct file searches to find existing test files related to the feature area
 - Identify the project's test file naming conventions (`*_test.go` placement, test helper locations)
 - Note how test packages are structured (same package vs. `_test` package)
 
 **Test Patterns in Use:**
+
 - Look for table-driven test patterns and how they're structured
 - Identify which assertion libraries are used (standard `testing`, `testify/assert`, `testify/require`, `testify/suite`)
 - Check for test helper functions, fixtures, and factories
@@ -66,6 +70,7 @@ Before proposing any test cases, study how the codebase currently tests similar 
 - Identify any shared test utilities in `internal/pkg/` or `core/`
 
 **Test Infrastructure:**
+
 - Find existing test helpers that your tests should reuse
 - Identify test fixtures or seed data patterns
 - Note how tests handle configuration and environment
@@ -82,6 +87,7 @@ For each requirement or acceptance criterion from the feature spec, identify:
 4. **The value justification** — Why does this test need to exist? What does it protect against?
 
 Apply your guiding principles aggressively here:
+
 - If a behavior is already covered by existing tests, note it and move on
 - If a behavior can be verified by a unit test, do not propose an integration test
 - If a test would be inherently flaky (timing-dependent, network-dependent), design around the flakiness or exclude it with an explanation
@@ -91,6 +97,7 @@ Apply your guiding principles aggressively here:
 For each testable behavior, design concrete test cases:
 
 **For Unit Tests:**
+
 - Identify the function or method under test
 - Define inputs, expected outputs, and error conditions
 - Design table-driven test cases where multiple scenarios apply
@@ -98,12 +105,14 @@ For each testable behavior, design concrete test cases:
 - Include edge cases and boundary conditions, but only meaningful ones
 
 **For Integration Tests:**
+
 - Justify why unit tests are insufficient for this behavior
 - Define the scope of integration (which real components, which mocked)
 - Specify setup and teardown requirements
 - Design for reliability — no timing dependencies, no external service calls
 
 **For Each Test Case, Document:**
+
 - A clear, descriptive name following Go conventions (`TestComponentName_MethodName_Scenario`)
 - What it verifies and why that matters (the value justification)
 - Input conditions and expected outcomes
@@ -123,6 +132,7 @@ Only propose new infrastructure when it serves multiple tests. A helper used by 
 ### Step 6: Assess Risks and Gaps
 
 Identify:
+
 - **Untestable areas** — Parts of the feature that are difficult to test and why. Propose design changes if they would make testing feasible.
 - **Reliability risks** — Any proposed tests that might be flaky and how to mitigate
 - **Coverage gaps** — Behaviors that should be tested but can't be with current patterns, and what would need to change
@@ -130,13 +140,13 @@ Identify:
 
 ## Output
 
-Append the test plan to the bottom of the feature research document as a new top-level section. If the document already has numbered sections (e.g., Sections 1-6), number this section as the next in sequence.
+Append the test plan to the bottom of the engineering implementation planning document as a new top-level section. If the document already has numbered sections (e.g., Sections 1-6), number this section as the next in sequence.
 
-**Before writing**, read the current state of the research document to determine the correct section number and ensure you're appending to the latest version.
+**Before writing**, read the current state of the planning document to determine the correct section number and ensure you're appending to the latest version.
 
 Use this structure:
 
-```markdown
+````markdown
 ---
 
 ## [N]. Test Plan
@@ -165,16 +175,18 @@ Tests are grouped by component. Each test case includes its value justification.
 **File:** `path/to/component_test.go`
 **Component Under Test:** `package.ComponentName`
 
-| Test Name | Verifies | Value Justification | Approach |
-|-----------|----------|---------------------|----------|
-| `TestComponentName_Method_HappyPath` | [What behavior] | [Why this test matters] | [Table-driven / direct / etc.] |
-| `TestComponentName_Method_InvalidInput` | [What behavior] | [Why this test matters] | [Approach] |
-| `TestComponentName_Method_EdgeCase` | [What behavior] | [Why this test matters] | [Approach] |
+| Test Name                               | Verifies        | Value Justification     | Approach                       |
+| --------------------------------------- | --------------- | ----------------------- | ------------------------------ |
+| `TestComponentName_Method_HappyPath`    | [What behavior] | [Why this test matters] | [Table-driven / direct / etc.] |
+| `TestComponentName_Method_InvalidInput` | [What behavior] | [Why this test matters] | [Approach]                     |
+| `TestComponentName_Method_EdgeCase`     | [What behavior] | [Why this test matters] | [Approach]                     |
 
 **Mock Dependencies:**
+
 - `InterfaceName` — [What it mocks and why mocking is appropriate here]
 
 **Table-Driven Test Design** (where applicable):
+
 ```go
 // Example structure — not implementation, just the shape
 tests := []struct {
@@ -186,6 +198,7 @@ tests := []struct {
     // [Describe the categories of test cases]
 }
 ```
+````
 
 **Setup/Teardown Notes:**
 [Any special considerations for test lifecycle]
@@ -204,8 +217,8 @@ Only tests where unit testing is insufficient. Each entry justifies why integrat
 **Scope:** [Which real components are involved, which are mocked]
 **File:** `path/to/integration_test.go`
 
-| Test Name | Verifies | Value Justification | Setup Requirements |
-|-----------|----------|---------------------|--------------------|
+| Test Name                  | Verifies        | Value Justification     | Setup Requirements              |
+| -------------------------- | --------------- | ----------------------- | ------------------------------- |
 | `TestIntegration_Scenario` | [What behavior] | [Why this test matters] | [What infrastructure is needed] |
 
 **Cleanup Requirements:**
@@ -219,21 +232,21 @@ Only tests where unit testing is insufficient. Each entry justifies why integrat
 
 #### New Mock Implementations
 
-| Interface | Package | Used By Tests | Exists Today? |
-|-----------|---------|---------------|---------------|
-| `InterfaceName` | `package/path` | [Which tests] | No — create |
-| `OtherInterface` | `package/path` | [Which tests] | Yes — reuse |
+| Interface        | Package        | Used By Tests | Exists Today? |
+| ---------------- | -------------- | ------------- | ------------- |
+| `InterfaceName`  | `package/path` | [Which tests] | No — create   |
+| `OtherInterface` | `package/path` | [Which tests] | Yes — reuse   |
 
 #### New Test Helpers
 
-| Helper | Purpose | Used By | Justification |
-|--------|---------|---------|---------------|
+| Helper         | Purpose        | Used By       | Justification              |
+| -------------- | -------------- | ------------- | -------------------------- |
 | `helperName()` | [What it does] | [Which tests] | [Why a helper, not inline] |
 
 #### Test Fixtures
 
-| Fixture | Description | Used By |
-|---------|-------------|---------|
+| Fixture        | Description                  | Used By       |
+| -------------- | ---------------------------- | ------------- |
 | [Fixture name] | [What test data it provides] | [Which tests] |
 
 ---
@@ -242,11 +255,11 @@ Only tests where unit testing is insufficient. Each entry justifies why integrat
 
 [List behaviors or components where you consciously decided NOT to write tests, and why. This is as important as the tests themselves.]
 
-| Behavior / Component | Reason Not Tested |
-|----------------------|-------------------|
-| [Behavior] | [e.g., "Already covered by existing tests in X"] |
-| [Behavior] | [e.g., "Pure boilerplate with no meaningful logic to verify"] |
-| [Behavior] | [e.g., "Would require flaky timing-dependent assertions — not worth the maintenance cost"] |
+| Behavior / Component | Reason Not Tested                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------ |
+| [Behavior]           | [e.g., "Already covered by existing tests in X"]                                           |
+| [Behavior]           | [e.g., "Pure boilerplate with no meaningful logic to verify"]                              |
+| [Behavior]           | [e.g., "Would require flaky timing-dependent assertions — not worth the maintenance cost"] |
 
 ---
 
@@ -265,8 +278,8 @@ Only tests where unit testing is insufficient. Each entry justifies why integrat
 [Test-related questions that need answers before implementation]
 
 1. **[Question]** — Affects: [Which test cases]. [Why it matters for testing.]
-```
 
+```
 ## Important Guidelines
 
 1. **Consistency with the codebase** — Your test cases must follow the patterns already established in the project. Do not introduce new test frameworks, assertion styles, or patterns without explicit justification.
@@ -282,3 +295,4 @@ Only tests where unit testing is insufficient. Each entry justifies why integrat
 6. **Name tests clearly** — Test names should read as specifications: `TestProvisioner_SelectForWorkflow_ReturnsErrorWhenNoMatchingDriver` tells you exactly what's being verified.
 
 7. **Design for maintenance** — Every test you propose will need to be maintained for years. Avoid coupling tests to implementation details that change frequently.
+```

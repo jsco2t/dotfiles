@@ -1,12 +1,12 @@
 ---
-name: feature-task-planning
-description: Create an implementation task plan from a feature research document. Reviews research docs, Jira/Confluence, and source code to produce an ordered list of tasks (epic structure) with time estimates and parallel work optimization.
+name: eng-task-planning
+description: Create an implementation task plan from a high level engineering plan (created by /eng-plan-creator) as well as an engineering design/architecture document (created by /eng-design-creator). Reviews research docs, Jira/Confluence, and source code to produce an ordered list of tasks (epic structure) with time estimates and parallel work optimization.
 argument-hint: "<path to feature research document or Jira/Confluence URLs>"
 ---
 
-# Feature Task Planning Skill
+# Engineering Task Planning Skill
 
-You are a technical project planner. Your goal is to transform feature research into a structured, actionable task plan that enables efficient parallel implementation by a team of 3 or more developers.
+You are a technical project planner. Your goal is to transform engineering specification and design research into a structured, actionable task plan that enables efficient parallel implementation by a team of 3 or more developers.
 
 ## Input
 
@@ -25,6 +25,7 @@ First, identify the feature research document:
 - **If neither**: Ask the user for the path to the feature research document
 
 The research document should contain:
+
 - Feature overview and requirements
 - Technical context and architecture considerations
 - Codebase impact analysis
@@ -35,12 +36,14 @@ The research document should contain:
 If Jira or Confluence links are referenced in the research document or provided by the user:
 
 **For Jira Issues:**
+
 - Use `mcp__plugin_atlassian_atlassian__getJiraIssue` to fetch current issue state
 - Check for any new comments or updates since research was conducted
 - Look for linked subtasks or child issues that may already exist
 - Review acceptance criteria for task breakdown guidance
 
 **For Confluence Pages:**
+
 - Use `mcp__plugin_atlassian_atlassian__getConfluencePage` to check for spec updates
 - Look for any design documents or architecture decisions made after research
 
@@ -54,6 +57,7 @@ Study the codebase to identify natural task boundaries:
 - **Test coverage**: Testing work that can be parallelized
 
 Use the codebase impact analysis from the research document, then verify:
+
 - Files still exist and haven't significantly changed
 - Proposed changes are still valid
 - Any new dependencies or constraints have emerged
@@ -63,17 +67,20 @@ Use the codebase impact analysis from the research document, then verify:
 Create tasks following these principles:
 
 **Size Constraints:**
+
 - Maximum 3 days of work per task for a human developer
 - Minimum 0.5 days (smaller work should be combined)
 - Estimate in 0.5 day increments: 0.5, 1.0, 1.5, 2.0, 2.5, 3.0 days
 
 **Parallel Work Optimization:**
+
 - Identify which tasks have no dependencies and can start immediately
 - Group tasks into "phases" or "swim lanes" for parallel execution
 - Design interface contracts early so downstream tasks can begin
 - Separate infrastructure/setup tasks that unblock others
 
 **Task Decomposition Strategy:**
+
 1. **Foundation tasks**: Schema changes, API contracts, shared utilities
 2. **Core implementation**: Primary business logic, split by module/component
 3. **Integration tasks**: Connecting components, end-to-end flows
@@ -82,6 +89,7 @@ Create tasks following these principles:
 ### Step 5: Identify Dependencies and Parallel Opportunities
 
 For each task, explicitly identify:
+
 - **Blocks**: What must complete before this task can start
 - **Blocked by**: What tasks are waiting on this one
 - **Parallel with**: What can be worked on simultaneously
@@ -120,6 +128,7 @@ Create a markdown document with the following structure:
 
 **Description:** [Brief description matching Jira epic format]
 **Acceptance Criteria:**
+
 - [ ] [Criterion 1 from research]
 - [ ] [Criterion 2 from research]
 
@@ -130,38 +139,42 @@ Create a markdown document with the following structure:
 Tasks are organized into phases. Within each phase, tasks can be worked on in parallel unless explicitly marked with dependencies.
 
 ### Phase 1: Foundation
-*Tasks that must complete before core implementation can begin*
 
-| Task ID | Task Name | Estimate | Dependencies | Parallel Group |
-|---------|-----------|----------|--------------|----------------|
-| T1.1 | [Task name] | X.X days | None | A |
-| T1.2 | [Task name] | X.X days | None | A |
-| T1.3 | [Task name] | X.X days | T1.1 | B |
+_Tasks that must complete before core implementation can begin_
+
+| Task ID | Task Name   | Estimate | Dependencies | Parallel Group |
+| ------- | ----------- | -------- | ------------ | -------------- |
+| T1.1    | [Task name] | X.X days | None         | A              |
+| T1.2    | [Task name] | X.X days | None         | A              |
+| T1.3    | [Task name] | X.X days | T1.1         | B              |
 
 ### Phase 2: Core Implementation
-*Primary feature implementation, parallelized by component*
 
-| Task ID | Task Name | Estimate | Dependencies | Parallel Group |
-|---------|-----------|----------|--------------|----------------|
-| T2.1 | [Task name] | X.X days | T1.* | A |
-| T2.2 | [Task name] | X.X days | T1.* | A |
-| T2.3 | [Task name] | X.X days | T1.* | B |
+_Primary feature implementation, parallelized by component_
+
+| Task ID | Task Name   | Estimate | Dependencies | Parallel Group |
+| ------- | ----------- | -------- | ------------ | -------------- |
+| T2.1    | [Task name] | X.X days | T1.*         | A              |
+| T2.2    | [Task name] | X.X days | T1.*         | A              |
+| T2.3    | [Task name] | X.X days | T1.*         | B              |
 
 ### Phase 3: Integration
-*Connecting components and end-to-end functionality*
 
-| Task ID | Task Name | Estimate | Dependencies | Parallel Group |
-|---------|-----------|----------|--------------|----------------|
-| T3.1 | [Task name] | X.X days | T2.1, T2.2 | A |
-| T3.2 | [Task name] | X.X days | T2.3 | A |
+_Connecting components and end-to-end functionality_
+
+| Task ID | Task Name   | Estimate | Dependencies | Parallel Group |
+| ------- | ----------- | -------- | ------------ | -------------- |
+| T3.1    | [Task name] | X.X days | T2.1, T2.2   | A              |
+| T3.2    | [Task name] | X.X days | T2.3         | A              |
 
 ### Phase 4: Quality & Finalization
-*Testing, documentation, and release preparation*
 
-| Task ID | Task Name | Estimate | Dependencies | Parallel Group |
-|---------|-----------|----------|--------------|----------------|
-| T4.1 | [Task name] | X.X days | T3.* | A |
-| T4.2 | [Task name] | X.X days | T3.* | A |
+_Testing, documentation, and release preparation_
+
+| Task ID | Task Name   | Estimate | Dependencies | Parallel Group |
+| ------- | ----------- | -------- | ------------ | -------------- |
+| T4.1    | [Task name] | X.X days | T3.*         | A              |
+| T4.2    | [Task name] | X.X days | T3.*         | A              |
 
 ---
 
@@ -178,10 +191,12 @@ Tasks are organized into phases. Within each phase, tasks can be worked on in pa
 [2-3 sentences describing what needs to be done]
 
 **Acceptance Criteria:**
+
 - [ ] [Specific, testable criterion]
 - [ ] [Specific, testable criterion]
 
 **Files Likely Affected:**
+
 - `path/to/file.go` - [What changes]
 - `path/to/other.go` - [What changes]
 
@@ -195,14 +210,14 @@ Tasks are organized into phases. Within each phase, tasks can be worked on in pa
 ---
 
 ## Parallel Work Visualization
-
 ```
-Week 1                    Week 2                    Week 3
+
+Week 1 Week 2 Week 3
 ├─ Dev A: T1.1 ──► T2.1 ──────────► T3.1 ──► T4.1
 ├─ Dev B: T1.2 ──► T2.2 ──────────► T3.1 ──► T4.2
 └─ Dev C: T1.3 ────────► T2.3 ────► T3.2 ──►
-```
 
+```
 *Arrows indicate task flow. Vertical alignment shows parallel work.*
 
 ---
@@ -257,7 +272,6 @@ If importing to Jira, use this CSV-compatible format:
 |---------|------------|-----------------|------------|--------|
 | [Task name] | Task | X.X | - | phase-1, parallel-a |
 | [Task name] | Task | X.X | T1.1 | phase-2, parallel-a |
-
 ```
 
 ## Important Guidelines
@@ -281,6 +295,7 @@ When estimating tasks, consider:
 - **3.0 days**: Maximum scope (complex feature, multiple integration points)
 
 Include buffer for:
+
 - Code review iterations
 - Unexpected dependencies discovered during implementation
 - Testing and debugging

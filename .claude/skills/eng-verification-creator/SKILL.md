@@ -121,11 +121,30 @@ Use the Explore agent or direct file searches to understand:
 - What CLI commands exist for the feature (command hierarchy, flags, output formats)
 - What APIs are involved (gRPC services, REST endpoints)
 - What configuration is needed (YAML files, environment variables, contexts)
-- What existing testdata or examples exist in the repo that tests can reference
 - How authentication and authorization work for the feature
 - What the compose environment provides (services, ports, default credentials)
 
 This context is essential for writing accurate, copy-pasteable commands.
+
+#### Step 2.2a: Enumerate Existing Testdata (Required)
+
+**Before proposing any new test fixtures, you MUST inventory what already exists in the tree.** The goal is to keep the number of checked-in test files from exploding — reuse first, extend second, create new only as a last resort.
+
+1. Search relevant testdata directories for existing fixtures:
+   - `apps/fuzzball/testdata/` (and any feature-specific subdirectories like `storage/v4/`)
+   - Any `testdata/` directories within packages touched by the feature
+   - Example YAMLs referenced in existing verification suites
+
+2. For every fixture found, record: path, what it exercises, and which spec requirement(s) it could cover.
+
+3. When planning each test case, apply this decision order:
+   1. **Reuse** — use an existing fixture unchanged (preferred)
+   2. **Extend** — add a field/variant to an existing fixture if the change doesn't break other tests
+   3. **Create new** — only when no existing fixture fits; justify in the test's Background section
+
+4. Reference reused fixtures via a `$TESTDATA` env var defined in the setup doc, not hardcoded paths.
+
+If a new fixture is unavoidable, co-locate it under `apps/fuzzball/testdata/` (not in the verification doc folder) so it's discoverable for future verification suites and unit tests.
 
 #### Step 2.3: Design Test ID Convention
 
@@ -325,7 +344,22 @@ Before presenting the final output, verify:
 
 If any gaps exist, either add tests or document why the requirement cannot be verified.
 
-#### Step 4.2: Present Summary to User
+#### Step 4.2: Update Parent Index (if present)
+
+If the output directory sits inside a `/new-eng-feature`-style documentation tree, the parent scaffold will contain an `index.md` that must stay in sync with what you just wrote. Check for and update these:
+
+1. **`<output-directory>/index.md`** (the verifications folder index) — if it exists, refresh it to list:
+   - `README.md` (the suite overview you just wrote)
+   - Every environment folder and its documents, with short descriptions
+   - A `Last Updated:` timestamp
+
+2. **`<output-directory>/../index.md`** (the feature root index) — if it exists and has a row for verifications, update that row's status/link if needed. Do not rewrite unrelated rows.
+
+If neither index exists, the skill was invoked standalone outside the orchestrator — skip this step and note it in the final summary so the user knows no parent indexes were touched.
+
+**When the orchestrator (`/new-eng-feature` or `/eng-feature-followup`) invokes this skill, it performs its own post-skill index reconciliation. Do not duplicate that work — a simple refresh of `<output-directory>/index.md` is sufficient; the orchestrator will handle the root.**
+
+#### Step 4.3: Present Summary to User
 
 After writing all documents, present:
 
@@ -367,7 +401,7 @@ Before completing, verify every document against this checklist:
 
 6. **Keep documents self-contained within their environment** — A tester running only the compose suite should never need to reference a Kind doc. Cross-references within an environment folder are fine.
 
-7. **Use testdata from the repo when it exists** — Check `apps/fuzzball/testdata/` and similar directories for existing test fixtures. Reference them with `$TESTDATA` env var rather than creating duplicate files.
+7. **Reuse checked-in testdata — don't grow the tree** — Phase 2.2a enumeration is required. Prefer existing fixtures (reuse → extend → create new, in that order). New fixtures go under `apps/fuzzball/testdata/` so they're discoverable for future verification suites and unit tests, never inside the verification doc folder. Reference fixtures via `$TESTDATA`, not hardcoded paths.
 
 8. **Version-specific behaviors need version-specific tests** — If the feature involves v1→v4 migration, test both v1 input and v4 output. If it involves API versioning, test both versions.
 ```

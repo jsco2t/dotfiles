@@ -152,4 +152,4 @@ alias gl='git log --oneline -20'
 #
 # Claude aliases
 #
-alias cld = 'claude --effort xhigh --thinking-display summarized'
+alias cld='claude --effort xhigh --thinking-display summarized'

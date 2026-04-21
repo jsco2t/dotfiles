@@ -1,7 +1,7 @@
 ---
 name: task-processor
 description: "Execute a task from a task plan with full context loading, auto-planned implementation, and structured completion criteria (code review, test review, lint, build, test, task tracking updates). Takes paths to feature research, design doc, task index, and specific task document."
-argument-hint: "<research-path> <design-path> <task-index-path> <task-path>"
+argument-hint: "<research-path> <design-path> <task-index-path> <task-path>|<index-file> <task-doc-filename>"
 ---
 
 # Task Processor Skill
@@ -17,6 +17,7 @@ $ARGUMENTS
 ## Phase 1: Resolve Inputs
 
 You need four document paths. Parse them from the arguments above, or prompt the user for any that are missing.
+You support an alternate input structure of `index-file` and `task-doc-filename`. When these two inputs are provided you are to use the index file to build a map of the core project files. The index file (and the child locations it points to) will let you discover the engineering specification / research document, the design document, the task files...etc.
 
 ### Required Documents
 

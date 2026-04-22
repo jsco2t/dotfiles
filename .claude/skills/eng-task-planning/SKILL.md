@@ -22,9 +22,10 @@ First, identify the feature research document:
 
 - **If a file path is provided**: Read the research document directly
 - **If a Jira/Confluence URL is provided**: Search for associated research documents in the same directory structure or linked from the issue
-- **If neither**: Ask the user for the path to the feature research document
+- **If an `index file` path is provided** use that to discover where the implementation plan/research doc lives as well as where the task documents live.
+- **If none of the above**: Ask the user for the path to the feature research document/implementation plan document
 
-The research document should contain:
+The implementation plan/research document should contain:
 
 - Feature overview and requirements
 - Technical context and architecture considerations
@@ -282,6 +283,8 @@ If importing to Jira, use this CSV-compatible format:
 4. **Be conservative with estimates** - Include time for code review, testing, and iteration
 5. **Include testing in estimates** - Unit tests are part of the task, not separate work
 6. **Consider the critical path** - Identify and call out tasks that determine the minimum timeline
+7. **If an index file exists** - You **MUST** update it with your new task document
+8. **If a task-overview document exists** - You **MUST** update it with your new task document
 
 ## Estimation Guidelines
 

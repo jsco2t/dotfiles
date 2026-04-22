@@ -36,7 +36,8 @@ First, identify the feature research document:
 
 - **If a file path is provided**: Read the research document directly
 - **If a Jira/Confluence URL is provided**: Search for associated research documents
-- **If neither**: Ask the user for the path to the feature research document
+- **If an `index file` path is provided**: use that to discover where the implementation plan/research doc lives as well as where the task documents live.
+- **If none of the above**: Ask the user for the path to the feature research/implementation plan document
 
 Read the document thoroughly. Extract:
 

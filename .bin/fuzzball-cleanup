@@ -1,0 +1,719 @@
+#!/usr/bin/env python3
+"""fuzzball-cleanup — Reclaim disk space from Fuzzball build environment.
+
+Safety tiers:
+  safe       — Stale caches and duplicates. Near-zero rebuild cost.
+  moderate   — Docker state, legacy artifacts. Some rebuild time.
+  aggressive — Full cache wipes, cross-platform artifacts. Slow next build.
+
+Examples:
+    fuzzball-cleanup                              # Scan and report
+    fuzzball-cleanup --clean                      # Dry-run safe cleanup
+    fuzzball-cleanup --clean --execute            # Execute safe cleanup
+    fuzzball-cleanup --clean --level moderate     # Include moderate items
+    fuzzball-cleanup --docker-volumes             # Detailed volume analysis
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+LEVELS = ("safe", "moderate", "aggressive")
+DEFAULT_STALE_DAYS = 14
+
+# ─── ANSI ─────────────────────────────────────────────────────────────────────
+
+_no_color = not sys.stdout.isatty() or os.environ.get("NO_COLOR")
+
+
+def _c(code, text):
+    return text if _no_color else f"\033[{code}m{text}\033[0m"
+
+
+def bold(t):
+    return _c("1", t)
+
+
+def red(t):
+    return _c("91", t)
+
+
+def green(t):
+    return _c("92", t)
+
+
+def yellow(t):
+    return _c("93", t)
+
+
+def dim(t):
+    return _c("2", t)
+
+
+def human(nbytes):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(nbytes) < 1024:
+            if unit in ("B", "KB"):
+                return f"{int(nbytes)} {unit}"
+            return f"{nbytes:.1f} {unit}"
+        nbytes /= 1024
+    return f"{nbytes:.1f} PB"
+
+
+# ─── Shell helpers ────────────────────────────────────────────────────────────
+
+
+def run(cmd, timeout=30):
+    try:
+        r = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=timeout
+        )
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+
+
+def dir_size(path):
+    out = run(f"du -sb '{path}' 2>/dev/null", timeout=60)
+    return int(out.split()[0]) if out else 0
+
+
+# ─── Path detection ──────────────────────────────────────────────────────────
+
+
+def find_repo():
+    for p in [
+        Path(os.environ.get("FUZZBALL_ROOT", "")),
+        Path.home() / "Developer/sources/work/fuzzball",
+        Path.cwd(),
+    ]:
+        if p.is_dir() and (p / "fuzzy/config").is_dir():
+            return p
+    root = run("git rev-parse --show-toplevel")
+    if root and (Path(root) / "fuzzy/config").is_dir():
+        return Path(root)
+    return None
+
+
+def go_cache_dir():
+    d = run("go env GOCACHE")
+    return Path(d) if d else Path.home() / ".cache/go-build"
+
+
+# ─── Scanners ─────────────────────────────────────────────────────────────────
+
+
+def scan_go_cache_stale(cache_dir, days):
+    total = dir_size(cache_dir)
+    if total == 0:
+        return 0, 0
+    out = run(
+        f"find '{cache_dir}' -mindepth 2 -type f -mtime +{days}"
+        f" -printf '%s\\n' | awk '{{s+=$1}} END {{print s+0}}'",
+        timeout=120,
+    )
+    return (int(out) if out else 0), total
+
+
+def scan_duplicate_binaries(bin_dir):
+    if not bin_dir.is_dir():
+        return []
+    files = {f.name: f for f in bin_dir.iterdir() if f.is_file()}
+    dupes = []
+    for name in sorted(files):
+        prefixed = f"fuzzball-{name}"
+        if prefixed in files and not name.startswith("fuzzball-"):
+            try:
+                s1 = files[name].stat().st_size
+                s2 = files[prefixed].stat().st_size
+                if s2 > 0 and abs(s1 - s2) / s2 < 0.10:
+                    dupes.append((name, s1))
+            except OSError:
+                pass
+    return dupes
+
+
+def scan_stale_packages(pkg_dir):
+    if not pkg_dir.is_dir():
+        return [], 0
+    groups = {}
+    for f in pkg_dir.iterdir():
+        if not f.is_file():
+            continue
+        m = re.match(r"^([\w-]+?)[-_]\d+\.", f.name)
+        if m:
+            groups.setdefault(m.group(1), []).append(f)
+    stale, total = [], 0
+    for files in groups.values():
+        if len(files) < 2:
+            continue
+        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        for old in files[1:]:
+            sz = old.stat().st_size
+            stale.append((old.name, sz))
+            total += sz
+    return stale, total
+
+
+def parse_docker_size(s):
+    m = re.match(r"^([\d.]+)\s*(B|[KMGT]B)$", s, re.IGNORECASE)
+    if not m:
+        return 0
+    mult = {"B": 1, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12}
+    return int(float(m.group(1)) * mult.get(m.group(2).upper(), 1))
+
+
+def scan_docker_df():
+    out = run(
+        "docker system df --format '{{.Type}}\t{{.Size}}\t{{.Reclaimable}}'"
+        " 2>/dev/null"
+    )
+    if not out:
+        return {}
+    result = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        total = parse_docker_size(parts[1].strip())
+        rm = re.match(r"([\d.]+\s*\w+)", parts[2].strip())
+        reclaimable = parse_docker_size(rm.group(1)) if rm else 0
+        result[parts[0].strip()] = (total, reclaimable)
+    return result
+
+
+def _volume_containers(vol):
+    out = run(
+        f"docker ps -a --filter 'volume={vol}'"
+        f" --format '{{{{.Names}}}} ({{{{.State}}}})' 2>/dev/null"
+    )
+    return out.splitlines() if out else []
+
+
+def _is_stopped(container_str):
+    return any(s in container_str.lower() for s in ("exited", "dead", "created"))
+
+
+def _classify_volume(name, containers):
+    if "buildx_buildkit" in name:
+        return "buildkit"
+    for c in containers:
+        if "kind" in c.lower():
+            return "kind"
+        if "registry" in c.lower():
+            return "registry"
+    return "other"
+
+
+def scan_docker_volumes():
+    out = run("docker system df -v 2>/dev/null", timeout=30)
+    if not out:
+        return []
+    vols, in_section = [], False
+    for line in out.splitlines():
+        if "VOLUME NAME" in line:
+            in_section = True
+            continue
+        if in_section:
+            stripped = line.strip()
+            if not stripped or "space usage" in stripped.lower():
+                break
+            parts = line.split()
+            if len(parts) >= 3:
+                name = parts[0]
+                links = int(parts[1]) if parts[1].isdigit() else 0
+                containers = _volume_containers(name)
+                reclaimable = links == 0 or (
+                    bool(containers) and all(_is_stopped(c) for c in containers)
+                )
+                vols.append(
+                    {
+                        "name": name,
+                        "links": links,
+                        "size": parse_docker_size(parts[2]),
+                        "size_str": parts[2],
+                        "containers": containers,
+                        "kind": _classify_volume(name, containers),
+                        "reclaimable": reclaimable,
+                    }
+                )
+    return vols
+
+
+
+# ─── Cleaners ─────────────────────────────────────────────────────────────────
+
+
+def clean_go_stale(cache_dir, days, execute=False):
+    if not execute:
+        return True
+    run(
+        f"find '{cache_dir}' -mindepth 2 -type f -mtime +{days} -delete",
+        timeout=300,
+    )
+    run(
+        f"find '{cache_dir}' -mindepth 2 -type d -empty -delete",
+        timeout=60,
+    )
+    return True
+
+
+def clean_go_full(cache_dir, execute=False):
+    if not execute:
+        return True
+    if run("go clean -cache", timeout=120) is not None:
+        return True
+    if cache_dir.is_dir():
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    return True
+
+
+def clean_files(paths, execute=False):
+    if not execute:
+        return True
+    for p in paths:
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
+    return True
+
+
+def clean_rmtree(path, execute=False):
+    if not execute:
+        return True
+    if Path(path).is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+    return True
+
+
+def clean_docker(cmd, execute=False):
+    if not execute:
+        return True
+    return run(cmd, timeout=120) is not None
+
+
+# ─── Filesystem context ──────────────────────────────────────────────────────
+
+
+def print_fs_context():
+    out = run("df -h / /home 2>/dev/null")
+    if not out:
+        return
+    seen = set()
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        mount, used, avail, pct = parts[5], parts[2], parts[3], parts[4]
+        if mount in seen:
+            continue
+        seen.add(mount)
+        bar_pct = int(pct.rstrip("%"))
+        color = red if bar_pct > 80 else yellow if bar_pct > 60 else green
+        print(f"    {mount:<8} {color(pct):>6}  {used} used / {avail} free")
+
+
+# ─── Orchestrator ─────────────────────────────────────────────────────────────
+
+
+class Cleaner:
+    def __init__(self, args):
+        self.args = args
+        self.root = find_repo()
+        self.build = self.root / "build" if self.root else None
+        self.items = []
+        self.docker_vols = []
+        self._docker_df = {}
+        self._go_remaining = 0
+
+    def scan(self):
+        sys.stderr.write("  Scanning (go cache may take a moment)...\r")
+        sys.stderr.flush()
+        self._docker_df = scan_docker_df()
+        self._scan_safe()
+        self._scan_moderate()
+        self._scan_aggressive()
+        sys.stderr.write(f"\r{'':60}\r")
+
+    def _add(self, level, desc, size, loc, fn):
+        if size > 0:
+            self.items.append((level, desc, size, loc, fn))
+
+    def _scan_safe(self):
+        gc = go_cache_dir()
+        if gc.is_dir():
+            days = self.args.go_cache_days
+            stale, total = scan_go_cache_stale(gc, days)
+            self._add(
+                "safe",
+                f"Go build cache (stale >{days}d)",
+                stale,
+                "~/.cache/go-build/",
+                lambda e, _gc=gc, _d=days: clean_go_stale(_gc, _d, e),
+            )
+            self._go_remaining = total - stale
+
+        if "Images" in self._docker_df:
+            _, reclaim = self._docker_df["Images"]
+            self._add(
+                "safe",
+                "Docker unused images",
+                reclaim,
+                "docker image prune -a",
+                lambda e: clean_docker("docker image prune -af", e),
+            )
+
+        if self.build:
+            amd64 = self.build / "bin/linux-amd64"
+            dupes = scan_duplicate_binaries(amd64)
+            if dupes:
+                paths = [amd64 / name for name, _ in dupes]
+                self._add(
+                    "safe",
+                    f"Duplicate binaries ({len(dupes)} pairs)",
+                    sum(s for _, s in dupes),
+                    "build/bin/linux-amd64/",
+                    lambda e, _p=paths: clean_files(_p, e),
+                )
+
+            stale_pkgs, pkg_sz = scan_stale_packages(self.build / "packages")
+            if pkg_sz > 0:
+                paths = [self.build / "packages" / n for n, _ in stale_pkgs]
+                self._add(
+                    "safe",
+                    f"Stale packages ({len(stale_pkgs)} old)",
+                    pkg_sz,
+                    "build/packages/",
+                    lambda e, _p=paths: clean_files(_p, e),
+                )
+
+    def _scan_moderate(self):
+        if "Build Cache" in self._docker_df:
+            _, reclaimable_bc = self._docker_df["Build Cache"]
+            if reclaimable_bc > 0:
+                self._add(
+                    "moderate",
+                    "Docker build cache",
+                    reclaimable_bc,
+                    "docker builder prune",
+                    lambda e: clean_docker("docker builder prune -f", e),
+                )
+
+        self.docker_vols = scan_docker_volumes()
+        reclaimable = sum(v["size"] for v in self.docker_vols if v["reclaimable"])
+        stopped_names = set()
+        for v in self.docker_vols:
+            if v["reclaimable"] and v["links"] > 0:
+                for c in v["containers"]:
+                    stopped_names.add(c.split(" (")[0])
+        if reclaimable > 0:
+            n = len(stopped_names)
+            desc = "Docker stale volumes"
+            if n > 0:
+                desc += f" (prunes {n} stopped container(s))"
+            self._add(
+                "moderate",
+                desc,
+                reclaimable,
+                "container+volume prune",
+                lambda e: clean_docker(
+                    "docker container prune -f && docker volume prune -f", e
+                ),
+            )
+
+        if self.root:
+            nm = self.root / "node_modules"
+            if nm.is_dir() and (nm / ".pnpm/@bazel+ibazel@0.16.2").exists():
+                self._add(
+                    "moderate",
+                    "Legacy node_modules (Bazel)",
+                    dir_size(nm),
+                    "node_modules/",
+                    lambda e, _nm=nm: clean_rmtree(_nm, e),
+                )
+
+    def _scan_aggressive(self):
+        gc = go_cache_dir()
+        self._add(
+            "aggressive",
+            "Go cache (fresh entries)",
+            self._go_remaining,
+            "go clean -cache",
+            lambda e, _gc=gc: clean_go_full(_gc, e),
+        )
+
+        if self.build:
+            arm64_subs = (
+                "bin/linux-arm64",
+                "tools/linux-arm64",
+                "pulumi-plugins/linux-arm64",
+            )
+            arm64 = sum(
+                dir_size(self.build / s)
+                for s in arm64_subs
+                if (self.build / s).is_dir()
+            )
+            if arm64 > 0:
+                bd = self.build
+                self._add(
+                    "aggressive",
+                    "arm64 cross-compiled artifacts",
+                    arm64,
+                    "build/*/linux-arm64/",
+                    lambda e, _bd=bd, _subs=arm64_subs: all(
+                        clean_rmtree(_bd / s, e)
+                        for s in _subs
+                        if (_bd / s).is_dir()
+                    ),
+                )
+
+    # ─── Report ───────────────────────────────────────────────────────────
+
+    def report(self):
+        print()
+        print(f"  {bold('Fuzzball Build Storage Analysis')}")
+        print(f"  {'=' * 55}")
+        print_fs_context()
+        print()
+
+        grand = 0
+        for level in LEVELS:
+            level_items = [
+                (d, s, l, f) for lv, d, s, l, f in self.items if lv == level
+            ]
+            if not level_items:
+                continue
+            will_clean = self.args.clean and LEVELS.index(
+                level
+            ) <= LEVELS.index(self.args.level)
+            icons = {
+                "safe": green("SAFE"),
+                "moderate": yellow("MODERATE"),
+                "aggressive": red("AGGRESSIVE"),
+            }
+            descs = {
+                "safe": "minimal rebuild impact",
+                "moderate": "some rebuild time",
+                "aggressive": "significant rebuild cost",
+            }
+            print(f"  {icons[level]} — {descs[level]}")
+            subtotal = 0
+            for desc, size, loc, _ in level_items:
+                mark = green("*") if will_clean else dim("o")
+                sz = f"{human(size):>12}"
+                print(f"    {mark} {desc:<42} {bold(sz)}  {dim(loc)}")
+                subtotal += size
+            print(f"    {'':44} {'─' * 12}")
+            print(f"    {'':44} {human(subtotal):>12}")
+            print()
+            grand += subtotal
+
+        if self.docker_vols:
+            self._volume_detail()
+
+        print(f"  {bold('Total reclaimable:')}{human(grand):>42}")
+        print()
+
+        if not self.args.clean:
+            safe_t = sum(s for lv, _, s, _, _ in self.items if lv == "safe")
+            print(
+                dim(
+                    f"  fuzzball-cleanup --clean"
+                    f"                  Dry-run safe ({human(safe_t)})"
+                )
+            )
+            print(
+                dim(
+                    f"  fuzzball-cleanup --clean --execute"
+                    f"         Execute safe cleanup"
+                )
+            )
+            print(
+                dim(
+                    f"  fuzzball-cleanup --clean --level moderate"
+                    f"  Include moderate tier"
+                )
+            )
+            print(
+                dim(
+                    f"  fuzzball-cleanup --docker-volumes"
+                    f"          Volume detail only"
+                )
+            )
+            print()
+
+    def _volume_detail(self):
+        print(f"  {bold('Docker Volume Detail')}")
+        print(f"    {'NAME':<44} {'SIZE':>10}  STATUS")
+        print(f"    {'─' * 44} {'─' * 10}  {'─' * 34}")
+        for v in sorted(self.docker_vols, key=lambda x: x["size"], reverse=True):
+            name = v["name"]
+            if len(name) > 42:
+                name = name[:20] + ".." + name[-20:]
+            parts = []
+            if v["links"] == 0:
+                parts.append(red("unused"))
+            for c in v["containers"]:
+                parts.append(c)
+            kind_labels = {
+                "buildkit": " [BuildKit]",
+                "kind": " [Kind]",
+                "registry": " [Registry]",
+            }
+            label = dim(kind_labels.get(v["kind"], ""))
+            tag = green(" << reclaimable") if v["reclaimable"] else ""
+            status = ", ".join(parts) if parts else dim("no containers")
+            print(
+                f"    {name:<44} {human(v['size']):>10}  {status}{label}{tag}"
+            )
+
+        total_v = sum(v["size"] for v in self.docker_vols)
+        reclaim_v = sum(v["size"] for v in self.docker_vols if v["reclaimable"])
+        print(f"    {'─' * 44} {'─' * 10}")
+        print(f"    {'Total:':<44} {human(total_v):>10}")
+        if reclaim_v:
+            print(f"    {'Reclaimable:':<44} {human(reclaim_v):>10}")
+
+        stale_containers = set()
+        for v in self.docker_vols:
+            if v["reclaimable"] and v["links"] > 0:
+                for c in v["containers"]:
+                    stale_containers.add(c)
+        if stale_containers:
+            print()
+            clist = ", ".join(sorted(stale_containers))
+            print(
+                dim(f"    Stopped containers holding volumes: {clist}")
+            )
+            print(
+                dim(
+                    f"    Moderate cleanup runs:"
+                    f" docker container prune + docker volume prune"
+                )
+            )
+        print()
+
+    # ─── Clean ────────────────────────────────────────────────────────────
+
+    def clean(self):
+        idx = LEVELS.index(self.args.level)
+        targets = [
+            (d, s, l, f)
+            for lv, d, s, l, f in self.items
+            if LEVELS.index(lv) <= idx
+        ]
+        if not targets:
+            print(yellow("  Nothing to clean at this level."))
+            return
+
+        total = sum(s for _, s, _, _ in targets)
+        print(f"\n  {bold('Cleanup plan')} ({self.args.level}):")
+        for desc, size, _, _ in targets:
+            print(f"    - {desc} ({human(size)})")
+        print(f"\n  Space to reclaim: {bold(human(total))}")
+
+        if not self.args.execute:
+            print(f"\n  {yellow('DRY RUN')} — nothing deleted.")
+            print(dim("  Add --execute to perform cleanup."))
+            return
+
+        print()
+        try:
+            answer = input(f"  Proceed? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Aborted.")
+            return
+        if answer != "y":
+            print("  Aborted.")
+            return
+
+        print()
+        for desc, _, _, fn in targets:
+            sys.stdout.write(f"    Cleaning {desc}...")
+            sys.stdout.flush()
+            ok = fn(True)
+            status = green("ok") if ok else red("FAILED")
+            print(f" {status}")
+        print(f"\n  {green('Done.')}")
+
+
+# ─── Entry point ──────────────────────────────────────────────────────────────
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Reclaim disk space from Fuzzball build environment.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+examples:
+  fuzzball-cleanup                              Scan and report
+  fuzzball-cleanup --clean                      Dry-run safe cleanup
+  fuzzball-cleanup --clean --execute            Execute safe cleanup
+  fuzzball-cleanup --clean --level moderate     Include moderate items
+  fuzzball-cleanup --docker-volumes             Docker volume detail only""",
+    )
+    p.add_argument(
+        "--clean",
+        action="store_true",
+        help="Plan cleanup (dry-run unless --execute)",
+    )
+    p.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually delete (requires --clean)",
+    )
+    p.add_argument(
+        "--level",
+        choices=LEVELS,
+        default="safe",
+        help="Cleanup aggressiveness (default: safe)",
+    )
+    p.add_argument(
+        "--go-cache-days",
+        type=int,
+        default=DEFAULT_STALE_DAYS,
+        help=f"Stale threshold in days (default: {DEFAULT_STALE_DAYS})",
+    )
+    p.add_argument(
+        "--docker-volumes",
+        action="store_true",
+        help="Show only Docker volume analysis",
+    )
+    p.add_argument("--no-color", action="store_true", help="Disable colors")
+    args = p.parse_args()
+
+    if args.no_color:
+        global _no_color
+        _no_color = True
+    if args.execute and not args.clean:
+        p.error("--execute requires --clean")
+
+    c = Cleaner(args)
+    if c.root is None:
+        print(red("  Error: cannot find fuzzball repo."))
+        print("  Run from repo or set FUZZBALL_ROOT env var.")
+        sys.exit(1)
+
+    if args.docker_volumes:
+        c.docker_vols = scan_docker_volumes()
+        if c.docker_vols:
+            print()
+            c._volume_detail()
+        else:
+            print(dim("  No Docker volumes found."))
+        return
+
+    c.scan()
+    c.report()
+    if args.clean:
+        c.clean()
+
+
+if __name__ == "__main__":
+    main()

@@ -56,6 +56,8 @@ Create the following directory tree inside the output directory:
 │   └── index.md
 ├── research/
 │   └── index.md
+├── reviews/
+│   └── index.md
 ├── follow-ups/
 │   └── index.md
 └── verifications/
@@ -79,13 +81,14 @@ Create the following directory tree inside the output directory:
 
 ## Documentation Structure
 
-| Folder | Purpose | Index |
-|--------|---------|-------|
-| [`plans/`](plans/index.md) | Implementation plan, design document, and test strategy | [plans/index.md](plans/index.md) |
-| [`tasks/`](tasks/index.md) | Implementation task breakdown with estimates and dependencies | [tasks/index.md](tasks/index.md) |
-| [`research/`](research/index.md) | Ancillary research and background documents | [research/index.md](research/index.md) |
-| [`follow-ups/`](follow-ups/index.md) | Open questions and items requiring future resolution | [follow-ups/index.md](follow-ups/index.md) |
-| [`verifications/`](verifications/index.md) | Manual verification test documents | [verifications/index.md](verifications/index.md) |
+| Folder                                     | Purpose                                                                 | Index                                            |
+| ------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------ |
+| [`plans/`](plans/index.md)                 | Implementation plan, design document, and test strategy                 | [plans/index.md](plans/index.md)                 |
+| [`tasks/`](tasks/index.md)                 | Implementation task breakdown with estimates and dependencies           | [tasks/index.md](tasks/index.md)                 |
+| [`research/`](research/index.md)           | Ancillary research and background documents                             | [research/index.md](research/index.md)           |
+| [`reviews/`](reviews/index.md)             | Holds review reports which are generated later in the development cycle | [reviews/index.md](reviews/index.md)             |
+| [`follow-ups/`](follow-ups/index.md)       | Open questions and items requiring future resolution                    | [follow-ups/index.md](follow-ups/index.md)       |
+| [`verifications/`](verifications/index.md) | Manual verification test documents                                      | [verifications/index.md](verifications/index.md) |
 ```
 
 **Each subfolder `index.md`** starts as an empty index with the table header but no entries yet:
@@ -99,7 +102,7 @@ Create the following directory tree inside the output directory:
 ---
 
 | Document | Description | Created |
-|----------|-------------|---------|
+| -------- | ----------- | ------- |
 ```
 
 For the **`tasks/index.md`**, use an extended format with a completion checkbox:
@@ -115,14 +118,14 @@ For the **`tasks/index.md`**, use an extended format with a completion checkbox:
 ## Documents
 
 | Document | Description | Created |
-|----------|-------------|---------|
+| -------- | ----------- | ------- |
 
 ## Task Tracking
 
 _Populated after task planning is complete._
 
 | Task ID | Task Name | Phase | Estimate | Dependencies | Completed |
-|---------|-----------|-------|----------|--------------|-----------|
+| ------- | --------- | ----- | -------- | ------------ | --------- |
 ```
 
 ### Step 0.4: Inform the User
@@ -340,8 +343,8 @@ After `/eng-verification-creator` completes:
 
    ---
 
-   | Document | Description | Created |
-   |----------|-------------|---------|
+   | Document                 | Description                                                         | Created     |
+   | ------------------------ | ------------------------------------------------------------------- | ----------- |
    | [`README.md`](README.md) | Verification suite overview, folder index, and spec coverage matrix | [timestamp] |
 
    ## Environment Folders
@@ -350,8 +353,8 @@ After `/eng-verification-creator` completes:
 
    ### [01-folder-name/](01-folder-name/)
 
-   | # | Document | Description | Created |
-   |---|----------|-------------|---------|
+   | # | Document                                  | Description   | Created     |
+   | - | ----------------------------------------- | ------------- | ----------- |
    | 1 | [`01-file.md`](01-folder-name/01-file.md) | [description] | [timestamp] |
    | 2 | [`02-file.md`](01-folder-name/02-file.md) | [description] | [timestamp] |
    ```
@@ -392,8 +395,8 @@ Create a consolidated follow-up document at `<output-directory>/follow-ups/open-
 
 _Questions that need answers before or during implementation._
 
-| # | Question | Source Document | Affects | Suggested Owner |
-|---|----------|-----------------|---------|-----------------|
+| # | Question        | Source Document                       | Affects           | Suggested Owner  |
+| - | --------------- | ------------------------------------- | ----------------- | ---------------- |
 | 1 | [Question text] | [plans/implementation-plan.md § Gaps] | [What it impacts] | [Who might know] |
 
 ---
@@ -402,9 +405,9 @@ _Questions that need answers before or during implementation._
 
 _Assumptions made during planning that should be confirmed._
 
-| # | Assumption | Source Document | Risk if Wrong |
-|---|-----------|-----------------|---------------|
-| 1 | [Assumption] | [plans/design.md § Assumptions] | [Impact] |
+| # | Assumption   | Source Document                 | Risk if Wrong |
+| - | ------------ | ------------------------------- | ------------- |
+| 1 | [Assumption] | [plans/design.md § Assumptions] | [Impact]      |
 
 ---
 
@@ -412,9 +415,9 @@ _Assumptions made during planning that should be confirmed._
 
 _Work or decisions explicitly deferred to later._
 
-| # | Item | Source Document | When to Address |
-|---|------|-----------------|-----------------|
-| 1 | [Item] | [Source] | [Trigger or timeline] |
+| # | Item   | Source Document | When to Address       |
+| - | ------ | --------------- | --------------------- |
+| 1 | [Item] | [Source]        | [Trigger or timeline] |
 
 ---
 
@@ -422,9 +425,9 @@ _Work or decisions explicitly deferred to later._
 
 _Risks identified during planning that lack mitigation._
 
-| # | Risk | Source Document | Impact | Suggested Mitigation |
-|---|------|-----------------|--------|----------------------|
-| 1 | [Risk] | [Source] | [Impact level] | [Suggestion] |
+| # | Risk   | Source Document | Impact         | Suggested Mitigation |
+| - | ------ | --------------- | -------------- | -------------------- |
+| 1 | [Risk] | [Source]        | [Impact level] | [Suggestion]         |
 ```
 
 ### Step 6.3: Update Follow-Ups Index
@@ -459,13 +462,13 @@ Add a summary section to the root `index.md` with document counts and status:
 
 ## Pipeline Summary
 
-| Phase | Skill | Status | Primary Output |
-|-------|-------|--------|----------------|
-| 1 | `/eng-plan-creator` | Complete | [`plans/implementation-plan.md`](plans/implementation-plan.md) |
-| 2 | `/eng-design-creator` | Complete | [`plans/design.md`](plans/design.md) |
-| 3 | `/eng-test-planning` | Complete | Test strategy appended to implementation plan |
-| 4 | `/eng-task-planning` | Complete | [`tasks/task-plan.md`](tasks/task-plan.md) |
-| 5 | `/eng-verification-creator` | Complete | [`verifications/README.md`](verifications/README.md) |
+| Phase | Skill                       | Status   | Primary Output                                                 |
+| ----- | --------------------------- | -------- | -------------------------------------------------------------- |
+| 1     | `/eng-plan-creator`         | Complete | [`plans/implementation-plan.md`](plans/implementation-plan.md) |
+| 2     | `/eng-design-creator`       | Complete | [`plans/design.md`](plans/design.md)                           |
+| 3     | `/eng-test-planning`        | Complete | Test strategy appended to implementation plan                  |
+| 4     | `/eng-task-planning`        | Complete | [`tasks/task-plan.md`](tasks/task-plan.md)                     |
+| 5     | `/eng-verification-creator` | Complete | [`verifications/README.md`](verifications/README.md)           |
 
 **Total Documents:** [count]
 **Open Follow-Up Items:** [count from follow-ups/open-items.md]

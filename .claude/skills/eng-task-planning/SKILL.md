@@ -97,11 +97,9 @@ For each task, explicitly identify:
 
 ## Output Document Structure
 
-Save the task planning document in the same directory as the feature research document with the naming pattern `<feature-name>-tasks.md`.
+Create task **documents** (plural) which breaks down the work that needs to land into groupings of task documents. The document groupings need to be for work that is related and/or work that can be worked in parallel. The naming pattern to use is: `<index-number>-<feature-name>-tasks.md`.
 
-For example, if the research doc is at `docs/research/user-auth-research.md`, save the task plan at `docs/research/user-auth-tasks.md`.
-
-Create a markdown document with the following structure:
+The `task document` should be a markdown document with the following structure:
 
 ```markdown
 # Task Plan: [Feature Name]
@@ -207,8 +205,18 @@ _Testing, documentation, and release preparation_
 ---
 
 [Repeat for each task...]
+```
 
----
+Once the task documents are created - then create a single overview document for the task documents which describe the required sequencing for the tasks, risks associated with the tasks, and any open questions. Also include any other high-level information which needs to be tracked outside of individual task documents. Naming pattern for the overview document: `<feature-name>-task-overview.md`
+
+Task overview document content (markdown document):
+
+```markdown
+# Task Plan Overview: [Feature Name]
+
+**Planning Date:** [Date]
+**Based On:** [Link to feature research document]
+**Source Issues:** [List of Jira issues]
 
 ## Parallel Work Visualization
 ```
@@ -239,40 +247,12 @@ Week 1 Week 2 Week 3
 |------|--------|----------------|
 | T1.1 | T2.1, T2.2, T2.3 | Assign most experienced dev |
 
----
-
 ## Open Questions for Planning
 
 [Questions that need answers before tasks can be finalized]
 
 1. **[Question]** - Affects tasks: T2.1, T2.2
 2. **[Question]** - Affects tasks: T3.1
-
----
-
-## Estimation Summary
-
-| Phase | Tasks | Total Estimate | Parallel Duration |
-|-------|-------|----------------|-------------------|
-| Foundation | X | X.X days | X.X days |
-| Core | X | X.X days | X.X days |
-| Integration | X | X.X days | X.X days |
-| Quality | X | X.X days | X.X days |
-| **Total** | **X** | **X.X days** | **X.X days** |
-
-**With 3 developers:** ~X.X calendar days
-**With 4 developers:** ~X.X calendar days
-
----
-
-## Jira Import Ready Format
-
-If importing to Jira, use this CSV-compatible format:
-
-| Summary | Issue Type | Estimate (days) | Blocked By | Labels |
-|---------|------------|-----------------|------------|--------|
-| [Task name] | Task | X.X | - | phase-1, parallel-a |
-| [Task name] | Task | X.X | T1.1 | phase-2, parallel-a |
 ```
 
 ## Important Guidelines
@@ -285,24 +265,6 @@ If importing to Jira, use this CSV-compatible format:
 6. **Consider the critical path** - Identify and call out tasks that determine the minimum timeline
 7. **If an index file exists** - You **MUST** update it with your new task document
 8. **If a task-overview document exists** - You **MUST** update it with your new task document
-
-## Estimation Guidelines
-
-When estimating tasks, consider:
-
-- **0.5 days**: Small, well-defined changes (single file, clear requirements)
-- **1.0 days**: Moderate changes (few files, may need some investigation)
-- **1.5 days**: Significant changes (multiple files, clear approach but needs care)
-- **2.0 days**: Complex changes (cross-cutting concerns, integration required)
-- **2.5 days**: Major component work (new module, significant refactoring)
-- **3.0 days**: Maximum scope (complex feature, multiple integration points)
-
-Include buffer for:
-
-- Code review iterations
-- Unexpected dependencies discovered during implementation
-- Testing and debugging
-- Documentation updates
 
 ## Handling Incomplete Research
 

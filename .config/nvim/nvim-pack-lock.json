@@ -1,0 +1,109 @@
+{
+  "plugins": {
+    "SchemaStore.nvim": {
+      "rev": "cf2b276dc88696b35d55ea4bd55dfaf7d608c9a2",
+      "src": "https://github.com/b0o/SchemaStore.nvim",
+      "version": "'cf2b276dc88696b35d55ea4bd55dfaf7d608c9a2'"
+    },
+    "conform.nvim": {
+      "rev": "086a40dc7ed8242c03be9f47fbcee68699cc2395",
+      "src": "https://github.com/stevearc/conform.nvim",
+      "version": "'086a40dc7ed8242c03be9f47fbcee68699cc2395'"
+    },
+    "crates.nvim": {
+      "rev": "ac9fa498a9edb96dc3056724ff69d5f40b898453",
+      "src": "https://github.com/saecki/crates.nvim",
+      "version": "'ac9fa498a9edb96dc3056724ff69d5f40b898453'"
+    },
+    "flash.nvim": {
+      "rev": "fcea7ff883235d9024dc41e638f164a450c14ca2",
+      "src": "https://github.com/folke/flash.nvim",
+      "version": "'fcea7ff883235d9024dc41e638f164a450c14ca2'"
+    },
+    "gitsigns.nvim": {
+      "rev": "7c4faa3540d0781a28588cafbd4dd187a28ac6e3",
+      "src": "https://github.com/lewis6991/gitsigns.nvim",
+      "version": "'7c4faa3540d0781a28588cafbd4dd187a28ac6e3'"
+    },
+    "lualine.nvim": {
+      "rev": "47f91c416daef12db467145e16bed5bbfe00add8",
+      "src": "https://github.com/nvim-lualine/lualine.nvim",
+      "version": "'47f91c416daef12db467145e16bed5bbfe00add8'"
+    },
+    "mini.ai": {
+      "rev": "4b0a6207341d895b6cfe9bcb1e4d3e8607bfe4f4",
+      "src": "https://github.com/echasnovski/mini.ai",
+      "version": "'4b0a6207341d895b6cfe9bcb1e4d3e8607bfe4f4'"
+    },
+    "mini.icons": {
+      "rev": "5b9076dae1bfbe47ba4a14bc8b967cde0ab5d77e",
+      "src": "https://github.com/echasnovski/mini.icons",
+      "version": "'5b9076dae1bfbe47ba4a14bc8b967cde0ab5d77e'"
+    },
+    "mini.pairs": {
+      "rev": "b7fde3719340946feb75017ef9d75edebdeb0566",
+      "src": "https://github.com/echasnovski/mini.pairs",
+      "version": "'b7fde3719340946feb75017ef9d75edebdeb0566'"
+    },
+    "nvim-lint": {
+      "rev": "606b823a57b027502a9ae00978ebf4f5d5158098",
+      "src": "https://github.com/mfussenegger/nvim-lint",
+      "version": "'606b823a57b027502a9ae00978ebf4f5d5158098'"
+    },
+    "nvim-treesitter": {
+      "rev": "53f6ce29df5841ce26e5a9f06fb371088b8d8031",
+      "src": "https://github.com/nvim-treesitter/nvim-treesitter",
+      "version": "'53f6ce29df5841ce26e5a9f06fb371088b8d8031'"
+    },
+    "onedark.nvim": {
+      "rev": "213c23ae45a04797572242568d5d51937181792d",
+      "src": "https://github.com/navarasu/onedark.nvim",
+      "version": "'213c23ae45a04797572242568d5d51937181792d'"
+    },
+    "persistence.nvim": {
+      "rev": "b20b2a7887bd39c1a356980b45e03250f3dce49c",
+      "src": "https://github.com/folke/persistence.nvim",
+      "version": "'b20b2a7887bd39c1a356980b45e03250f3dce49c'"
+    },
+    "plenary.nvim": {
+      "rev": "b9fd5226c2f76c951fc8ed5923d85e4de065e509",
+      "src": "https://github.com/nvim-lua/plenary.nvim",
+      "version": "'b9fd5226c2f76c951fc8ed5923d85e4de065e509'"
+    },
+    "render-markdown.nvim": {
+      "rev": "e3c18ddd27a853f85a6f513a864cf4f2982b9f26",
+      "src": "https://github.com/MeanderingProgrammer/render-markdown.nvim",
+      "version": "'e3c18ddd27a853f85a6f513a864cf4f2982b9f26'"
+    },
+    "rustaceanvim": {
+      "rev": "f2f0c1231a5b019dbc1fd6dafac1751c878925a3",
+      "src": "https://github.com/mrcjkb/rustaceanvim",
+      "version": "'f2f0c1231a5b019dbc1fd6dafac1751c878925a3'"
+    },
+    "snacks.nvim": {
+      "rev": "e6fd58c82f2f3fcddd3fe81703d47d6d48fc7b9f",
+      "src": "https://github.com/folke/snacks.nvim",
+      "version": "'e6fd58c82f2f3fcddd3fe81703d47d6d48fc7b9f'"
+    },
+    "todo-comments.nvim": {
+      "rev": "31e3c38ce9b29781e4422fc0322eb0a21f4e8668",
+      "src": "https://github.com/folke/todo-comments.nvim",
+      "version": "'31e3c38ce9b29781e4422fc0322eb0a21f4e8668'"
+    },
+    "trouble.nvim": {
+      "rev": "bd67efe408d4816e25e8491cc5ad4088e708a69a",
+      "src": "https://github.com/folke/trouble.nvim",
+      "version": "'bd67efe408d4816e25e8491cc5ad4088e708a69a'"
+    },
+    "venv-selector.nvim": {
+      "rev": "42e8faadf9b819654f29eb1a785797a3a328f301",
+      "src": "https://github.com/linux-cultist/venv-selector.nvim",
+      "version": "'42e8faadf9b819654f29eb1a785797a3a328f301'"
+    },
+    "which-key.nvim": {
+      "rev": "3aab2147e74890957785941f0c1ad87d0a44c15a",
+      "src": "https://github.com/folke/which-key.nvim",
+      "version": "'3aab2147e74890957785941f0c1ad87d0a44c15a'"
+    }
+  }
+}

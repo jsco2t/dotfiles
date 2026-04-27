@@ -4,52 +4,66 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture Overview
 
-This is a personal Neovim configuration built on [LazyVim](https://www.lazyvim.org/) with [Lazy.nvim](https://github.com/folke/lazy.nvim) as the plugin manager.
+Neovim 0.12 personal configuration using **native built-in features** for package management, LSP, and completion. No distribution layer (LazyVim) — all configuration is explicit.
 
 ### Key Structure
-- `init.lua` — Entry point, loads `config.lazy`
-- `lua/config/lazy.lua` — Lazy.nvim bootstrap and plugin spec (extras, defaults, performance)
-- `lua/config/options.lua` — Options that differ from LazyVim defaults (loaded before plugins)
-- `lua/config/keymaps.lua` — Custom keymaps (loaded on VeryLazy)
-- `lua/config/autocommands.lua` — Custom autocommands (loaded on VeryLazy)
-- `lua/plugins/` — User plugin specs (merged with LazyVim defaults)
+- `init.lua` — Entry point: sets leader, loads config modules, enables LSP servers
+- `lua/config/options.lua` — Vim options (loaded before plugins)
+- `lua/config/packages.lua` — `vim.pack.add()` with commit-pinned plugin specs
+- `lua/config/plugins.lua` — Plugin `setup()` calls and configuration
+- `lua/config/autocommands.lua` — Autocommands including LspAttach for native completion
+- `lua/config/keymaps.lua` — Custom keymaps
+- `lsp/` — Native LSP server configs (`vim.lsp.config` auto-discovered files)
+
+### Native Features (no plugin needed)
+- **Package management**: `vim.pack` with `nvim-pack-lock.json` lockfile
+- **LSP configuration**: `vim.lsp.config` + `lsp/*.lua` files + `vim.lsp.enable()`
+- **Completion**: `vim.lsp.completion.enable` with autotrigger (via LspAttach)
+- **Default keymaps**: `grr` (references), `grn` (rename), `gra` (code action), `K` (hover), etc.
+- **Commenting**: Native `gc`/`gcc` (treesitter-aware)
 
 ### Language Support
 
-Configured via LazyVim extras in `lua/config/lazy.lua`:
-- **Go** (`lang.go`) — gopls, gofumpt, goimports
-- **Rust** (`lang.rust`) — rust-analyzer
-- **Python** (`lang.python`) — pyright, ruff
-- **Markdown** (`lang.markdown`) — marksman
-- **JSON** (`lang.json`) — jsonls + schemastore
-- **YAML** (`lang.yaml`) — yamlls
-- **TOML** (`lang.toml`) — taplo
-- **Docker** (`lang.docker`) — dockerls, docker-compose-ls
+Configured via native `lsp/*.lua` files:
+- **Go** (`lsp/gopls.lua`) — gopls with gofumpt, staticcheck, analyses
+- **Rust** — rustaceanvim manages rust-analyzer directly (no lsp/ file)
+- **Python** (`lsp/pyright.lua`, `lsp/ruff.lua`) — pyright for types, ruff for linting
+- **Markdown** (`lsp/marksman.lua`) — marksman
+- **JSON** (`lsp/jsonls.lua`) — jsonls + SchemaStore.nvim
+- **YAML** (`lsp/yamlls.lua`) — yamlls + SchemaStore.nvim
+- **TOML** (`lsp/taplo.lua`) — taplo
+- **Docker** (`lsp/dockerls.lua`, `lsp/docker_compose_ls.lua`)
+- **Bash/Shell** (`lsp/bashls.lua`) — bashls with shellcheck integration
 
-Custom (no LazyVim extra):
-- **Bash/Shell** (`plugins/lang-bash.lua`) — bashls, shellcheck, shfmt
+### Plugins (21 total, managed by vim.pack)
+All pinned to exact commit hashes. See `lua/config/packages.lua` for the full list.
+Key plugins: snacks.nvim (explorer/picker), lualine, gitsigns, conform.nvim (formatting),
+nvim-lint, which-key, trouble.nvim, flash.nvim, mini.ai/icons/pairs, nvim-treesitter.
 
-### Plugin Customizations (`lua/plugins/`)
-- `colorscheme.lua` — onedark theme (darker variant, custom purple)
-- `disabled.lua` — Disables noice.nvim and bufferline
-- `lang-bash.lua` — Bash LSP, linting, formatting
+### Supply Chain Posture
+- Every plugin pinned to a commit hash in `packages.lua`
+- `nvim-pack-lock.json` records installed revisions (track in git)
+- No auto-updates; run `vim.pack.update()` to review changes interactively
+- LSP servers/formatters/linters installed via system tools, not Mason
+- `install-tools.sh` documents all external tool dependencies
 
 ### File Explorer
-- Uses **snacks.explorer** (LazyVim default for install_version 8)
-- Toggle: `<leader>e`
+- Uses **snacks.explorer** — Toggle: `<leader>e` or `\`
 
 ### Development Commands
-- `:Lazy` — Plugin manager UI
-- `:Lazy update` — Update all plugins
-- `:Mason` — Tool installer UI
+- `:lua vim.pack.update()` — Update plugins (shows diff + confirmation)
+- `:lua vim.pack.get()` — List installed plugins
+- `:lsp` — Manage LSP clients interactively
+- `:checkhealth vim.lsp` — Check LSP status
 - `:ConformInfo` — Check formatter status
+- `./install-tools.sh` — Install all external tools
 - `./reset-nvim.sh` — Reset nvim data, state, and cache
 
 ### Configuration Notes
 - Leader key: `<space>`
-- Nerd Font required for icons
+- Nerd Font required for icons (mini.icons)
 - Local config file support via `exrc` option
 - Spell checking enabled
-- SSH-aware: animations disabled over SSH, clipboard handled by LazyVim
+- SSH-aware: animations disabled over SSH
 - No DAP configured (preference for CLI debugging)
-- Disabled plugins: noice.nvim, bufferline, netrwPlugin
+- Format-on-save enabled (conform.nvim with LSP fallback)

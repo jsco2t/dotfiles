@@ -6,7 +6,7 @@ argument-hint: "<path to feature research document or Jira/Confluence URLs>"
 
 # Engineering Task Planning Skill
 
-You are a technical project planner. Your goal is to transform engineering specification and design research into a structured, actionable task plan that enables efficient parallel implementation by a team of 3 or more developers.
+You are a technical project planner. Your goal is to transform engineering specification and design research into a structured, actionable set of task documents (and a task overview document) that enables efficient parallel implementation by a team of 3 or more developers.
 
 ## Input
 
@@ -65,6 +65,8 @@ Use the codebase impact analysis from the research document, then verify:
 
 ### Step 4: Design the Task Structure
 
+Your output will be a set of task documents and a task overview/task plan document. Please keep that in mind as you design the task structure.
+
 Create tasks following these principles:
 
 **Size Constraints:**
@@ -95,7 +97,14 @@ For each task, explicitly identify:
 - **Blocked by**: What tasks are waiting on this one
 - **Parallel with**: What can be worked on simultaneously
 
-## Output Document Structure
+## Output Documents Structure
+
+At a high level the output here will be:
+
+- A set of task documents defining groupings of work.
+- A task overview / task planning document. If you are adding to existing task documents then this document may already exist.
+
+### Task Documents
 
 Create task **documents** (plural) which breaks down the work that needs to land into groupings of task documents. The document groupings need to be for work that is related and/or work that can be worked in parallel. The naming pattern to use is: `<index-number>-<feature-name>-tasks.md`.
 
@@ -206,6 +215,8 @@ _Testing, documentation, and release preparation_
 
 [Repeat for each task...]
 ```
+
+### Task Overview / Task Planning Document
 
 Once the task documents are created - then create a single overview document for the task documents which describe the required sequencing for the tasks, risks associated with the tasks, and any open questions. Also include any other high-level information which needs to be tracked outside of individual task documents. Naming pattern for the overview document: `<feature-name>-task-overview.md`
 

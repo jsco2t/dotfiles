@@ -38,6 +38,8 @@ These principles are non-negotiable. Every verification document must satisfy th
 
 6. **Explain the "why", not just the "what".** When a test uses a specific provisioner, explain why. When a command needs a flag, explain what happens without it. When a known issue exists, explain the root cause. The tester should understand the feature, not just follow steps.
 
+7. **Documents are self contained** EVERY verification document must understand how to configure the environment for testing AND clean everything up for testing. **DO NOT** create verification documents which are just "setup" or "cleanup". Leave the system under test in the same state as when you found it.
+
 ## Verification Creation Process
 
 ### Phase 1: Gather Spec Requirements (Source of Truth)

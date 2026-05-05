@@ -101,8 +101,21 @@ For each task, explicitly identify:
 
 At a high level the output here will be:
 
-- A set of task documents defining groupings of work.
+- A new set of `task documents`. Each `task document` needs to be focused on a specific change or set of related changes.
 - A task overview / task planning document. If you are adding to existing task documents then this document may already exist.
+
+**DO NOT** Create a monolithic task plan where all of the tasks are captured in a single document.
+
+When you are done - the `/tasks/` folder should look **something** like this (this is just an example):
+
+```
+../tasks/
+    - index (index file for the folder)
+    - task-overview (discussed in this section and the section below)
+    - 01-some-task-document.md
+    - 02-some-other-task-document.md
+    - etc...(continue with this index naming format for the task documents)
+```
 
 ### Task Documents
 

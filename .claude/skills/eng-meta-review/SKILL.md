@@ -78,6 +78,7 @@ Look for spec/planning context to give to the Spec Compliance reviewer:
 3. Read any existing review documents in the output directory to understand what has previously been reviewed and discovered. This avoids re-reporting known issues.
 
 Record what you find:
+
 ```
 SPEC_CONTEXT=<paths to spec documents and/or Jira links, or "none found">
 PRIOR_REVIEWS=<summary of prior findings, or "none">
@@ -93,12 +94,14 @@ Launch ALL of the following review agents **simultaneously in a single message**
 
 Before constructing any agent prompts, read the following skill files and hold their content for embedding:
 
-1. **Read** `/Users/jscott/.claude/skills/fz-code-reviewer/SKILL.md` — this is the Fuzzball-specific reviewer methodology. Its full content (reviewer profiles, all 16 review responsibility sections, confidence calibration) must be embedded verbatim in Agent 1's prompt.
-2. **Read** `/Users/jscott/.claude/skills/code-reviewer/SKILL.md` — this is the general code reviewer methodology. Its core review responsibilities section must be embedded in Agents 2–6 (and any additional agents) so each subagent operates with the full reviewer discipline, not just a focus-area brief.
+1. **Read** `$HOME/.claude/skills/fz-code-reviewer/SKILL.md` — this is the Fuzzball-specific reviewer methodology. Its full content (reviewer profiles, all 16 review responsibility sections, confidence calibration) must be embedded verbatim in Agent 1's prompt.
+2. **Read** `$HOME/.claude/skills/code-reviewer/SKILL.md` — this is the general code reviewer methodology. Its core review responsibilities section must be embedded in Agents 2–6 (and any additional agents) so each subagent operates with the full reviewer discipline, not just a focus-area brief.
+3. **Read** `$HOME/.claude/skills/eng-test-reviewer/SKILL.md` — this is a test reviewer focused **ONLY** on test code (test automation, unit tests...etc). Use Agent 7 as the subagent for this work. This reviewer should **ONLY** focus on test code.
 
 These reads are mandatory. Do not rely on memory or partial recall of these files.
 
 **Every agent prompt MUST include:**
+
 - The diff scope (changed files list and the actual diff content)
 - The core review methodology from the relevant skill file (fz-code-reviewer for Agent 1, code-reviewer for Agents 2–6)
 - Their specific focus area brief (which narrows the general methodology to their assigned concern)
@@ -114,6 +117,7 @@ Each agent must structure its findings as a markdown list. For each finding:
 
 ```markdown
 ### Finding: [Short title]
+
 - **Confidence:** [0-100]
 - **Severity:** [critical | high | medium | low]
 - **File:** [file_path:line_number]
@@ -136,6 +140,7 @@ Use `subagent_type: "feature-dev:code-reviewer"`.
 Embed the **full content** of the fz-code-reviewer skill file you read in the pre-launch step. This includes all reviewer profiles (DevI and DevC patterns), all 16 review responsibility sections, and the confidence calibration. Do not summarize — include it verbatim.
 
 Tell the agent:
+
 - Review only the changed Go code and its direct impacts
 - Apply the Fuzzball-specific review criteria
 - Use the fz-code-reviewer confidence calibration (90-100 for proto/lock/logging issues, 80-89 for component/naming/transaction issues, etc.)
@@ -148,6 +153,7 @@ Use `subagent_type: "feature-dev:code-reviewer"`.
 Prompt focus: **Spec Compliance** — verify the code changes implement what the specification requires, and don't implement things the spec doesn't call for.
 
 Include in the prompt:
+
 - The spec context gathered in Phase 0 (implementation plan path, design doc path, Jira/Confluence links)
 - Instruct the agent to read the implementation plan and/or design document to understand what the spec requires
 - If Jira/Confluence links are available, instruct the agent to fetch the current spec from those sources
@@ -160,6 +166,7 @@ Use `subagent_type: "feature-dev:code-reviewer"`.
 Prompt focus: **Dead and Legacy Code Detection** — if the change is removing or refactoring something, ensure no dead code is left behind.
 
 Include in the prompt:
+
 - Look for: unused functions, unreferenced variables, orphaned imports, stale comments referencing removed code, unused type definitions, dead branches in conditionals, legacy code paths that are no longer reachable after the change
 - Use `grep` and code navigation to verify whether seemingly-dead code is actually unreferenced
 - Check if removed/refactored code had callers elsewhere that now reference nothing
@@ -172,6 +179,7 @@ Use `subagent_type: "feature-dev:code-reviewer"`.
 Prompt focus: **Code Simplification** — within the scope of changed code, look for opportunities to simplify.
 
 Include in the prompt:
+
 - "Simpler" means: solutions that are just as robust and capable but easier to maintain and test
 - Look for: over-engineering, unnecessary abstractions, complex control flow that could be flattened, duplicated logic that could be consolidated, verbose patterns where idiomatic alternatives exist, unnecessary intermediate data structures
 - Do NOT flag simplifications that would reduce capability or robustness
@@ -184,6 +192,7 @@ Use `subagent_type: "feature-dev:code-reviewer"`.
 Prompt focus: **Security Posture** — look for places where the change weakens security or creates vulnerabilities.
 
 Include in the prompt:
+
 - Look for: weakened authorization checks, removed or bypassed authentication, exposed internal APIs, SQL injection vectors, command injection, path traversal, insecure defaults, secrets in code, overly permissive CORS/RBAC, missing input validation at system boundaries, information leakage in error messages
 - Check if the change removes or weakens any existing security controls
 - Check if new endpoints or APIs are properly protected
@@ -196,10 +205,17 @@ Use `subagent_type: "feature-dev:code-reviewer"`.
 Prompt focus: **Deferred Work Detection** — work is NEVER to be deferred with silent code comments.
 
 Include in the prompt:
+
 - Search the changed code for: `// TODO`, `// FIXME`, `// HACK`, `// XXX`, `// LATER`, `// TEMPORARY`, `// PLACEHOLDER`, or any similar deferred-work markers (case insensitive)
 - For each found marker: the gap in functionality IS the finding. Assess how severe the gap is — is this a missing error handler, an unimplemented feature, a skipped validation?
 - Also look for: empty function bodies with just a comment, stub implementations that return nil/zero without doing real work, commented-out code blocks that suggest incomplete migration
 - Severity guidance: a TODO on a non-critical path is medium; a TODO on an error handler or security check is critical
+
+### Agent 7: Test Automation Review
+
+Use skill `eng-test-reviewer`
+
+Include in the prompt the entire set of changed files. This reviewer **ONLY** focuses on test code within the set of changes.
 
 ### Additional Agents (from user context)
 
@@ -218,6 +234,7 @@ Parse each agent's report and extract all individual findings into a unified lis
 ### Step 2.2: Deduplicate
 
 Identify duplicate or overlapping findings:
+
 - Same file and line number with similar description → keep the one with higher confidence and richer detail
 - Same conceptual issue reported by multiple agents at different granularity → merge into one finding, note which reviewers flagged it (this reinforces confidence — if 3 independent reviewers flagged the same thing at 65 each, that's a strong aggregate signal; boost the merged finding's confidence accordingly)
 - Near-duplicates where one agent found a symptom and another found the root cause → keep the root cause, incorporate the symptom description
@@ -233,6 +250,7 @@ Remove any finding with confidence < 50 before the verification pass. The subage
 Launch ONE more Agent (using `subagent_type: "feature-dev:code-reviewer"`) to verify the consolidated findings.
 
 The verification agent's prompt must include:
+
 - The full list of deduplicated, pre-filtered findings
 - The diff and changed files
 - Instructions to: read the actual code at each reported location, determine if the finding is a real issue or a false positive, adjust confidence scores based on verification, and remove any finding that is not actually an issue
@@ -290,6 +308,7 @@ Structure:
 [Findings with severity: critical, ordered by confidence descending]
 
 #### [Finding Title]
+
 - **Confidence:** [score]
 - **Severity:** Critical
 - **File:** [file_path:line_number]
@@ -310,16 +329,16 @@ Structure:
 
 ## Review Pipeline Summary
 
-| Reviewer | Focus Area | Findings (raw) | Findings (after dedup + verify) |
-|----------|-----------|-----------------|-------------------------------|
-| fz-code-reviewer | Fuzzball-specific patterns | [n] | [n] |
-| Spec Compliance | Specification adherence | [n] | [n] |
-| Dead Code | Unused/orphaned code | [n] | [n] |
-| Simplification | Complexity reduction | [n] | [n] |
-| Security | Security posture | [n] | [n] |
-| Deferred Work | TODO/FIXME markers | [n] | [n] |
-| [any extras] | [focus] | [n] | [n] |
-| **Verification** | **False positive removal** | **[total in]** | **[total out]** |
+| Reviewer         | Focus Area                 | Findings (raw) | Findings (after dedup + verify) |
+| ---------------- | -------------------------- | -------------- | ------------------------------- |
+| fz-code-reviewer | Fuzzball-specific patterns | [n]            | [n]                             |
+| Spec Compliance  | Specification adherence    | [n]            | [n]                             |
+| Dead Code        | Unused/orphaned code       | [n]            | [n]                             |
+| Simplification   | Complexity reduction       | [n]            | [n]                             |
+| Security         | Security posture           | [n]            | [n]                             |
+| Deferred Work    | TODO/FIXME markers         | [n]            | [n]                             |
+| [any extras]     | [focus]                    | [n]            | [n]                             |
+| **Verification** | **False positive removal** | **[total in]** | **[total out]**                 |
 
 ---
 
@@ -332,6 +351,7 @@ Structure:
 ## Methodology
 
 This review was conducted using the eng-meta-review pipeline:
+
 1. Parallel specialized review agents examined the changes from independent perspectives
 2. Findings were consolidated and deduplicated across reviewers
 3. A verification agent confirmed each finding against the actual code
@@ -391,5 +411,5 @@ Keep this terminal output short. The full details are in the written document.
   ---
 
   | Document | Description | Created |
-  |----------|-------------|---------|
+  | -------- | ----------- | ------- |
   ```

@@ -7,11 +7,11 @@ wrap = "yes"
 
 # for: https://github.com/yazi-rs/plugins/tree/main/git.yazi
 [[plugin.prepend_fetchers]]
-id = "git"
+group = "git"
 url = "*"
 run = "git"
 
 [[plugin.prepend_fetchers]]
-id = "git"
+group = "git"
 url = "*/"
 run = "git"

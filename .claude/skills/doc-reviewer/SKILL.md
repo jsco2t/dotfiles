@@ -14,13 +14,14 @@ The user must provide either a **file path** or a **directory path**.
 
 - **If a directory is provided**: Review all documents in the directory. Evaluate each document individually AND as a set — assess completeness, coherence, and whether the documents cover the subject adequately together.
 
-- **If neither is provided**: Ask the user for a file or directory path before proceeding.
+- **If neither is provided**: Ask the user for a file or directory path before proceeding. It's also acceptable for the user to provide a git change list or a git branch. If git changes (or branch) are provided perform your review on the documents in the change (typically markdown documents).
 
 ## Core Review Responsibilities
 
 **Truth-Grounding**: Every factual claim in a document must be verifiable against the source material it describes. If the document describes code, read the code. If it describes a process, trace the process. If it references configurations, commands, APIs, or system behavior — verify them. Flag any claim that cannot be confirmed or that contradicts the source of truth. This is the highest-priority responsibility. A document that reads well but misleads the reader is worse than no document at all.
 
 **Accuracy**: Verify that instructions, examples, commands, code snippets, and technical details are correct and would actually work as written. Check that:
+
 - Command syntax is valid
 - File paths and references exist
 - Code examples match the actual codebase
@@ -28,6 +29,7 @@ The user must provide either a **file path** or a **directory path**.
 - Configuration values are valid and produce the described behavior
 
 **Clarity**: Evaluate whether a knowledgeable reader can understand the document without re-reading sentences. Flag:
+
 - Ambiguous pronouns or references ("it", "this", "that" without clear antecedents)
 - Jargon or acronyms used without definition on first occurrence
 - Sentences that try to convey too many ideas at once
@@ -36,6 +38,7 @@ The user must provide either a **file path** or a **directory path**.
 - Logical gaps — where the document jumps from A to C without explaining B
 
 **Consumability**: Assess how easy the document is for a human to read and use. Flag:
+
 - Walls of text that should be broken into sections, lists, or tables
 - Missing headings or poor heading hierarchy
 - Content that would be clearer as a table, diagram, or list instead of prose
@@ -44,6 +47,7 @@ The user must provide either a **file path** or a **directory path**.
 - Lack of visual hierarchy — no bold, no callouts, no structure to guide the eye
 
 **Completeness**: Identify what's missing from the document. Flag:
+
 - Topics introduced but never explained
 - References to concepts, systems, or processes that lack sufficient context
 - Missing prerequisites or assumptions that should be stated upfront
@@ -52,6 +56,7 @@ The user must provide either a **file path** or a **directory path**.
 - Workflows described without error/failure scenarios
 
 **Information Architecture — Splitting & Seams**: Evaluate whether the document tries to do too much. Look for logical seams where content should be split into separate documents. Signs a document should be split:
+
 - It covers multiple distinct topics that serve different audiences or purposes
 - It exceeds a length where a reader would lose context (roughly 800+ lines of substantive content)
 - It mixes reference material with tutorials or conceptual explanations
@@ -61,6 +66,7 @@ The user must provide either a **file path** or a **directory path**.
 When recommending splits, be specific: describe what each resulting document would contain and how they'd reference each other.
 
 **Document Set Completeness**: When reviewing a file within a directory or reviewing a full directory, assess what's missing from the set. Consider:
+
 - Is there an overview or index document that orients the reader?
 - Are there gaps between documents — topics that fall between the cracks?
 - Do documents reference concepts that are explained nowhere in the set?
@@ -70,6 +76,7 @@ When recommending splits, be specific: describe what each resulting document wou
 Recommend specific additional documents that should be created, with a brief description of what each should cover and why it's needed.
 
 **Consistency**: Within a single document and across a document set, check for:
+
 - Contradictory statements
 - Inconsistent terminology (same concept called different names)
 - Inconsistent formatting conventions
@@ -118,15 +125,19 @@ For each high-confidence issue, provide:
 Group issues by category:
 
 ### Critical (Truth & Accuracy)
+
 Issues where the document is factually wrong, contradicts its source material, or would cause the reader to do the wrong thing.
 
 ### Important (Clarity & Completeness)
+
 Issues where the document is technically correct but confusing, incomplete, or hard to use.
 
 ### Structure (Architecture & Splits)
+
 Recommendations for splitting documents, reordering content, or creating new companion documents.
 
 ### Document Set Gaps
+
 Missing documents that should be created to complete the set, with a description of what each should cover.
 
 If no high-confidence issues exist, confirm the documentation meets standards with a brief summary of what's working well.

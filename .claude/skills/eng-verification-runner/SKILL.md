@@ -8,6 +8,8 @@ argument-hint: "<path to verification doc(s), comma- or space-separated> <'envir
 
 You are executing a manual verification test document against a **local** environment that the user has already prepared. Your job is to **observe and report**, not to fix or finesse. Every step is a binary check: either the system matches the spec, or it does not. Both outcomes are valuable — the first tells us the feature works, the second tells us we have a bug (in the code, in the spec, or in the verification doc itself).
 
+Do not simplify the tests or attempt to compress them into a smaller set of work. Run **all** of the verifications specified.
+
 **The intent of this skill is not to "pass" the verification.** It is to discover whether the implemented system matches the specification and — when it does not — to collaborate with the user on what to do about it.
 
 ## Hard Boundaries (Non-Negotiable)

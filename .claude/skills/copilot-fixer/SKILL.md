@@ -8,6 +8,28 @@ argument-hint: "<PR URL or number, or blank to discover from current branch>"
 
 You triage GitHub Copilot review comments on a pull request: refute non-issues with grounded technical reasoning, and fix valid issues with full quality verification. You also handle CI pipeline failures reported on the PR.
 
+## PR Tool Scripts
+
+This skill includes Python helper scripts for all GitHub PR interactions. They live alongside this skill file and require only Python 3 stdlib (no pip installs). All scripts output JSON to stdout.
+
+**Resolve the script directory** at the start of every run:
+
+```bash
+SKILL_DIR="$HOME/.claude/skills/copilot-fixer"
+```
+
+Available tools:
+
+| Script | Purpose | Usage |
+|--------|---------|-------|
+| `pr_discover.py` | Find PR from URL, number, or branch | `python3 "$SKILL_DIR/pr_discover.py" [URL_OR_NUMBER]` |
+| `pr_threads.py` | Fetch review threads (Copilot/unresolved filtering) | `python3 "$SKILL_DIR/pr_threads.py" PR_NUMBER [--copilot-only] [--unresolved-only]` |
+| `pr_reply.py` | Reply to a review thread | `python3 "$SKILL_DIR/pr_reply.py" THREAD_ID "body text"` |
+| `pr_resolve.py` | Resolve a review thread | `python3 "$SKILL_DIR/pr_resolve.py" THREAD_ID` |
+| `pr_checks.py` | Get CI check status and failure logs | `python3 "$SKILL_DIR/pr_checks.py" PR_NUMBER [--failing-only] [--logs]` |
+
+For long reply bodies, `pr_reply.py` supports `--body-file /path/to/file.txt` instead of an inline string.
+
 ## Critical Rules
 
 1. **Ground every judgment in code.** Read the actual source before deciding if a Copilot comment is valid or not. Never dismiss a comment based on the comment text alone.
@@ -23,36 +45,26 @@ You triage GitHub Copilot review comments on a pull request: refute non-issues w
 
 $ARGUMENTS
 
-Parse the input:
-
-- **PR URL** (e.g., `https://github.com/org/repo/pull/123`) — extract owner, repo, and PR number.
-- **PR number** (e.g., `123` or `#123`) — use the current repo context.
-- **Empty / no input** — discover from the current branch (see below).
-
-### Branch-Based Discovery
-
-If no PR is specified:
+### Discover the PR
 
 ```bash
-# Get current branch
-git rev-parse --abbrev-ref HEAD
+SKILL_DIR="$HOME/.claude/skills/copilot-fixer"
 
-# Try to find an open PR for this branch
-gh pr view --json number,url,headRefName,title,state 2>/dev/null
+# Pass the user's argument (URL, number, or nothing) directly:
+python3 "$SKILL_DIR/pr_discover.py" [ARGUMENT]
 ```
 
-If `gh pr view` fails (no PR associated with the current branch):
+The script handles all three cases (URL, number, branch discovery) and outputs JSON:
 
-```bash
-# Try listing PRs with this branch as head
-gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --json number,url,title,state
+```json
+{"number": 123, "url": "...", "title": "...", "branch": "...", "owner": "...", "repo": "...", "state": "OPEN"}
 ```
 
-**If neither approach finds a PR: STOP.** Tell the user no PR was found for the current branch and ask them to provide the PR URL. Do not guess or proceed without a confirmed PR.
+**If it exits non-zero with an error, STOP and ask the user for the PR URL.**
+
+Save `number`, `owner`, and `repo` from the output — they're used throughout.
 
 ### Checkout the PR Branch
-
-Ensure the working tree is on the PR's head branch:
 
 ```bash
 gh pr checkout <number>
@@ -68,57 +80,31 @@ Run these in parallel to collect both Copilot comments and CI status:
 
 ### 2.1 Fetch Copilot Review Comments
 
-Use GraphQL to fetch review threads (not individual comments), since resolving threads requires thread IDs that are only available via GraphQL:
-
 ```bash
-gh api graphql -f query='
-query($owner: String!, $repo: String!, $pr: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $pr) {
-      reviewThreads(first: 100) {
-        nodes {
-          id
-          isResolved
-          isOutdated
-          path
-          line
-          comments(first: 10) {
-            nodes {
-              id
-              body
-              author {
-                login
-                ... on Bot {
-                  __typename
-                }
-              }
-              createdAt
-            }
-          }
-        }
-      }
-    }
-  }
-}' -f owner='{owner}' -f repo='{repo}' -F pr=<number>
+python3 "$SKILL_DIR/pr_threads.py" <number> --copilot-only --unresolved-only
 ```
 
-**Identify Copilot threads dynamically.** Filter for threads where the first comment's author is a Bot whose login contains `copilot`. Do not hardcode a specific bot username — the exact login may vary across organizations and over time.
+Returns a JSON array of unresolved Copilot threads. Each thread includes:
+- `id` — the GraphQL thread node ID (used for replies and resolution)
+- `path` — the file path
+- `line` — the line number
+- `isCopilot` — true (since we filtered)
+- `comments` — array of comment objects with `body`, `author`, `isBot`
 
-Discard threads that are already resolved or outdated.
+The script dynamically identifies Copilot by filtering for Bot authors with "copilot" in the login — no hardcoded username.
 
-**Scope note:** Copilot may also post an overall review-summary comment on the PR (not a per-line thread). These summary comments are not review threads and cannot be resolved — they are informational. This skill targets the per-line review threads, not the summary. If a summary comment exists, ignore it.
+**Scope note:** Copilot may also post an overall review-summary comment on the PR (not a per-line thread). These are not review threads and cannot be resolved. This skill targets per-line review threads only.
 
 ### 2.2 Fetch CI Check Status
 
 ```bash
-gh pr checks <number> --json name,state,bucket,link,completedAt
+python3 "$SKILL_DIR/pr_checks.py" <number> --failing-only --logs
 ```
 
-Identify failing checks. For each failure, extract the run ID from the `link` field and get the logs:
+Returns JSON with failing checks and their truncated failure logs:
 
-```bash
-# Extract run ID from the link URL, then:
-gh run view <run-id> --log-failed
+```json
+{"checks": [{"name": "...", "bucket": "fail", "log": "..."}], "summary": {"total": N, "pass": N, "fail": N}}
 ```
 
 ### 2.3 Classify Work
@@ -164,7 +150,7 @@ Evaluate whether the Copilot comment identifies a real issue:
 ### 3.3 Record Triage Decision
 
 For each thread, record:
-- Thread ID (for GraphQL operations)
+- Thread ID (for script operations)
 - File path and line
 - Copilot's concern (one sentence)
 - Your assessment: `VALID` or `NON-ISSUE`
@@ -198,35 +184,23 @@ Reply to the thread with a technically grounded explanation of why the comment i
 
 Tone: professional, respectful, concise. These are visible to the team.
 
-Use GraphQL to reply (REST `in_reply_to` requires database integer IDs, but our thread query returns opaque node IDs — use GraphQL for consistency):
+```bash
+python3 "$SKILL_DIR/pr_reply.py" "<thread_id>" "Your refutation text here"
+```
+
+For longer replies, write the body to a temp file and use:
 
 ```bash
-gh api graphql -f query='
-mutation($threadId: ID!, $body: String!) {
-  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
-    comment {
-      id
-    }
-  }
-}' -f threadId="<thread_node_id>" -f body="<reply>"
+python3 "$SKILL_DIR/pr_reply.py" "<thread_id>" --body-file /tmp/reply.txt
 ```
 
 ### 4.2 Resolve the Thread
 
-Attempt to resolve the thread via GraphQL:
-
 ```bash
-gh api graphql -f query='
-mutation($threadId: ID!) {
-  resolveReviewThread(input: {threadId: $threadId}) {
-    thread {
-      isResolved
-    }
-  }
-}' -f threadId="<thread_node_id>"
+python3 "$SKILL_DIR/pr_resolve.py" "<thread_id>"
 ```
 
-**If resolution fails** (insufficient permissions), note it in the final report but continue. The refutation reply is the primary deliverable; resolution is a convenience. The user's expectation is "if you have the ability."
+The script returns `{"success": true/false}`. **If resolution fails** (insufficient permissions), note it in the final report but continue. The refutation reply is the primary deliverable; resolution is a convenience.
 
 ---
 
@@ -236,16 +210,18 @@ mutation($threadId: ID!) {
 
 For each thread assessed as `VALID`:
 
-1. Post an acknowledgment reply to the thread (same GraphQL `addPullRequestReviewThreadReply` mutation as 4.1):
-   > "Valid point — this is a real issue. Fixing now."
+1. Post an acknowledgment reply:
+   ```bash
+   python3 "$SKILL_DIR/pr_reply.py" "<thread_id>" "Valid point — this is a real issue. Fixing now."
+   ```
 2. Implement the fix in the working tree.
-3. **Do NOT resolve the thread yet.** Valid-issue threads are resolved after a successful push (Phase 7) to avoid marking threads resolved when the fix hasn't landed on the remote. A resolved thread with no pushed commit is misleading to reviewers.
+3. **Do NOT resolve the thread yet.** Valid-issue threads are resolved after a successful push (Phase 7) to avoid marking threads resolved when the fix hasn't landed on the remote.
 
 ### 5.2 Fix CI Failures
 
-For each failing check:
+For each failing check (from Phase 2.2 output):
 
-1. Analyze the failure logs (`gh run view <run-id> --log-failed`).
+1. Analyze the failure log from the `log` field in the check output.
 2. Identify the root cause — build error, test failure, lint violation, etc.
 3. Implement the fix in the working tree.
 
@@ -364,7 +340,13 @@ git push
 
 ### 7.3 Resolve Valid-Issue Threads
 
-Now that the fix is pushed, resolve the threads for issues assessed as `VALID` (same GraphQL `resolveReviewThread` mutation as Phase 4.2). This ordering ensures threads are only marked resolved after the fix is live on the remote.
+Now that the fix is pushed, resolve the threads for issues assessed as `VALID`:
+
+```bash
+python3 "$SKILL_DIR/pr_resolve.py" "<thread_id>"
+```
+
+This ordering ensures threads are only marked resolved after the fix is live on the remote.
 
 ---
 
@@ -432,9 +414,9 @@ Report that the PR is clean. Do not fabricate work.
 
 If your fix breaks the build or tests, fix the regression before pushing. If you cannot resolve it after 2 attempts, **stop and ask the user** rather than pushing broken code.
 
-### If GraphQL Thread Resolution Fails
+### If Thread Resolution Fails
 
-Leave the refutation reply in place and note in the report that thread resolution requires elevated permissions. The reply is the substantive deliverable.
+The `pr_resolve.py` script returns `{"success": false}` on permission errors. Leave the refutation reply in place and note in the report that thread resolution requires elevated permissions.
 
 ### If the Pipeline Cannot Be Detected
 

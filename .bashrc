@@ -80,9 +80,17 @@ if [ -x "$(command -v direnv)" ]; then
 fi
 
 #
-# fzf support
+# fzf support (key bindings incl. ctrl-r history search, + completion)
 #
-[ -f "$HOME/.fzf.bash" ] && source "$HOME/.fzf.bash"
+# Uses fzf's built-in shell integration (fzf >= 0.48), which works on any
+# OS / install location as long as fzf is on PATH. Falls back to the legacy
+# generated file if present.
+#
+if [ -x "$(command -v fzf)" ]; then
+    eval "$(fzf --bash)"
+elif [ -f "$HOME/.fzf.bash" ]; then
+    source "$HOME/.fzf.bash"
+fi
 
 #
 # ssh agent

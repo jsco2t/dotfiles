@@ -205,6 +205,8 @@ def scan_directory(directory, excludes):
     return docs
 
 
+HUB_LINK_THRESHOLD = 15
+
 def build_clusters(docs):
     """Build document clusters based on weighted tag similarity.
 
@@ -264,9 +266,13 @@ def build_clusters(docs):
             if w >= MIN_CONNECT_WEIGHT:
                 union(i, j)
 
-    # Also cluster by wiki-links (strong signal)
+    # Also cluster by wiki-links (strong signal).
+    # Skip hub documents (index/TOC files) that link to everything —
+    # they'd collapse the entire corpus into one cluster.
     filename_to_idx = {doc["filename"]: i for i, doc in enumerate(docs)}
     for i, doc in enumerate(docs):
+        if len(doc["wiki_links"]) > HUB_LINK_THRESHOLD:
+            continue
         for link in doc["wiki_links"]:
             if link in filename_to_idx:
                 union(i, filename_to_idx[link])
@@ -289,6 +295,9 @@ def build_clusters(docs):
             members, docs, tag_idf, filename_to_idx,
             min_weight=weight,
         )
+        if len(subs) == 1 and len(subs[0]) == len(members):
+            final_clusters.append(members)
+            return
         for sub in subs:
             if len(sub) > MAX_CLUSTER_SIZE:
                 refine(sub, weight + 2.0)
@@ -357,9 +366,11 @@ def _sub_cluster(members, docs, tag_idf, filename_to_idx, min_weight):
             if w >= min_weight:
                 union(i, j)
 
-    # Wiki-links within this group
+    # Wiki-links within this group (skip hub documents)
     member_filenames = {docs[m]["filename"]: i for i, m in enumerate(members)}
     for i, m in enumerate(members):
+        if len(docs[m]["wiki_links"]) > HUB_LINK_THRESHOLD:
+            continue
         for link in docs[m]["wiki_links"]:
             if link in member_filenames:
                 union(i, member_filenames[link])

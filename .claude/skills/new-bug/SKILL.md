@@ -21,6 +21,9 @@ You need two inputs. If either is missing, use AskUserQuestion to ask:
 1. **Root index file** — absolute path to either:
    - A **project-level** root `index.md` (sibling to `prd.md`, has a `features/` subfolder)
    - A **feature-level** root `index.md` (sibling to `plans/`, `tasks/`, has no `prd.md`)
+   - **No root index**: The supplied path has no index file. In this case create a (or use existing)
+     `bugs/` folder. Perform the bug fix planning based on the second parameter and the current
+     source code.
 
    The `bugs/` folder will be created at the same level as this index file.
 
@@ -52,6 +55,7 @@ From the user's bug description, extract:
 - **Short description**: a dash-cased slug summarizing the problem (3-5 words max)
 
 Construct the bug folder name:
+
 - With tracker ID: `{BUG-ID}-{short-description}` (e.g., `FUZZ-6904-ephemeral-permission-fix`)
 - Without tracker ID: `{short-description}` (e.g., `volume-delete-race-condition`)
 
@@ -90,21 +94,21 @@ If the `bugs/` directory already exists, do not recreate it — add the new bug 
 
 ## Documentation Structure
 
-| Document | Purpose |
-| -------- | ------- |
-| [`plan.md`](plan.md) | Root cause analysis, fix strategy, and test gap assessment |
-| [`tasks/`](tasks/index.md) | Implementation task breakdown with test-forward approach |
+| Document                   | Purpose                                                    |
+| -------------------------- | ---------------------------------------------------------- |
+| [`plan.md`](plan.md)       | Root cause analysis, fix strategy, and test gap assessment |
+| [`tasks/`](tasks/index.md) | Implementation task breakdown with test-forward approach   |
 
 ---
 
 ## Summary
 
-| Metric | Value |
-| ------ | ----- |
-| Total Tasks | [count] |
-| Estimated Effort | [total] days |
-| Root Cause | [1-sentence summary] |
-| Test Gap | [What automated test was missing] |
+| Metric           | Value                             |
+| ---------------- | --------------------------------- |
+| Total Tasks      | [count]                           |
+| Estimated Effort | [total] days                      |
+| Root Cause       | [1-sentence summary]              |
+| Test Gap         | [What automated test was missing] |
 ```
 
 **Tasks `index.md`:**
@@ -248,8 +252,8 @@ Create `plan.md` inside the bug folder.
 
 ### 3.3 Files Changed
 
-| File | Change |
-| ---- | ------ |
+| File   | Change                  |
+| ------ | ----------------------- |
 | [path] | [Description of change] |
 
 ---
@@ -272,17 +276,17 @@ This section is **mandatory**. A bug reaching this stage means automated validat
 
 ### 4.4 Test Plan
 
-| # | Test Case | What It Validates | Type |
-| - | --------- | ----------------- | ---- |
-| 1 | [Test name] | [What it checks] | New / Modified |
+| # | Test Case   | What It Validates | Type           |
+| - | ----------- | ----------------- | -------------- |
+| 1 | [Test name] | [What it checks]  | New / Modified |
 
 ---
 
 ## 5. Risk Assessment
 
-| Risk | Likelihood | Impact | Mitigation |
-| ---- | ---------- | ------ | ---------- |
-| [Risk] | [H/M/L] | [H/M/L] | [Strategy] |
+| Risk   | Likelihood | Impact  | Mitigation |
+| ------ | ---------- | ------- | ---------- |
+| [Risk] | [H/M/L]    | [H/M/L] | [Strategy] |
 
 ---
 
@@ -339,10 +343,12 @@ Create one file per logical phase in `tasks/`. Name files: `01-{description}.md`
 [What to do. Include specific file paths, line numbers, and code changes. Be precise enough that the implementation is unambiguous.]
 
 **Acceptance Criteria:**
+
 - [ ] [Specific, verifiable criterion]
 - [ ] [Another criterion]
 
 **Files:**
+
 - [List every file to create or modify]
 ```
 
@@ -396,9 +402,9 @@ If no `bugs/index.md` exists, create one:
 
 ---
 
-| Bug | Status | Effort | Index |
-| --- | ------ | ------ | ----- |
-| [Bug ID — Short Title] | Planning Complete | [N]d | [link](bug-folder/index.md) |
+| Bug                    | Status            | Effort | Index                       |
+| ---------------------- | ----------------- | ------ | --------------------------- |
+| [Bug ID — Short Title] | Planning Complete | [N]d   | [link](bug-folder/index.md) |
 ```
 
 ### Step 4.4: Update the Root Index
@@ -409,11 +415,13 @@ Read the root index file (the one the user provided as input). Add or update a "
 - If no bugs section exists, add one to the Documentation Structure table:
 
 For **project-level** indexes, add to the Documentation Structure table:
+
 ```markdown
 | [`bugs/`](bugs/index.md) | Bug fix documentation and task plans | [bugs/index.md](bugs/index.md) |
 ```
 
 For **feature-level** indexes, add to the Documentation Structure table:
+
 ```markdown
 | [`bugs/`](bugs/index.md) | Bug fix documentation and task plans | [bugs/index.md](bugs/index.md) |
 ```
@@ -439,6 +447,7 @@ After all phases complete, present:
 ### If the Root Cause Cannot Be Determined
 
 Do not guess. Present what you found (partial traces, candidate locations) and ask the user for guidance via AskUserQuestion. Options:
+
 - Provide more context or reproduction steps
 - Point to a specific area of the code to investigate
 - Proceed with the best-available hypothesis (clearly marked as such)

@@ -40,6 +40,12 @@ These principles are non-negotiable. Every verification document must satisfy th
 
 7. **Documents are self contained** EVERY verification document must understand how to configure the environment for testing AND clean everything up for testing. **DO NOT** create verification documents which are just "setup" or "cleanup". Leave the system under test in the same state as when you found it.
 
+8. **Verification Document Conventions**:
+   - Every document can setup and cleanup after itself.
+   - Verification documents do not rely on the order in which the documents are ran.
+   - Do NOT use the temp directory for test fixtures - check them into the repository.
+   - If the output of one command needs to be used as the input to another command then capture that as a variable.
+
 ## Verification Creation Process
 
 ### Phase 1: Gather Spec Requirements (Source of Truth)

@@ -303,6 +303,7 @@ This section is **mandatory**. A bug reaching this stage means automated validat
 - The Test Gap Assessment (§4) is not optional — skip it and the plan is incomplete
 - Before/after code snippets must be copy-pasteable (correct indentation, full context)
 - If the fix requires changes to multiple files, list ALL of them in §3.3
+- Whenever the plan names a project artifact path (changelog entry, release-notes file, migration, fixture, etc.), verify the project's actual naming convention before writing it down — see Important Guidelines #9. A wrong path in the plan propagates into the task doc and the implementation; once it's down on paper, the implementer copies it.
 
 ---
 
@@ -479,3 +480,14 @@ Flag this prominently. Per project rules, proto changes must be additive. If the
 7. **Bug folder naming is permanent.** The folder name becomes the canonical identifier. Get it right: `{TRACKER-ID}-{short-description}` with the tracker ID if available.
 
 8. **Don't create what wasn't asked for.** No `research/`, `reviews/`, `follow-ups/`, `verifications/`, or `design.md`. Bugs are focused. The plan IS the design. Extra structure is noise.
+
+9. **Verify repository conventions before naming artifacts.** When the plan references any repository artifact — changelog entries, release-notes files, database migrations, test fixtures, generated proto files, etc. — discover the actual project convention. Do not invent filenames from training-data memory; the cost of a wrong path in the plan is that it gets copied into the task doc and then into the working tree.
+
+   **How to verify (cheap):**
+   - Find the generator code that produces the artifact (e.g. for Fuzzball changelogs: `fuzzy/pkg/changelog/changelog.go` — the `Add()` function shows the exact filename format and the schema). Read what filename and schema it produces.
+   - List a handful of recent examples in the canonical directory (`ls changelog/pending/`, `ls changelog/releases/<latest>/`, `ls database/migrations/`). The de-facto pattern is whatever the recent commits do.
+   - Confirm your proposed name matches *exactly* — same date format, no descriptive suffixes, no extra fields, no creative reordering.
+
+   **Concrete failure mode (Fuzzball, FUZZ-7632):** a plan suggested `changelog/pending/20260612-fuzz-7632-volume-list-pagination.yaml`. The actual generator at `fuzzy/pkg/changelog/changelog.go:160-161` only ever produces `YYYYMMDD-fuzz-NNNN.yaml` with no descriptive suffix, and the schema is a fixed 4-field YAML (`issue`, `description`, `scope`, `type`) where `scope` and `type` must match values in `changelog/config.yaml`. The wrong filename made it into the task doc and would have shipped as a non-conforming artifact if not caught. A 30-second check of the generator code would have produced the right name on the first try.
+
+   **When uncertain, ask the user.** A one-question clarification is cheaper than a wrong path that propagates through the documentation and the diff.

@@ -1,0 +1,95 @@
+{
+  "includeCoAuthoredBy": false,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/allow-safe-pipes.sh",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(go run *)",
+      "Bash(go vet *)",
+      "Bash(gofmt *)",
+      "Bash(cargo build *)",
+      "Bash(cargo test *)",
+      "Bash(cargo check *)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo run *)",
+      "Bash(python *)",
+      "Bash(pytest *)",
+      "Bash(pip install *)",
+      "Bash(make *)",
+      "Bash(mage *)",
+      "Bash(grep *)",
+      "Bash(tail:*)",
+      "Bash(head:*)",
+      "Bash(wc:*)",
+      "Bash(sort:*)",
+      "Bash(uniq:*)",
+      "Bash(cat:*)",
+      "Bash(cut:*)",
+      "Bash(column:*)",
+      "Bash(nl:*)",
+      "Bash(tac:*)",
+      "Bash(rev:*)",
+      "Bash(fold:*)",
+      "Bash(comm:*)",
+      "Bash(diff:*)",
+      "Bash(jq:*)",
+      "Bash(yq:*)",
+      "Bash(rg:*)",
+      "Bash(less:*)",
+      "Bash(tree:*)",
+      "Edit",
+      "Read($HOME/Developer/sources/personal/notebook)",
+      "Write($HOME/Developer/sources/personal/notebook/projects/runaire)",
+      "Write($HOME/Developer/sources/personal/notebook/projects/storas)",
+      "Write($HOME/Developer/sources/personal/notebook/projects/home_lab)"
+    ],
+    "deny": [
+      "Read(.env*)",
+      "Read($HOME/.ssh)",
+      "Read($HOME/.kube)",
+      "Read($HOME/.aws)",
+      "Read($HOME/.dotfiles)",
+      "Write($HOME/.ssh)",
+      "Write($HOME/.kube)",
+      "Write($HOME/.aws)",
+      "Write($HOME/.dotfiles)",
+      "Write(rm -rf *)",
+      "Bash(git push *)"
+    ],
+    "ask": [
+      "Bash(git commit:*)"
+    ],
+    "defaultMode": "acceptEdits"
+  },
+  "model": "opus",
+  "statusLine": {
+    "type": "command",
+    "command": "/usr/bin/env python3 $HOME/.claude/statusline.py"
+  },
+  "enabledPlugins": {
+    "gopls-lsp@claude-plugins-official": true,
+    "rust-analyzer-lsp@claude-plugins-official": true,
+    "pyright-lsp@claude-plugins-official": true,
+    "context7@claude-plugins-official": true,
+    "lua-lsp@claude-plugins-official": true
+  },
+  "sandbox": {
+    "enabled": true
+  },
+  "effortLevel": "xhigh",
+  "advisorModel": "opus"
+}

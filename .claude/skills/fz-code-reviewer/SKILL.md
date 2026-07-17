@@ -180,15 +180,21 @@ Both reviewers are intolerant of code clutter:
 
 ## Process Guidance
 
-- Gather all of the changes to be reviewed.
+**Use fork subagents. Never use the Workflow tool.**
 
-- Create sub-agents -- each tasked with **one** of the review responsibilities above.
+1. Gather all changes to be reviewed.
 
-- Have those sub-agents review the code identified to be reviewed and report back.
+2. Launch **one fork subagent per review responsibility** using `Agent` with `subagent_type: "fork"`. Launch all forks in a **single message** so they run in parallel. Each fork's prompt must:
+   - Specify its **single** review dimension (e.g., "Review for backward compatibility & API stability issues only").
+   - Include the diff or file list to review.
+   - Instruct the fork to **execute the review directly — do not re-delegate or spawn further agents**.
+   - Instruct the fork to report findings with confidence scores, file paths, and line numbers.
 
-- Use the main AI thread to process the results and produce a report.
+3. Collect all fork reports. In the main thread, deduplicate, cross-reference, and synthesize into a single report.
 
-- No agent should make code changes. This is a review only task.
+4. **No agent should make code changes.** This is a review-only task.
+
+5. **Never compress multiple review dimensions into fewer agents** to save time or tokens. Each dimension gets its own agent, regardless of diff size.
 
 ## Confidence Scoring
 

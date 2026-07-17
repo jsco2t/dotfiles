@@ -1,7 +1,7 @@
 ---
 name: task-processor
 description: "Execute a task from a task plan with full context loading, auto-planned implementation, and structured completion criteria (code review, test review, lint, build, test, task tracking updates). Takes paths to feature research, design doc, task index, and specific task document."
-argument-hint: "<research-path> <design-path> <task-index-path> <task-path>|<index-file> <task-doc-filename>"
+argument-hint: "<index-file> <task-doc-filename>"
 ---
 
 # Task Processor Skill
@@ -16,75 +16,42 @@ $ARGUMENTS
 
 ## Phase 1: Resolve Inputs
 
-You need four document paths. Parse them from the arguments above, or prompt the user for any that are missing.
-You support an alternate input structure of `index-file` and `task-doc-filename`. When these two inputs are provided you are to use the index file to build a map of the core project files. The index file (and the child locations it points to) will let you discover the engineering specification / research document, the design document, the task files...etc.
+You need two documents `index-file` and `task-doc-filename`. Parse these from the inputs you are provided. The `index-file` can be used to discover the Feature Plan / Feature Specification, the Design Document, and the Task Documents.
 
 ### Required Documents
 
-1. **Feature Research / Specification** — the comprehensive research document for the feature
-2. **Design Document** — the architectural design and implementation approach
-3. **Task Index** — the top-level task summary with phase overview and checkbox tracking
-4. **Task Document** — the specific task to implement in this session
+1. **Task Index** — the top-level task summary with phase overview and checkbox tracking
+2. **Task Document** — the specific task to implement in this session
 
 ### Parsing Arguments
 
 Arguments may be provided as:
 
-- Four space-separated paths: `<research> <design> <task-index> <task>`
-- Key-value style: `research=<path> design=<path> index=<path> task=<path>`
-- A single task path (with the others inferred from sibling files)
-- Empty (prompt for all)
+- Twp space-separated paths: `<index-file-path> <task document filename or filepath>`
+- Key-value style: `index=<path> task=<path>` (alternatively: `index:<path> task-doc-filename:<path>`)
+- A single index file path - where the documents needed for this skill can be auto-discovered
 
 ### Inferring Paths
 
-If only a task document path is provided, attempt to infer the others:
+If only an index file path is provided:
 
-- Look for `feature-research.md` and `feature-design.md` in the parent or grandparent directory
-- Look for `00-task-summary.md` in the same directory as the task document
+- Look for `plan.md` (or `./plans/implementation-plan.md`)
+- Look for `./tasks/index.md`
 
 ### Prompting for Missing Inputs
 
-If any path cannot be resolved, prompt the user. Offer defaults based on recent work:
-
-```
-I need the following document paths to proceed:
-
-1. Feature Research: [default: /Users/jscott/Developer/sources/personal/notebook/projects/fuzzball/features/FUZZ-3365/feature-research.md]
-2. Design Document:  [default: /Users/jscott/Developer/sources/personal/notebook/projects/fuzzball/features/FUZZ-3365/feature-design.md]
-3. Task Index:       [default: /Users/jscott/Developer/sources/personal/notebook/projects/fuzzball/features/FUZZ-3365/tasks/00-task-summary.md]
-4. Task Document:    [no default — please specify]
-
-Press Enter to accept defaults, or provide alternate paths.
-```
+If any path cannot be resolved, prompt the user.
 
 **STOP here and wait for user input if any required path is missing.**
 
 ## Phase 2: Load Context
 
-Read all four documents to build a comprehensive understanding:
+Read all the core documents:
 
-1. **Read the Task Document** first — this is the primary focus. Understand:
-   - Description and problem statement
-   - Acceptance criteria (these become your checklist)
-   - Files to modify
-   - Implementation notes and guidance
-   - Dependencies on other tasks
-
-2. **Read the Task Index** — understand:
-   - Which phase this task belongs to
-   - What tasks preceded this one (already complete)
-   - What tasks follow (do not implement these)
-   - The checkbox entry for this task (you will update it later)
-
-3. **Read the Design Document** — understand:
-   - Overall architecture decisions relevant to this task
-   - Design patterns and conventions to follow
-   - Integration points that affect this task
-
-4. **Read the Feature Research** — understand:
-   - Business context and requirements
-   - Technical constraints
-   - Open questions that may affect this task
+- Plan document (or `implementation-plan.md` in the `./plans/` directory)
+- Task index document (should indicate work completed and not yet completed). Look in the `./tasks` directory
+- Task document for the next work to work on (in the `./tasks` directory)
+- The Architecture/Design document (in the `/plans/` directory)
 
 ## Phase 3: Plan (Auto-Approved)
 

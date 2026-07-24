@@ -133,17 +133,15 @@ If the diff includes documentation files, verify that instructions and examples 
 
 ## Process Guidance
 
-**Use fork subagents. Never use the Workflow tool.**
-
 1. Gather all changes to be reviewed.
 
-2. Launch **one fork subagent per review responsibility** using `Agent` with `subagent_type: "fork"`. Launch all forks in a **single message** so they run in parallel. Each fork's prompt must:
+2. Launch **one subagent (if available) per review responsibility**. Launch all subagents at once in parallel. Each sub-agents prompt must:
    - Specify its **single** review dimension (e.g., "Review for backward compatibility issues only").
    - Include the diff or file list to review.
-   - Instruct the fork to **execute the review directly — do not re-delegate or spawn further agents**.
-   - Instruct the fork to report findings with confidence scores, file paths, and line numbers.
+   - Instruct the agent to **execute the review directly — do not re-delegate or spawn further agents**.
+   - Instruct the agents to report findings with confidence scores, file paths, and line numbers.
 
-3. Collect all fork reports. In the main thread, deduplicate, cross-reference, and synthesize into a single report.
+3. Collect all review reports (if subagents are used) reports. In the main thread, deduplicate, cross-reference, and synthesize into a single report.
 
 4. **No agent should make code changes.** This is a review-only task.
 

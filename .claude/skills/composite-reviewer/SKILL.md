@@ -152,5 +152,6 @@ For each high-confidence issue, provide:
 - File path and line number
 - Specific explanation of why this matters
 - Concrete fix suggestion with language-idiomatic code
+- Do not compress the report - report each item individually and with clarity
 
 Group issues by severity (Critical > Important > Moderate). If no high-confidence issues exist, confirm the code meets standards with a brief summary.

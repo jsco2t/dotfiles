@@ -34,17 +34,22 @@ These principles are non-negotiable. Every verification document must satisfy th
 
 4. **Manual fallbacks for everything.** Automated checks fail. Services don't start. Bootstrap races. Every verification must include what to do when the happy path doesn't work — manual creation steps, diagnostic commands, known issues with workarounds.
 
-5. **Small documents, clear progression.** Break each environment's verifications into numbered documents that build on each other. Each document should be completable in 5-30 minutes. The first document is always environment setup; the last is always cleanup. Group related verifications together in the same document.
+5. **Small documents, clear progression.** Break each environment's verifications into numbered documents. Each document should be completable in 5-30 minutes. Group related verifications together in the same document. Number documents for readability, but do NOT create ordering dependencies between them (see Principle 7).
 
 6. **Explain the "why", not just the "what".** When a test uses a specific provisioner, explain why. When a command needs a flag, explain what happens without it. When a known issue exists, explain the root cause. The tester should understand the feature, not just follow steps.
 
-7. **Documents are self contained** EVERY verification document must understand how to configure the environment for testing AND clean everything up for testing. **DO NOT** create verification documents which are just "setup" or "cleanup". Leave the system under test in the same state as when you found it.
+7. **Documents are self-contained and order-independent.** This is the most important structural rule. Every verification document MUST:
+   - **Own its own setup.** Include environment build, service startup, authentication, and any resource creation the tests need. A tester must be able to pick up ANY document and run it from scratch.
+   - **Own its own cleanup.** Tear down everything the document created — test resources, scratch files, and the environment itself. Leave the system in the same state it was found in.
+   - **Run in any order.** Documents WILL be executed in arbitrary order by different testers or AI runners. Document A must NEVER assume Document B ran first. If two documents need the same provisioner, both documents create it in their own setup.
+   - **Never be setup-only or cleanup-only.** Do NOT create documents whose sole purpose is environment setup or teardown. Every document is a complete unit: setup → tests → teardown. The ONE exception is expensive one-time environments (see Principle 15).
 
-8. **Verification Document Conventions**:
-   - Every document can setup and cleanup after itself.
-   - Verification documents do not rely on the order in which the documents are ran.
-   - Do NOT use the temp directory for test fixtures — check them into the repository.
-   - If the output of one command needs to be used as the input to another command then capture that as a variable.
+8. **Be explicit — every step spelled out.** Verification documents may be executed by an AI agent (`/eng-verification-runner`) that follows instructions literally. Do not presume "implied steps" will be understood. Specifically:
+   - Every action must have a concrete, copy-pasteable command in a bash code block.
+   - Never write "configure the environment" without showing exactly how.
+   - Never write "verify it works" without specifying what to check and what the expected output looks like.
+   - If the output of one command is needed by a later command, capture it in an environment variable (`export WF_ID=$(...)`).
+   - State preconditions explicitly ("this step assumes the compose environment is running" — then show how to start it).
 
 9. **Test fixtures live beside the verification docs, not in temp.** Create a `fixtures/` directory beside (or within) the verification environment folders. Organize by type: `fixtures/provisioners/`, `fixtures/workflows/`, `fixtures/segments/`, etc. Reference via a `$FIXTURES` environment variable set to the fully qualified path. NEVER write fixtures to `/tmp`, `$TMPDIR`, or any temporary directory. NEVER create ad-hoc YAML fixtures inline via heredocs written to temp files — if a test needs a YAML fixture, it must be a checked-in file in the `fixtures/` directory.
 
@@ -64,7 +69,7 @@ These principles are non-negotiable. Every verification document must satisfy th
 
 12. **Verify feature availability per level.** Before placing a test at a given environment level, confirm the feature is actually available there. Check compose configs for service availability (e.g., object cache, service proxy). Check Kind configs for environment types (e.g., segmented). Do not write tests for features that aren't present at that level.
 
-13. **Human and AI executable.** Every document must be runnable by a human or by the `/eng-verification-runner` skill. Include an AI guidance header at the top of every verification document:
+13. **Human and AI executable.** Every document must be runnable by a human or by the `/eng-verification-runner` skill. The AI runner follows instructions literally — it does not infer missing steps, guess at expected outputs, or fill in gaps. Write documents as if the reader has never seen the product and will execute exactly what is written, nothing more. Include an AI guidance header at the top of every verification document:
     ```
     > **AI Verification Runner Guidance**
     > This document is designed to be executed by a human or by the `/eng-verification-runner` skill.
@@ -77,7 +82,7 @@ These principles are non-negotiable. Every verification document must satisfy th
 
 14. **Simple, single-minded tests.** Each test should verify ONE thing clearly. Don't combine multiple unrelated verifications into a single test. Optimize for the number of tests that accurately verify product functionality — do NOT optimize for the fewest possible tests.
 
-15. **Cloud environment exception.** The ONLY exception to the self-sufficiency rule (Principle 7) is cloud environments. Cloud environments MAY use a single setup document (`00-*-environment-setup.md`) and teardown document (`99-*-environment-teardown.md`) because deploying cloud infrastructure is expensive and slow. All other docs within that cloud environment assume the cluster is deployed but must be self-sufficient for everything else (provisioners, volumes, users, groups).
+15. **One-time setup exception for expensive environments.** The ONLY exception to the self-sufficiency rule (Principle 7) is environments where setup is genuinely expensive — deploying cloud infrastructure (AWS, GCP, Azure), standing up a multi-node Kind cluster, or any operation that takes 10+ minutes and produces a shared environment multiple documents test against. These environments MAY use a single setup document (`00-*-environment-setup.md`) and teardown document (`99-*-environment-teardown.md`). All other docs within that environment assume the infrastructure is deployed but must be self-sufficient for everything else (creating their own provisioners, volumes, users, groups, central config changes, and cleaning them up). Compose environments do NOT qualify for this exception — each compose doc starts and stops its own compose stack.
 
 16. **Multi-account cloud configuration.** Cloud verification docs must provide environment variables for ALL required cloud accounts. For AWS, this typically means both a nonprod/test account AND a marketplace/container account. Include both in the env var block of every cloud doc.
 
@@ -532,7 +537,7 @@ Each verification document is self-sufficient and includes its own setup and tea
 
 Each document repeats this pattern so it can be run independently.
 
-**Cloud environment exception (Principle 15):** For cloud environments (AWS/Azure/GCP), deploying infrastructure is too expensive to repeat per-document. Cloud environments MAY have a dedicated `00-*-environment-setup.md` that deploys the cluster and a `99-*-environment-teardown.md` that destroys it. All other cloud docs assume the cluster is deployed but must be self-sufficient for everything else (creating their own provisioners, volumes, users, groups, and cleaning them up).
+**One-time setup exception (Principle 15):** For environments where setup is genuinely expensive (cloud infrastructure, multi-node Kind clusters), a dedicated `00-*-environment-setup.md` and `99-*-environment-teardown.md` are allowed. All other docs within that environment assume the infrastructure is deployed but must be self-sufficient for everything else (creating their own provisioners, volumes, users, groups, central config changes, and cleaning them up). Compose environments do NOT qualify — each doc starts and stops its own compose stack.
 
 Include known issues and manual workarounds (e.g., bootstrap race conditions, macOS-specific limitations, port conflicts).
 
@@ -547,7 +552,7 @@ Each verification document covers a functional area. Follow this structure for e
 **Purpose**: [What this document verifies]
 **Estimated Time**: [minutes]
 
-> **Required:** Environment variables from `01-environment-setup.md` "Environment Setup" section are set (`$VAR1`, `$VAR2`, `$alias`).
+> **Required:** Environment variables from the "Environment Variables" section above are set (`$VAR1`, `$VAR2`, `$alias`).
 
 ---
 
@@ -601,13 +606,13 @@ Each verification document covers a functional area. Follow this structure for e
 **Rules for writing test cases:**
 
 - Every test MUST have a `Spec Reference` line linking to the Jira story it verifies. Tests that verify non-spec behaviors (e.g., debugging support, cleanup) use `Spec Reference: N/A`
-- Commands must use env vars, not hardcoded paths. Set vars once in the setup doc, reference everywhere
+- Commands must use env vars, not hardcoded paths. Set vars in the Environment Variables section, reference everywhere
 - Include `> **Note:**` blocks to explain non-obvious flags, workarounds, or context
 - Include `> **Known Issue:**` blocks for bugs or limitations the tester will encounter
 - YAML/config fixtures MUST be checked-in files in `fixtures/`, referenced via `$FIXTURES`. Do NOT use heredocs to create fixture files at runtime — the fixture must exist before the test runs
 - Capture resource IDs in env vars (`export WF_ID=$(...  -o json | jq -r '.ID')`) for use in subsequent commands. Verify the JSON field casing (`.ID` vs `.id`) against the source code
 - Test both happy path AND error cases (permission denied, already exists, not found)
-- Include cleanup steps at the end of each document or in a dedicated cleanup document
+- Include cleanup steps at the end of each document (never in a separate cleanup-only document)
 
 #### Step 3.5: Write Teardown Sections
 
@@ -617,9 +622,9 @@ Every verification document includes its own teardown section at the end (Princi
 2. Use `2>/dev/null || true` for cleanup commands that may fail if resources were already deleted
 3. Leave the environment in the same state it was found in (other documents may run after this one)
 
-**Do NOT create standalone cleanup-only documents** (except for cloud environment teardown per Principle 15).
+**Do NOT create standalone cleanup-only documents** (except for expensive one-time environments per Principle 15).
 
-For compose/kind environments, include environment shutdown (compose down, kind cleanup) at the end of each document's teardown section — since each document is self-sufficient, it starts and stops its own environment.
+For compose environments, include environment shutdown (compose down) at the end of each document's teardown section — since each document is self-sufficient, it starts and stops its own environment. For Kind or cloud environments that use the one-time setup exception (Principle 15), the teardown section cleans up test-created resources but does NOT destroy the shared cluster — that's the `99-*-teardown.md` document's job.
 
 ### Phase 4: Validate Coverage
 
@@ -690,7 +695,7 @@ Before completing, verify every document against this checklist:
 ### Self-Sufficiency
 - [ ] Every document has its own setup section (can run independently)
 - [ ] Every document has its own teardown section (cleans up after itself)
-- [ ] No document says "see doc X for prerequisites" (except cloud setup doc)
+- [ ] No document says "see doc X for prerequisites" (except docs in environments using the one-time setup exception)
 - [ ] No document depends on running other docs first
 
 ### Fixtures & Files

@@ -1,0 +1,19 @@
+{
+  "basedpyright": "1.39.10",
+  "codelldb": "v1.12.2",
+  "delve": "v1.27.1",
+  "gofumpt": "v0.11.0",
+  "goimports": "v0.49.0",
+  "golangci-lint": "v2.13.1",
+  "lua-language-server": "3.19.1",
+  "marksman": "2026-02-08",
+  "prettier": "3.9.6",
+  "ruff": "0.16.4",
+  "rust-analyzer": "2026-08-17.4",
+  "shellcheck": "v0.11.0",
+  "shfmt": "v3.13.1",
+  "stylua": "v2.5.2",
+  "taplo": "0.10.0",
+  "vtsls": "0.3.0",
+  "yaml-language-server": "1.24.0"
+}

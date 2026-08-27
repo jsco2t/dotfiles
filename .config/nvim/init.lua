@@ -35,7 +35,8 @@ vim.loader.enable()
 local opt = vim.opt
 
 opt.number = true
-opt.relativenumber = true
+opt.number = true
+opt.relativenumber = false
 opt.signcolumn = "yes" -- never shift the text when diagnostics appear
 opt.cursorline = true
 opt.scrolloff = 8

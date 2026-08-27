@@ -129,6 +129,78 @@ def main():
                 "stop. Human re-approval is required."
             )
 
+    # Safeguard: task-set integrity check.
+    # Compare task IDs in state against actual tasks/*.md files on disk.
+    tasks_dir = workflow_dir / "tasks"
+    if tasks_dir.exists() and state.get("tasks"):
+        disk_ids = set()
+        for f in sorted(tasks_dir.glob("*.md")):
+            stem = f.stem
+            if stem and stem[:3].isdigit():
+                disk_ids.add(stem[:3])
+        state_ids = {t.get("id") for t in state["tasks"] if t.get("id")}
+        if disk_ids != state_ids:
+            missing_from_state = disk_ids - state_ids
+            missing_from_disk = state_ids - disk_ids
+            msg_parts = []
+            if missing_from_state:
+                msg_parts.append(
+                    f"Task files on disk not in state: {sorted(missing_from_state)}"
+                )
+            if missing_from_disk:
+                msg_parts.append(
+                    f"State entries with no task file: {sorted(missing_from_disk)}"
+                )
+            state["phase"] = "PLAN_CHANGE_REQUIRED"
+            state["block_reason"] = (
+                "Task-set integrity violation: " + "; ".join(msg_parts)
+            )
+            write_state(state_path, state)
+            block(
+                state["block_reason"]
+                + " Human re-approval is required."
+            )
+
+    # Safeguard: per-criterion completion verification.
+    # If a task claims COMPLETE but has unmet criteria or missing evidence,
+    # block and name the specific gap.
+    for task in state.get("tasks", []):
+        if task.get("status") != "COMPLETE":
+            continue
+        criteria = task.get("acceptance_criteria", [])
+        unmet = [c for c in criteria if not c.get("met")]
+        if unmet:
+            unmet_texts = [c.get("text", "unknown") for c in unmet[:3]]
+            state["phase"] = "BLOCKED"
+            state["block_reason"] = (
+                f"Task {task.get('id')} claims COMPLETE but has unmet "
+                f"acceptance criteria: {unmet_texts}"
+            )
+            write_state(state_path, state)
+            block(state["block_reason"])
+        if not task.get("evidence"):
+            state["phase"] = "BLOCKED"
+            state["block_reason"] = (
+                f"Task {task.get('id')} claims COMPLETE but has no "
+                "evidence file."
+            )
+            write_state(state_path, state)
+            block(state["block_reason"])
+
+    # Safeguard: deviation detection.
+    # If the model wrote a pending_deviation, force PLAN_CHANGE_REQUIRED.
+    if state.get("pending_deviation"):
+        state["phase"] = "PLAN_CHANGE_REQUIRED"
+        state["block_reason"] = (
+            "Pending deviation detected: "
+            + str(state["pending_deviation"])
+        )
+        write_state(state_path, state)
+        block(
+            state["block_reason"]
+            + " Human approval is required before proceeding."
+        )
+
     platform_continuation = bool(payload.get("stop_hook_active"))
 
     continuations = int(state.get("stop_continuations", 0)) + 1

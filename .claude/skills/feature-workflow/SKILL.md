@@ -45,17 +45,49 @@ The approved plan is the implementation contract. You MUST NOT:
 - Expand scope of any task beyond its boundaries
 - Change architectural decisions made in the plan
 - Make ANY silent deferrals
+- Start a task, complete part of it, and declare the rest "can be done later"
+- Combine, reorder, or merge tasks without approval
+- Mark an acceptance criterion as met when it is not
 
-Any situation requiring deviation triggers `PLAN_CHANGE_REQUIRED` and stops
-for human approval. **THE USER MUST BE INVOLVED IN EVERY DEVIATION.**
+Any situation requiring deviation: write `pending_deviation` to state.json
+describing what you want to do and why. The Stop hook will see this field on
+the next turn and force `PLAN_CHANGE_REQUIRED`, stopping execution for human
+review. **Deviating and continuing in the same turn is not reachable.**
+
+**THE USER MUST BE INVOLVED IN EVERY DEVIATION.**
+
+### Mechanical Safeguards (enforced by the Stop hook)
+
+These are separate-process checks the model cannot bypass:
+
+1. **Plan hash**: Planning artifacts are frozen after approval. Any edit
+   triggers PLAN_CHANGE_REQUIRED.
+2. **Task-set integrity**: The hook compares task IDs in state against
+   tasks/*.md files on disk. Missing or extra entries trigger
+   PLAN_CHANGE_REQUIRED.
+3. **Per-criterion completion**: A task claiming COMPLETE with any unmet
+   acceptance criterion is blocked with a correction naming the gap.
+4. **Deviation detection**: Any `pending_deviation` field in state triggers
+   PLAN_CHANGE_REQUIRED.
+5. **Task size bound**: Approve refuses tasks exceeding 1.5 days.
 
 ## State Root Resolution
 
 Resolve the state root through this precedence:
 
-1. `CLAUDE_WORKFLOW_STATE_ROOT` environment variable
-2. `.claude/workflow.json` → `state_root` in the repository root
-3. `~/.claude/workflow-state/` (default)
+1. `CLAUDE_WORKFLOW_STATE_ROOT` environment variable — use its value directly.
+2. **Repository-root** `.claude/workflow.json` — this is
+   `<repo_root>/.claude/workflow.json`, **NOT** `~/.claude/workflow.json`.
+   The `.claude/` directory inside a repository is often git-ignored, so the
+   file won't appear in `git ls-files`; check the filesystem directly.
+   Discover it with:
+   ```bash
+   REPO_ROOT="$(git rev-parse --show-toplevel)"
+   cat "$REPO_ROOT/.claude/workflow.json" 2>/dev/null || echo "NOT_FOUND"
+   ```
+   If the file exists and contains a `state_root` field, use that value.
+3. `~/.claude/workflow-state/` (default) — fall back here only when neither
+   of the above resolved.
 
 All paths below are relative to the resolved state root.
 
@@ -220,20 +252,124 @@ the repository, do not invent one; explain the omission in `plan.md`.
 Create `plan.md` with these sections:
 
 - Objective — the complete approved outcome.
-- Current behavior — relevant existing behavior.
-- Proposed implementation — the overall strategy.
+- Current behavior — relevant existing behavior, with code path traces
+  referencing specific files and line numbers.
+- Proposed implementation — the overall strategy, grounded in code evidence.
 - Architectural decisions — decisions future tasks must respect.
 - Work included — the features/bugs/items in this package.
 - Task sequence — every task document in exact execution order.
 - Quality gate — the commands from gate.json and why they are appropriate.
+- Test gap assessment — existing test coverage for affected code paths, what
+  tests are missing, and what test cases would validate the implementation.
+  This section is MANDATORY.
 - Risks — meaningful technical risks.
 - Out of scope — explicit boundaries.
 - Final acceptance criteria — package-level observable criteria.
 - Open questions — every unresolved question (see below).
 
-Do not use vague acceptance criteria.
+### Planning Rules
 
-## 11. Surface open questions
+These rules are non-negotiable:
+
+1. **Every claim about the code MUST reference a specific file and line number.**
+   "Probably in the validation logic" is NOT acceptable.
+   "In `provisioner_selection.go:217`, the condition checks X" IS acceptable.
+
+2. **The test gap assessment is mandatory.** Skip it and the plan is incomplete.
+   Every implementation task MUST have a corresponding test task or test
+   acceptance criterion.
+
+3. **Task size MUST NOT exceed 1.5 days of estimated effort.** The approve mode
+   will refuse to proceed if any task exceeds this bound. Smaller tasks have
+   clearer completion criteria and less room for partial work.
+
+4. **Verify repository artifact naming conventions.** When the plan references
+   any repository artifact (changelog entries, migration files, generated code),
+   check the generator code or list recent examples to discover the actual
+   naming pattern. A wrong path in the plan propagates into the task doc and
+   then the working tree.
+
+5. **Do not use vague acceptance criteria.** Each criterion must be objectively
+   inspectable — a boolean condition that can be verified by reading the code
+   or running a command.
+
+### Quality Gate Discovery
+
+When determining `gate.json` commands, check in this order:
+
+1. **CLAUDE.md** — authoritative if present; use exactly what it specifies
+2. **README.md / CONTRIBUTING.md** — often documents build/test/lint commands
+3. **Makefile, magefiles/, justfile, package.json scripts** — repo tooling
+4. **Language defaults** — last resort only
+
+Always prefer repository-specific tooling over raw language tooling.
+
+## 11. Evaluate architectural impact
+
+After writing `plan.md`, evaluate whether the planned change has moderate or
+higher architectural impact. This is a judgment call — use the triggers and
+non-triggers below.
+
+### Triggers (run /arch-plan-reviewer)
+
+Run `/arch-plan-reviewer` when the planned change involves ANY of:
+- A significant new feature or new subsystem with no close analogue in the
+  repo (greenfield work where architectural direction matters most)
+- Introducing a new package, module, or major structural boundary
+- Introducing a new interface or abstraction layer
+- Cross-layer changes (e.g., changes spanning API, business logic, and data access)
+- Adding a new external dependency with structural implications
+- Changing a documented architectural decision from plan.md or CLAUDE.md
+- Data-model or schema changes that affect multiple consumers
+- Changes spanning 3 or more packages
+
+### Non-triggers (skip)
+
+Skip the architectural plan review when the change is:
+- A bug fix localized to one function or one file
+- Adding a new field to an existing struct with no structural consequence
+- Test-only changes
+- Documentation-only changes
+- Mechanical refactors within a single package (renames, moves, extractions)
+
+### Running the review
+
+When triggered, invoke `/arch-plan-reviewer` with the path to `plan.md` as
+the primary input. Optionally include affected source paths (from the plan's
+"Proposed implementation" and "Expected areas of change" sections) so the
+reviewer can discover existing conventions the plan should respect. When the
+change is greenfield with no relevant prior art, pass only the plan — the
+skill reasons from language idiom and first principles.
+
+### Processing findings
+
+Findings from `/arch-plan-reviewer` are plan-level inputs, not code fixes:
+
+- **Critical findings (confidence >= 90)**: Incorporate into plan.md's
+  "Architectural decisions" section. These represent structural decisions
+  or constraints the implementation must respect.
+- **Important findings (confidence 80-89)**: Either adjust the plan to
+  account for the concern, or raise as an open question in step 12 for
+  human resolution.
+- **Candidate approaches**: When the reviewer proposes alternative approaches
+  with tradeoffs, evaluate them against the plan's stated objectives.
+  Incorporate the strongest approach into the plan, or raise as an open
+  question if the tradeoff warrants human input.
+
+### Recording the decision
+
+Whether `/arch-plan-reviewer` was run or skipped, record the decision and
+reason in `plan.md` under a new section "Architectural review":
+
+- If run: summarize the findings, any alternative approaches considered,
+  and how they were incorporated.
+- If skipped: state the reason (e.g., "Skipped — change is a localized bug
+  fix within a single function").
+
+Do not silently skip this step. An unrecorded skip is a gap in the planning
+record.
+
+## 12. Surface open questions
 
 During investigation and planning, record EVERY open question that could affect
 implementation. Write them to the `open_questions` array in `state.json`:
@@ -272,7 +408,7 @@ work autonomously. Unresolved questions create ambiguity that forces deviation
 from the plan during execution — which violates the no-deviation rule. Resolve
 everything before approval.
 
-## 12. Run test planning
+## 13. Run test planning
 
 Invoke `/eng-test-planning` with the path to `plan.md`. This skill reads the
 plan, studies existing test patterns in the codebase, and appends a test plan
@@ -282,7 +418,7 @@ This MUST happen during PLANNING, before task documents are generated. The
 test plan informs task decomposition — tests may need their own tasks, or test
 requirements may affect implementation task scope.
 
-## 13. Generate task documents
+## 14. Generate task documents
 
 Create `tasks/001-<slug>.md`, `002-<slug>.md`, etc.
 Every task uses this structure:
@@ -348,9 +484,11 @@ concurrency-sensitive work; data-integrity-sensitive work; ambiguous behavior;
 tasks requiring meaningful coordination with later tasks.
 Default to `main-only` when uncertain.
 
-## 14. Populate task state
+## 15. Populate task state
 
-Populate `state.json -> tasks` in numeric order. Each entry:
+Populate `state.json -> tasks` in numeric order. Each entry MUST include
+structured acceptance criteria extracted from the task document. These are
+verified by the Stop hook — a task cannot claim COMPLETE with unmet criteria.
 
 ```json
 {
@@ -359,17 +497,31 @@ Populate `state.json -> tasks` in numeric order. Each entry:
   "status": "PENDING",
   "attempts": 0,
   "implementation": null,
-  "evidence": null
+  "evidence": null,
+  "estimated_days": 1.0,
+  "acceptance_criteria": [
+    {"text": "A valid refresh token succeeds once.", "met": false, "evidence": null},
+    {"text": "The consumed token subsequently fails.", "met": false, "evidence": null}
+  ]
 }
 ```
 
-## 15. Render status
+The `acceptance_criteria` array is populated from the task document's
+`## Acceptance criteria` checkboxes. Each criterion is a structured object
+that must be individually marked `met: true` with evidence before the task
+can be completed. The Stop hook enforces this — if any criterion has
+`met: false` when the task status is COMPLETE, execution is blocked.
+
+`estimated_days` must not exceed 1.5. The approve mode will refuse to proceed
+if any task exceeds this bound.
+
+## 16. Render status
 
 Create `status.md` including: workflow ID; title; phase; iteration; plan
 revision; approval status; current task; task checklist; open questions summary;
 retry counts; blocker if any.
 
-## 16. Wait for approval
+## 17. Wait for approval
 
 Set `phase = AWAITING_APPROVAL`. Update `updated_at`. Do not modify product
 code. Tell the human to review `request.md`, `plan.md`, `gate.json`, and
@@ -486,7 +638,13 @@ Read `state.json -> open_questions`. If ANY question has `resolved: false`,
 refuse to approve. List the unresolved questions and tell the user they must
 be resolved first. Stop.
 
-## 2. Freeze plan
+## 2. Check task size bounds
+
+Read `state.json -> tasks`. If ANY task has `estimated_days > 1.5`, refuse to
+approve. List the oversized tasks and tell the user they must be split before
+approval. Oversized tasks are where partial completion hides.
+
+## 3. Freeze plan
 
 Run:
 ```
@@ -620,34 +778,79 @@ Wait for that worker. Do not spawn another. When it returns, main-session
 ownership resumes. If worker delegation fails, do not repeatedly respawn it;
 the main session implements or repairs the task itself.
 
-## 6. Main-session review using /composite-reviewer
+## 6. Review pipeline
 
 Set `phase = TASK_REVIEW`.
 
-**Step 1**: The MAIN SESSION first reviews the actual implementation against
-every task acceptance criterion, architectural decisions in plan.md, repository
-conventions, previous completed tasks, and regression risk. Do not rely on a
-worker's summary — inspect the actual code.
-
-**Step 2**: Invoke `/composite-reviewer` to review the code changes for this
-task. **Scope the review to only the files changed by this task** — do not
-review the cumulative diff from all tasks, or the reviewer will re-raise
-already-handled findings from prior tasks. The composite reviewer uses separate
-sub-agents per review dimension (security, architecture, correctness, etc.) and
-returns findings with numeric confidence scores (0-100).
-
-**DO NOT** attempt to compress or optimize the review. Do NOT combine review
+The review pipeline runs the applicable reviewers below: /composite-reviewer
+always; /composite-goreviewer if the repo is primarily Go;
+/test-reviewer on test files; /doc-reviewer if documentation changed. All
+use numeric 0-100 confidence scores. The threshold is >= 85% across all
+reviewers. DO NOT compress or optimize the review. DO NOT combine review
 dimensions into a single agent. Each dimension gets its own reviewer agent.
 The goal is review quality.
 
-**Step 3**: Process the review results:
+### Step A: Main session review
 
-- **Findings with confidence >= 85**: These are HIGH CONFIDENCE issues. They
-  MUST be addressed before the task can be completed. Fix each one. Do not
-  defer. Do not argue. Fix it.
-- **Findings with confidence 80-84**: Record in the task evidence file as
-  non-blocking concerns. Do not block completion, but do not silently discard.
-- **Findings below 80**: The composite reviewer already filters these out.
+The MAIN SESSION first reviews the actual implementation against every task
+acceptance criterion, architectural decisions in plan.md, repository
+conventions, previous completed tasks, and regression risk. Do not rely on a
+worker's summary — inspect the actual code.
+
+### Step B: /composite-reviewer (general code review)
+
+Invoke `/composite-reviewer` scoped to only the files changed by this task.
+Do NOT review the cumulative diff from all tasks — the reviewer will re-raise
+already-handled findings from prior tasks.
+
+Process results:
+- **Findings >= 85**: MUST be fixed. Do not defer. Do not argue. Fix it.
+- **Findings 80-84**: Record as non-blocking concerns in evidence.
+- **Findings < 80**: Already filtered by the reviewer.
+
+**After fixing any issue, re-run `/composite-reviewer` to verify the fix did
+not introduce new issues.** This re-run is not optional.
+
+### Step C: /composite-goreviewer (Go repositories)
+
+If the repository is primarily Go code (e.g., `go.mod` exists at the repo
+root, or the majority of source files are `.go`), invoke `/composite-goreviewer`
+scoped to the files changed by this task. This runs **in addition to**
+`/composite-reviewer` — it is not a replacement. The Go-specific reviewer
+catches idiom, concurrency, and Go-specific correctness issues that the
+general reviewer does not cover.
+
+Same threshold: fix >= 85%, record 80-84%. Re-run after fixes.
+
+If the repository is not primarily Go, skip this step and note it in
+evidence. Do not invent a substitute.
+
+### Step D: /test-reviewer (test code review)
+
+Invoke `/test-reviewer` on new or modified test files from this task.
+Fix findings >= 85%. Record 75-84% (test-reviewer's own floor is 75%).
+Re-run after fixes.
+
+### Step E: /doc-reviewer (documentation review)
+
+If the task's changed files include documentation (`.md` files, doc
+directories, README changes, API documentation, user-facing guides, etc.),
+invoke `/doc-reviewer` on the changed documentation files. This runs **in
+addition to** all other reviewers — documentation quality is a separate
+dimension from code quality.
+
+Same threshold: fix >= 85%, record 80-84%. Re-run after fixes.
+
+If the task did not change any documentation files, skip this step and
+note it in evidence.
+
+### Processing all review results
+
+Before a task can be marked COMPLETE, ALL of the following must be true:
+- Every >= 85% finding from all applicable reviewers has been fixed
+- Each reviewer that ran has been re-run after fixes and confirms resolution
+- All 80-84% findings are recorded in the task evidence
+- The main session review confirms all acceptance criteria are met
 
 ## 7. Task-specific validation
 
@@ -675,13 +878,27 @@ explicitly requires it.
 Create `evidence/<TASK_ID>.md` with: implementation summary (implemented by
 main|worker, attempt count, iteration); files changed; each acceptance
 criterion mapped to its evidence; main-session review findings and fixes;
-composite-reviewer findings (high-confidence >= 85 fixed, medium-confidence
-80-84 recorded as non-blocking); task-validation command/result table;
+all reviewer findings from the review pipeline (composite-reviewer,
+composite-goreviewer if Go, test-reviewer, doc-reviewer if docs changed —
+with confidence scores, which were fixed vs recorded as non-blocking); task-validation command/result table;
 standard-gate command/result table; remaining concerns (None, or concise
 non-blocking concerns). Do not store enormous raw build logs; store useful
 evidence.
 
-## 10. Complete the task
+## 10. Mark acceptance criteria met
+
+Before completing the task, update each acceptance criterion in
+`state.json -> tasks[current].acceptance_criteria`:
+- Set `met: true` for each criterion that is satisfied
+- Set `evidence` to a brief description of what proves it
+
+**Every criterion MUST have `met: true`.** If any criterion cannot be met,
+you MUST set `pending_deviation` in state.json describing the gap — the Stop
+hook will force PLAN_CHANGE_REQUIRED. Do NOT mark a criterion as met if it
+is not. Do NOT skip a criterion. Do NOT mark the task COMPLETE with unmet
+criteria — the Stop hook will catch this and block execution.
+
+## 11. Complete the task
 
 Set: `task.status = COMPLETE`; `task.implementation = main|worker`;
 `task.evidence = evidence/<TASK_ID>.md`; `current_task = null`;
@@ -886,8 +1103,11 @@ Repository: <repo root>
 
 ## Review Integration
 
+- /arch-plan-reviewer: Applied during planning when architectural impact warrants
 - /eng-test-planning: Applied during planning
 - /composite-reviewer: Applied per task (threshold: >= 85% confidence)
+- /composite-goreviewer: Applied per task if Go repo (threshold: >= 85%)
+- /doc-reviewer: Applied per task if docs changed (threshold: >= 85%)
 
 ## Package Quality Gate
 

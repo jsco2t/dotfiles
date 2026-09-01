@@ -96,7 +96,7 @@ Before constructing any agent prompts, read the following skill files and hold t
 
 1. **Read** `$HOME/.claude/skills/fz-code-reviewer/SKILL.md` — this is the Fuzzball-specific reviewer methodology. Its full content (reviewer profiles, all 16 review responsibility sections, confidence calibration) must be embedded verbatim in Agent 1's prompt.
 2. **Read** `$HOME/.claude/skills/code-reviewer/SKILL.md` — this is the general code reviewer methodology. Its core review responsibilities section must be embedded in Agents 2–6 (and any additional agents) so each subagent operates with the full reviewer discipline, not just a focus-area brief.
-3. **Read** `$HOME/.claude/skills/eng-test-reviewer/SKILL.md` — this is a test reviewer focused **ONLY** on test code (test automation, unit tests...etc). Use Agent 7 as the subagent for this work. This reviewer should **ONLY** focus on test code.
+3. **Read** `$HOME/.claude/skills/test-reviewer/SKILL.md` — this is a test reviewer focused **ONLY** on test code (test automation, unit tests...etc). Embed its **Core Review Responsibilities**, **Engineering Dimensions**, and **Confidence Scoring** sections in Agent 7's prompt. Do **NOT** embed its **Process** section — that section spawns its own sub-agents, and orchestration is this skill's job. Use Agent 7 as the subagent for this work. This reviewer should **ONLY** focus on test code.
 
 These reads are mandatory. Do not rely on memory or partial recall of these files.
 
@@ -213,7 +213,7 @@ Include in the prompt:
 
 ### Agent 7: Test Automation Review
 
-Use skill `eng-test-reviewer`
+Prompt focus: **Test code quality and coverage** — use the `test-reviewer` methodology embedded in Pre-launch step 3 (its responsibilities, dimensions, and confidence bar), not the skill's own orchestration.
 
 Include in the prompt the entire set of changed files. This reviewer **ONLY** focuses on test code within the set of changes.
 

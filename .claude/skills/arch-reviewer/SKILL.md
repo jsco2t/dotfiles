@@ -24,7 +24,7 @@ This reviewer focuses exclusively on architecture and structure. The following a
 - **Security vulnerabilities** → `code-reviewer`, `composite-reviewer`
 - **Naming conventions and style** → `code-reviewer`, `fz-code-reviewer`
 - **Logging and observability** → `code-reviewer`, `composite-reviewer`
-- **Test coverage and quality** → `test-reviewer`, `eng-test-reviewer`
+- **Test coverage and quality** → `test-reviewer`
 - **Changelog and documentation** → `code-reviewer`, `doc-reviewer`
 - **Proto field numbering and API compatibility** → `code-reviewer`, `fz-code-reviewer`
 

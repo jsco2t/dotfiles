@@ -6,6 +6,13 @@ argument-hint: "<root index file path> <bug description, Jira links, or file pat
 
 # New Bug Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You are creating a structured bug fix plan for a reported issue. You research the codebase to understand the root cause, produce a fix plan, and break the work into tasks that are **test-forward** — every bug is evidence that automated validation was insufficient, and the fix must close that gap.
 
 This skill produces a focused, lightweight documentation set: an index, a plan, and task files. Unlike `/new-eng-feature`, there is no design document, verification suite, or multi-skill pipeline. Bugs are smaller scope — the plan IS the design.
@@ -147,7 +154,7 @@ If the bug description includes Jira or Confluence links:
 - Check for related/duplicate issues
 - Note the reporter, priority, and any reproduction steps in the ticket
 
-If MCP tools are unavailable, inform the user and proceed with the textual description.
+If the Atlassian toolkit is unavailable, inform the user and proceed with the textual description.
 
 ### Step 1.2: Reproduce Understanding
 
@@ -453,7 +460,7 @@ Do not guess. Present what you found (partial traces, candidate locations) and a
 - Point to a specific area of the code to investigate
 - Proceed with the best-available hypothesis (clearly marked as such)
 
-### If MCP Tools Are Unavailable
+### If Atlassian Is Unavailable
 
 Inform the user and proceed with the textual description. Jira enrichment is valuable but not blocking — the codebase investigation is the primary research method.
 

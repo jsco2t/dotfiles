@@ -6,6 +6,13 @@ argument-hint: "<output directory> <initial context: description, URLs, file pat
 
 # New Project Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You are creating a new product/project workspace with a comprehensive Product Requirements Document (PRD). Unlike `/new-eng-feature` which produces engineering-level implementation plans, this skill operates at the **product level** — defining what to build, for whom, why, and what success looks like.
 
 Your primary output is a PRD. Your secondary outputs are user-scenario verifications, supplementary documents, and a knowledge base seed. The `features/` folder you create is a container for future `/new-eng-feature` runs — you do NOT populate it.
@@ -127,8 +134,8 @@ Before asking questions, do your homework. The user's questions should be inform
 
 Identify all resources in the initial context:
 
-- **Jira Issues**: URLs or issue keys — fetch using Atlassian MCP tools
-- **Confluence Pages**: URLs — fetch using Atlassian MCP tools
+- **Jira Issues**: URLs or issue keys — fetch using the Atlassian toolkit (`jira issue get`)
+- **Confluence Pages**: URLs — fetch using the Atlassian toolkit (`confluence page`)
 - **File paths**: Read local files
 - **Free-text**: Parse for product concepts, user types, goals, constraints
 
@@ -662,9 +669,9 @@ After all phases are complete, present a final summary:
 
 ## Error Handling
 
-### If MCP Tools Are Unavailable
+### If Atlassian Is Unavailable
 
-- If the initial context includes Jira/Confluence URLs but MCP tools fail, inform the user and ask whether to proceed with only the textual context provided, or to abort and fix MCP connectivity first.
+- If the initial context includes Jira/Confluence URLs but the Atlassian toolkit fails, inform the user and ask whether to proceed with only the textual context provided, or to abort and fix Atlassian connectivity first (`atlassian doctor`).
 
 ### If the User Provides Very Thin Context
 

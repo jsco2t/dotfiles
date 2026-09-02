@@ -6,6 +6,13 @@ argument-hint: "<feature documentation directory> <updated context: Jira URLs, t
 
 # Engineering Feature Follow-Up Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You are orchestrating an **update pass** through the complete engineering planning pipeline for an existing feature. A previous `/new-eng-feature` run (or equivalent manual process) produced a set of feature documentation. Now the specifications have changed, new requirements have emerged, or gaps from the original planning need to be addressed.
 
 Your job is to take the **updated context** the user provides and propagate those changes through the same five-skill pipeline used by `/new-eng-feature` — but this time each skill operates in **update mode**, revising existing documents rather than creating them from scratch.
@@ -76,7 +83,7 @@ Extract from these documents:
 
 Read and analyze all the updated context the user provided:
 
-- If **Jira URLs** are provided, fetch the updated issues using Atlassian MCP tools and compare with what's referenced in the existing documents.
+- If **Jira URLs** are provided, fetch the updated issues using the Atlassian toolkit (`jira issue get`) and compare with what's referenced in the existing documents.
 - If **Confluence URLs** are provided, fetch the updated pages.
 - If **file paths** are provided, read the files.
 - If **free-text** is provided, parse the described changes.
@@ -520,9 +527,9 @@ After all phases are complete, present a final summary:
 - If `verifications/` is empty, Phase 5 will create documents fresh — this is fine.
 - If `follow-ups/open-items.md` is missing, Phase 6 will create it fresh — this is fine.
 
-### If MCP Tools Are Unavailable
+### If Atlassian Is Unavailable
 
-- If the updated context includes Jira/Confluence URLs but MCP tools fail, inform the user and ask whether to proceed with only the textual context provided, or to abort and fix MCP connectivity first.
+- If the updated context includes Jira/Confluence URLs but the Atlassian toolkit fails, inform the user and ask whether to proceed with only the textual context provided, or to abort and fix Atlassian connectivity first (`atlassian doctor`).
 
 ---
 

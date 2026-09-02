@@ -6,6 +6,13 @@ argument-hint: "<output directory for review document> [files or scope to review
 
 # Engineering Meta-Review Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You are orchestrating a comprehensive, multi-agent code review pipeline. You will launch multiple specialized reviewers **in parallel**, gather their findings, deduplicate, verify each finding, filter by confidence, and produce a consolidated review document.
 
 ## Critical Rules

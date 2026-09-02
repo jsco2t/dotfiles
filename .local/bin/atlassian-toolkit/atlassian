@@ -1,0 +1,1103 @@
+#!/usr/bin/env python3
+"""atlassian -- streamlined Atlassian Cloud CLI (Jira + Confluence) for skills and humans.
+
+A single self-contained, stdlib-only tool. See README.md for the usage contract.
+Run `atlassian`, `jira`, `confluence`, or `<any> <command> --help` for help.
+
+Multi-call: invoked as `jira ...` it runs the jira group; as `confluence ...` the
+confluence group; as `atlassian ...` the full surface. (argv[0] basename dispatch.)
+
+Design notes for maintainers:
+  - Auth: Atlassian API token + HTTP Basic (email:token). One token covers Jira and
+    Confluence. The claude.ai Atlassian connector uses hosted OAuth a CLI cannot reuse.
+  - TLS: some Python builds (python.org macOS framework builds) ship an EMPTY CA trust
+    store, so HTTPS fails with CERTIFICATE_VERIFY_FAILED regardless of any sandbox.
+    build_ssl_context() resolves a CA bundle at runtime (env -> certifi -> cached ->
+    macOS keychain, in-memory) so it works even where the config dir is not writable.
+  - Jira reads/search use REST v3; writes wrap plain text into ADF (v3 requires it).
+  - Confluence uses REST v2 for pages (body-format atlas_doc_format, falling back to
+    storage/XHTML) and v1 /wiki/rest/api/search for CQL.
+  - Output favors compact text to keep token cost low; --json / --raw are escape hatches.
+    Confluence page bodies are truncated by default (--full to opt out).
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import getpass
+import html
+import json
+import os
+import platform
+import re
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+VERSION = "0.2.0"
+
+CONFIG_DIR = Path(os.environ.get("JIRA_TOOLKIT_CONFIG_DIR",
+                                 os.environ.get("ATLASSIAN_TOOLKIT_CONFIG_DIR",
+                                                Path.home() / ".config" / "atlassian-toolkit")))
+AUTH_FILE = CONFIG_DIR / "auth.json"
+CA_CACHE = CONFIG_DIR / "cacert.pem"
+CA_MAX_AGE_SEC = 30 * 24 * 3600
+
+API = "3"
+DEFAULT_TIMEOUT = 30
+DEFAULT_SEARCH_LIMIT = 25
+CONFLUENCE_MAX_CHARS = 4000
+DEFAULT_ISSUE_FIELDS = ["summary", "status", "issuetype", "priority", "assignee", "reporter", "labels", "updated"]
+DEFAULT_SEARCH_FIELDS = ["summary", "status", "issuetype", "assignee", "updated"]
+
+EX_OK, EX_USAGE, EX_AUTH, EX_NOTFOUND, EX_API, EX_NET = 0, 1, 2, 3, 4, 5
+
+
+# --------------------------------------------------------------------------- #
+# small utilities
+# --------------------------------------------------------------------------- #
+def eprint(*a):
+    print(*a, file=sys.stderr)
+
+
+def die(code, msg):
+    eprint(f"error: {msg}")
+    sys.exit(code)
+
+
+def jdump(obj):
+    print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False))
+
+
+def read_maybe_stdin(value):
+    return sys.stdin.read() if value == "-" else value
+
+
+def parse_field_kv(items):
+    out = {}
+    for it in items or []:
+        if "=" not in it:
+            die(EX_USAGE, f"--field expects key=value, got: {it}")
+        k, v = it.split("=", 1)
+        try:
+            out[k] = json.loads(v)
+        except json.JSONDecodeError:
+            out[k] = v
+    return out
+
+
+def truncate(text, full):
+    if full or len(text) <= CONFLUENCE_MAX_CHARS:
+        return text
+    return text[:CONFLUENCE_MAX_CHARS] + f"\n\n... [truncated {len(text) - CONFLUENCE_MAX_CHARS} of {len(text)} chars; use --full for all]"
+
+
+# --------------------------------------------------------------------------- #
+# auth / config
+# --------------------------------------------------------------------------- #
+def normalize_base_url(site):
+    site = site.strip().rstrip("/")
+    if site.startswith(("http://", "https://")):
+        return site
+    return "https://" + site
+
+
+def load_auth(require=True):
+    site = os.environ.get("JIRA_SITE") or os.environ.get("ATLASSIAN_SITE")
+    email = os.environ.get("JIRA_EMAIL") or os.environ.get("ATLASSIAN_EMAIL")
+    token = os.environ.get("JIRA_API_TOKEN") or os.environ.get("ATLASSIAN_API_TOKEN")
+    if not (site and email and token) and AUTH_FILE.exists():
+        try:
+            d = json.loads(AUTH_FILE.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            die(EX_AUTH, f"could not read {AUTH_FILE}: {e}")
+        site = site or d.get("site")
+        email = email or d.get("email")
+        token = token or d.get("token")
+    if not (site and email and token):
+        if not require:
+            return None, None, None
+        die(EX_AUTH, "not authenticated. Run: atlassian auth login  "
+                     "(or set ATLASSIAN_SITE, ATLASSIAN_EMAIL, ATLASSIAN_API_TOKEN)")
+    return normalize_base_url(site), email, token
+
+
+def save_auth(base_url, email, token):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(CONFIG_DIR, 0o700)
+    except OSError:
+        pass
+    AUTH_FILE.write_text(json.dumps({"site": base_url, "email": email, "token": token}, indent=2))
+    os.chmod(AUTH_FILE, 0o600)
+
+
+# --------------------------------------------------------------------------- #
+# TLS
+# --------------------------------------------------------------------------- #
+def _macos_root_pem():
+    if platform.system() != "Darwin":
+        return None
+    parts = []
+    for kc in ("/System/Library/Keychains/SystemRootCertificates.keychain",
+               "/Library/Keychains/System.keychain"):
+        try:
+            out = subprocess.run(["security", "find-certificate", "-a", "-p", kc],
+                                 capture_output=True, text=True, timeout=15)
+            if out.returncode == 0 and out.stdout:
+                parts.append(out.stdout)
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return "\n".join(parts) if parts else None
+
+
+# Well-known system CA bundle locations, tried when the Python trust store is empty and
+# certifi is absent. Covers Debian/Ubuntu, RHEL/Rocky/Fedora, openSUSE, Alpine, and BSD/macOS.
+KNOWN_CA_BUNDLE_PATHS = [
+    "/etc/ssl/certs/ca-certificates.crt",   # Debian, Ubuntu, Gentoo, Arch
+    "/etc/pki/tls/certs/ca-bundle.crt",     # RHEL, Rocky, CentOS, Fedora
+    "/etc/pki/tls/cert.pem",                # RHEL/Rocky (alternate)
+    "/etc/ssl/ca-bundle.pem",               # openSUSE
+    "/etc/ssl/cert.pem",                    # Alpine, BSD, macOS
+]
+
+
+def build_ssl_context():
+    """Return an SSLContext with a working CA bundle. Verification is always ON;
+    point ATLASSIAN_CA_BUNDLE at a PEM file for custom CAs."""
+    ctx = ssl.create_default_context()
+    for var in ("ATLASSIAN_CA_BUNDLE", "JIRA_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        p = os.environ.get(var)
+        if p and os.path.exists(p):
+            ctx.load_verify_locations(cafile=p)
+            return ctx
+    if ctx.cert_store_stats().get("x509", 0) > 0:
+        return ctx
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+        return ctx
+    except Exception:
+        pass
+    try:
+        if CA_CACHE.exists() and (time.time() - CA_CACHE.stat().st_mtime) < CA_MAX_AGE_SEC:
+            ctx.load_verify_locations(cafile=str(CA_CACHE))
+            if ctx.cert_store_stats().get("x509", 0) > 0:
+                return ctx
+    except (OSError, ssl.SSLError):
+        pass
+    pem = _macos_root_pem()  # macOS: export roots from the system/admin keychains
+    if pem:
+        ctx.load_verify_locations(cadata=pem)
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            CA_CACHE.write_text(pem)
+        except OSError:
+            pass
+        return ctx
+    for path in KNOWN_CA_BUNDLE_PATHS:  # Linux/BSD: load a well-known distro CA bundle
+        if os.path.exists(path):
+            try:
+                ctx.load_verify_locations(cafile=path)
+                if ctx.cert_store_stats().get("x509", 0) > 0:
+                    return ctx
+            except ssl.SSLError:
+                continue
+    return ctx
+
+
+# --------------------------------------------------------------------------- #
+# HTTP
+# --------------------------------------------------------------------------- #
+def _cert_help(e):
+    return ("TLS certificate verification failed. This tool auto-loads a CA bundle; "
+            "override it with ATLASSIAN_CA_BUNDLE=/path/to/ca.pem . "
+            "If the failure only happens inside a sandbox, re-run the command outside it. "
+            f"({e})")
+
+
+def _net_help(e):
+    reason = getattr(e, "reason", e)
+    return (f"network error: {reason}. If this only happens inside a sandbox, "
+            "re-run the command outside the sandbox.")
+
+
+def _extract_error_message(body):
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return body[:300] if body else ""
+    if isinstance(data, dict):
+        parts = list(data.get("errorMessages") or [])                       # Jira
+        parts += [f"{k}: {v}" for k, v in (data.get("errors") or {}).items()
+                  if not isinstance(data.get("errors"), list)]
+        if isinstance(data.get("errors"), list):                            # Confluence v2
+            parts += [e.get("title", "") for e in data["errors"] if isinstance(e, dict)]
+        if data.get("message"):                                             # Confluence v1
+            parts.append(str(data["message"]))
+        return "; ".join(p for p in parts if p)
+    return ""
+
+
+def _http_error(e):
+    body = ""
+    try:
+        body = e.read().decode("utf-8", "replace")
+    except Exception:
+        pass
+    msg = f"HTTP {e.code}"
+    detail = _extract_error_message(body)
+    if detail:
+        msg += f": {detail}"
+    if e.code in (401, 403):
+        msg += "  (check `atlassian auth status`; the API token may be wrong or expired)"
+    code = {401: EX_AUTH, 403: EX_AUTH, 404: EX_NOTFOUND}.get(e.code, EX_API)
+    die(code, msg)
+
+
+def api_request(method, path, params=None, body=None, timeout=DEFAULT_TIMEOUT, expect_json=True, soft=False):
+    """Make an Atlassian API request. On error: die(), or if soft=True return None."""
+    base_url, email, token = load_auth()
+    url = base_url + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params, doseq=True)
+    headers = {"Accept": "application/json",
+               "Authorization": "Basic " + base64.b64encode(f"{email}:{token}".encode()).decode()}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    ctx = build_ssl_context()
+
+    last_err = None
+    for attempt in range(4):
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                raw = r.read()
+                if not expect_json:
+                    return raw
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < 3:
+                ra = e.headers.get("Retry-After")
+                time.sleep(float(ra) if (ra and ra.isdigit()) else 2 ** attempt)
+                continue
+            if soft:
+                eprint(f"warning: {method} {path} -> HTTP {e.code}")
+                return None
+            _http_error(e)
+        except ssl.SSLCertVerificationError as e:
+            if soft:
+                return None
+            die(EX_NET, _cert_help(e))
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_err = e
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+                continue
+            if soft:
+                eprint(f"warning: {method} {path} -> {getattr(e, 'reason', e)}")
+                return None
+            die(EX_NET, _net_help(e))
+    if soft:
+        return None
+    die(EX_NET, _net_help(last_err))
+
+
+# --------------------------------------------------------------------------- #
+# ADF -> text  /  text -> ADF  /  HTML -> text
+# --------------------------------------------------------------------------- #
+def adf_to_text(node):
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    t = node.get("type")
+    content = node.get("content", [])
+
+    def kids(sep=""):
+        return sep.join(adf_to_text(c) for c in content)
+
+    if t == "text":
+        text = node.get("text", "")
+        for mark in node.get("marks", []):
+            mt = mark.get("type")
+            if mt == "code":
+                text = f"`{text}`"
+            elif mt == "link":
+                href = mark.get("attrs", {}).get("href", "")
+                text = f"{text} ({href})" if href else text
+        return text
+    if t == "hardBreak":
+        return "\n"
+    if t == "paragraph":
+        return kids()
+    if t == "heading":
+        level = node.get("attrs", {}).get("level", 1)
+        return "#" * max(1, int(level)) + " " + kids()
+    if t in ("bulletList", "orderedList"):
+        lines = []
+        ordered = t == "orderedList"
+        for i, item in enumerate(content, 1):
+            marker = f"{i}. " if ordered else "- "
+            lines.append(marker + adf_to_text(item).strip())
+        return "\n".join(lines)
+    if t == "listItem":
+        return kids("\n")
+    if t == "codeBlock":
+        return "```\n" + kids() + "\n```"
+    if t == "blockquote":
+        return "> " + kids("\n").replace("\n", "\n> ")
+    if t == "rule":
+        return "---"
+    if t == "mention":
+        return "@" + node.get("attrs", {}).get("text", "").lstrip("@")
+    if t == "emoji":
+        return node.get("attrs", {}).get("text", "") or node.get("attrs", {}).get("shortName", "")
+    if t in ("inlineCard", "blockCard"):
+        return node.get("attrs", {}).get("url", "")
+    if t == "table":
+        return "\n".join(adf_to_text(c) for c in content)
+    if t == "tableRow":
+        return " | ".join(adf_to_text(c).strip() for c in content)
+    if t in ("tableCell", "tableHeader"):
+        return kids(" ")
+    if t == "doc":
+        return "\n\n".join(adf_to_text(c) for c in content).strip()
+    if content:
+        block = any(isinstance(c, dict) and c.get("type") in
+                    ("paragraph", "heading", "bulletList", "orderedList", "codeBlock",
+                     "blockquote", "rule", "table") for c in content)
+        return ("\n\n" if block else "").join(adf_to_text(c) for c in content)
+    return ""
+
+
+def text_to_adf(text):
+    content = []
+    for block in text.replace("\r\n", "\n").split("\n\n"):
+        block = block.strip("\n")
+        if block == "":
+            continue
+        para = {"type": "paragraph", "content": []}
+        lines = block.split("\n")
+        for i, line in enumerate(lines):
+            if line:
+                para["content"].append({"type": "text", "text": line})
+            if i < len(lines) - 1:
+                para["content"].append({"type": "hardBreak"})
+        if not para["content"]:
+            para["content"].append({"type": "text", "text": ""})
+        content.append(para)
+    if not content:
+        content = [{"type": "paragraph", "content": [{"type": "text", "text": text or ""}]}]
+    return {"type": "doc", "version": 1, "content": content}
+
+
+def html_to_text(s):
+    """Crude Confluence storage-format (XHTML) to plain text. Ugly but readable."""
+    if not s:
+        return ""
+    s = re.sub(r"(?i)<br\s*/?>", "\n", s)
+    s = re.sub(r"(?i)</(p|div|tr|h[1-6])>", "\n\n", s)
+    s = re.sub(r"(?i)<li[^>]*>", "\n- ", s)
+    s = re.sub(r"(?i)</t[dh]>", " | ", s)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = html.unescape(s)
+    s = re.sub(r"[ \t]+\n", "\n", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
+# --------------------------------------------------------------------------- #
+# formatting helpers
+# --------------------------------------------------------------------------- #
+def name_of(field):
+    if isinstance(field, dict):
+        return field.get("displayName") or field.get("name") or field.get("value") or ""
+    return field or ""
+
+
+def short_date(s):
+    return (s or "")[:10]
+
+
+def issue_line(issue):
+    f = issue.get("fields", {})
+    return f"{issue.get('key','?'):<14} {name_of(f.get('status')):<14} {f.get('summary','')}"
+
+
+def parse_confluence_id(s):
+    s = s.strip()
+    if s.isdigit():
+        return s
+    m = re.search(r"/pages/(\d+)", s)
+    if m:
+        return m.group(1)
+    die(EX_USAGE, f"could not parse a Confluence page id from: {s} "
+                  "(pass a numeric id or a .../wiki/spaces/.../pages/<id>/... URL)")
+
+
+# --------------------------------------------------------------------------- #
+# commands: auth
+# --------------------------------------------------------------------------- #
+def cmd_auth_login(args):
+    site = args.site or os.environ.get("ATLASSIAN_SITE") or os.environ.get("JIRA_SITE")
+    email = args.email or os.environ.get("ATLASSIAN_EMAIL") or os.environ.get("JIRA_EMAIL")
+    token = os.environ.get("ATLASSIAN_API_TOKEN") or os.environ.get("JIRA_API_TOKEN")
+    try:
+        if not site:
+            site = input("Site (e.g. your-org.atlassian.net): ").strip()
+        if not email:
+            email = input("Email: ").strip()
+        if args.token_stdin:
+            token = sys.stdin.readline().strip()
+        elif not token:
+            token = getpass.getpass("API token (create at https://id.atlassian.com/manage-profile/security/api-tokens): ").strip()
+    except EOFError:
+        die(EX_USAGE,
+            "no interactive terminal available for `auth login`. Run it in a normal terminal, or provide "
+            "values non-interactively: pass --site and --email with ATLASSIAN_API_TOKEN set in the "
+            "environment (optionally --token-stdin to pipe the token).")
+    if not (site and email and token):
+        die(EX_USAGE, "site, email, and token are all required")
+    base_url = normalize_base_url(site)
+    os.environ["ATLASSIAN_SITE"], os.environ["ATLASSIAN_EMAIL"], os.environ["ATLASSIAN_API_TOKEN"] = base_url, email, token
+    me = api_request("GET", f"/rest/api/{API}/myself")
+    save_auth(base_url, email, token)
+    print(f"authenticated as {me.get('displayName')} <{me.get('emailAddress','')}> at {base_url}")
+    print(f"credentials saved to {AUTH_FILE} (chmod 600)")
+
+
+def cmd_auth_status(args):
+    base_url, email, token = load_auth(require=False)
+    if not (base_url and email and token):
+        die(EX_AUTH, "not authenticated. Run: atlassian auth login")
+    source = "environment" if (os.environ.get("ATLASSIAN_API_TOKEN") or os.environ.get("JIRA_API_TOKEN")) else str(AUTH_FILE)
+    me = api_request("GET", f"/rest/api/{API}/myself")
+    print(f"site:     {base_url}")
+    print(f"email:    {email}")
+    print(f"identity: {me.get('displayName')} ({me.get('accountId')})")
+    print(f"source:   {source}")
+
+
+def cmd_auth_logout(args):
+    if AUTH_FILE.exists():
+        AUTH_FILE.unlink()
+        print(f"removed {AUTH_FILE}")
+    else:
+        print("no saved credentials")
+
+
+# --------------------------------------------------------------------------- #
+# commands: jira - me / user / project
+# --------------------------------------------------------------------------- #
+def cmd_me(args):
+    me = api_request("GET", f"/rest/api/{API}/myself")
+    if args.json:
+        return jdump(me)
+    print(f"{me.get('displayName')} <{me.get('emailAddress','')}>")
+    print(f"accountId: {me.get('accountId')}")
+
+
+def cmd_user(args):
+    users = api_request("GET", f"/rest/api/{API}/user/search",
+                        params={"query": args.query, "maxResults": args.limit})
+    if args.json:
+        return jdump(users)
+    if not users:
+        print("(no users)")
+        return
+    for u in users:
+        print(f"{u.get('accountId')}  {u.get('displayName')}  <{u.get('emailAddress','')}>")
+
+
+def cmd_project_list(args):
+    params = {"maxResults": args.limit}
+    if args.search:
+        params["query"] = args.search
+    res = api_request("GET", f"/rest/api/{API}/project/search", params=params)
+    values = res.get("values", res if isinstance(res, list) else [])
+    if args.json:
+        return jdump(values)
+    if not values:
+        print("(no projects)")
+        return
+    for p in values:
+        print(f"{p.get('key'):<12} {p.get('name')}")
+
+
+def cmd_project_types(args):
+    res = api_request("GET", f"/rest/api/{API}/issue/createmeta/{args.project}/issuetypes")
+    types = res.get("issueTypes", res.get("values", []))
+    if args.json:
+        return jdump(types)
+    if not types:
+        print("(no issue types)")
+        return
+    for it in types:
+        print(f"{it.get('name')}{' (subtask)' if it.get('subtask') else ''}")
+
+
+# --------------------------------------------------------------------------- #
+# commands: jira - issue
+# --------------------------------------------------------------------------- #
+def cmd_issue_get(args):
+    fields = args.fields.split(",") if args.fields else list(DEFAULT_ISSUE_FIELDS)
+    if args.description and "description" not in fields:
+        fields.append("description")
+    if args.comments:
+        fields.append("comment")
+    issue = api_request("GET", f"/rest/api/{API}/issue/{args.key}", params={"fields": ",".join(fields)})
+    if args.raw:
+        return jdump(issue)
+    f = issue.get("fields", {})
+    if args.json:
+        out = {"key": issue.get("key"), "status": name_of(f.get("status")),
+               "type": name_of(f.get("issuetype")), "summary": f.get("summary"),
+               "assignee": name_of(f.get("assignee")), "reporter": name_of(f.get("reporter")),
+               "priority": name_of(f.get("priority")), "labels": f.get("labels", []),
+               "updated": short_date(f.get("updated"))}
+        if args.description:
+            out["description"] = adf_to_text(f.get("description"))
+        return jdump(out)
+    print(f"{issue.get('key')}  {name_of(f.get('issuetype'))}  {name_of(f.get('status'))}")
+    print(f"Summary:  {f.get('summary','')}")
+    line = f"Assignee: {name_of(f.get('assignee')) or 'Unassigned'}"
+    if f.get("reporter"):
+        line += f"   Reporter: {name_of(f.get('reporter'))}"
+    if f.get("priority"):
+        line += f"   Priority: {name_of(f.get('priority'))}"
+    print(line)
+    meta = f"Updated:  {short_date(f.get('updated'))}"
+    if f.get("labels"):
+        meta += f"   Labels: {', '.join(f['labels'])}"
+    print(meta)
+    if args.description:
+        desc = adf_to_text(f.get("description")).strip()
+        print("\nDescription:\n" + (desc if desc else "(empty)"))
+    if args.comments:
+        comments = (f.get("comment") or {}).get("comments", [])
+        print(f"\nComments ({len(comments)}):")
+        for c in comments:
+            print(f"- {name_of(c.get('author'))} [{short_date(c.get('created'))}]: {adf_to_text(c.get('body')).strip()}")
+
+
+def cmd_issue_create(args):
+    fields = {"project": {"key": args.project}, "issuetype": {"name": args.type}, "summary": args.summary}
+    if args.description is not None:
+        fields["description"] = text_to_adf(read_maybe_stdin(args.description))
+    if args.assignee:
+        fields["assignee"] = {"accountId": args.assignee}
+    if args.priority:
+        fields["priority"] = {"name": args.priority}
+    if args.label:
+        fields["labels"] = args.label
+    if args.parent:
+        fields["parent"] = {"key": args.parent}
+    fields.update(parse_field_kv(args.field))
+    res = api_request("POST", f"/rest/api/{API}/issue", body={"fields": fields})
+    if args.json:
+        return jdump(res)
+    print(res.get("key", res))
+
+
+def cmd_issue_edit(args):
+    fields = {}
+    if args.summary:
+        fields["summary"] = args.summary
+    if args.description is not None:
+        fields["description"] = text_to_adf(read_maybe_stdin(args.description))
+    if args.assignee:
+        fields["assignee"] = {"accountId": args.assignee}
+    if args.priority:
+        fields["priority"] = {"name": args.priority}
+    fields.update(parse_field_kv(args.field))
+    update = {}
+    if args.add_label or args.remove_label:
+        update["labels"] = ([{"add": l} for l in (args.add_label or [])] +
+                            [{"remove": l} for l in (args.remove_label or [])])
+    if not fields and not update:
+        die(EX_USAGE, "nothing to edit (pass --summary/--description/--assignee/--field/--add-label/...)")
+    payload = {}
+    if fields:
+        payload["fields"] = fields
+    if update:
+        payload["update"] = update
+    api_request("PUT", f"/rest/api/{API}/issue/{args.key}", body=payload, expect_json=False)
+    print(f"{args.key} updated")
+
+
+def cmd_issue_comment(args):
+    res = api_request("POST", f"/rest/api/{API}/issue/{args.key}/comment",
+                      body={"body": text_to_adf(read_maybe_stdin(args.body))})
+    if args.json:
+        return jdump(res)
+    print(f"comment added to {args.key} (id {res.get('id')})")
+
+
+def cmd_issue_comments(args):
+    res = api_request("GET", f"/rest/api/{API}/issue/{args.key}/comment",
+                      params={"maxResults": args.limit, "orderBy": "created"})
+    comments = res.get("comments", [])
+    if args.json:
+        return jdump(comments)
+    if not comments:
+        print("(no comments)")
+        return
+    for c in comments:
+        print(f"- {name_of(c.get('author'))} [{short_date(c.get('created'))}]: {adf_to_text(c.get('body')).strip()}")
+
+
+def cmd_issue_transition(args):
+    res = api_request("GET", f"/rest/api/{API}/issue/{args.key}/transitions")
+    transitions = res.get("transitions", [])
+    if not args.to:
+        if args.json:
+            return jdump(transitions)
+        if not transitions:
+            print("(no transitions available)")
+            return
+        print(f"Available transitions for {args.key}:")
+        for t in transitions:
+            print(f"- {t.get('name')}  -> {name_of(t.get('to'))}")
+        return
+    match = next((t for t in transitions if t.get("name", "").lower() == args.to.lower()), None)
+    if not match:
+        names = ", ".join(t.get("name", "") for t in transitions) or "(none)"
+        die(EX_USAGE, f"no transition named '{args.to}' for {args.key}. Available: {names}")
+    api_request("POST", f"/rest/api/{API}/issue/{args.key}/transitions",
+                body={"transition": {"id": match["id"]}}, expect_json=False)
+    print(f"{args.key} -> {match.get('name')}")
+
+
+def cmd_issue_links(args):
+    links = api_request("GET", f"/rest/api/{API}/issue/{args.key}/remotelink")
+    if args.json:
+        return jdump(links)
+    if not links:
+        print("(no remote links)")
+        return
+    for lk in links:
+        obj = lk.get("object", {})
+        print(f"- {obj.get('title') or '(untitled)'}: {obj.get('url','')}")
+
+
+# --------------------------------------------------------------------------- #
+# commands: jira - search (JQL)
+# --------------------------------------------------------------------------- #
+def cmd_search(args):
+    fields = args.fields.split(",") if args.fields else list(DEFAULT_SEARCH_FIELDS)
+    limit = args.limit
+    collected = []
+    page_token = None
+    while True:
+        body = {"jql": args.jql, "maxResults": min(100, limit - len(collected)), "fields": fields}
+        if page_token:
+            body["nextPageToken"] = page_token
+        res = api_request("POST", f"/rest/api/{API}/search/jql", body=body)
+        collected.extend(res.get("issues", []))
+        page_token = res.get("nextPageToken")
+        if res.get("isLast") or not page_token or len(collected) >= limit:
+            break
+    collected = collected[:limit]
+    if args.raw:
+        return jdump({"issues": collected})
+    if args.json:
+        return jdump([{"key": i.get("key"), "status": name_of(i.get("fields", {}).get("status")),
+                       "type": name_of(i.get("fields", {}).get("issuetype")),
+                       "summary": i.get("fields", {}).get("summary"),
+                       "assignee": name_of(i.get("fields", {}).get("assignee")),
+                       "updated": short_date(i.get("fields", {}).get("updated"))} for i in collected])
+    if not collected:
+        print("(no issues)")
+        return
+    for i in collected:
+        print(issue_line(i))
+    print(f"({len(collected)} issue{'s' if len(collected) != 1 else ''})")
+
+
+# --------------------------------------------------------------------------- #
+# commands: confluence
+# --------------------------------------------------------------------------- #
+def cmd_conf_page(args):
+    pid = parse_confluence_id(args.page)
+    data = api_request("GET", f"/wiki/api/v2/pages/{pid}", params={"body-format": "atlas_doc_format"})
+    title = data.get("title", "")
+    adf = (data.get("body", {}).get("atlas_doc_format") or {}).get("value")
+    if adf:
+        try:
+            text = adf_to_text(json.loads(adf))
+        except json.JSONDecodeError:
+            text = adf
+    else:  # fall back to storage (XHTML) for pages without ADF
+        data2 = api_request("GET", f"/wiki/api/v2/pages/{pid}", params={"body-format": "storage"})
+        text = html_to_text((data2.get("body", {}).get("storage") or {}).get("value", ""))
+    if args.json:
+        return jdump({"id": pid, "title": title, "text": text})
+    print(f"# {title}  (id {pid})")
+    print(truncate(text, args.full) if text else "(empty)")
+
+
+def cmd_conf_descendants(args):
+    pid = parse_confluence_id(args.page)
+    res = api_request("GET", f"/wiki/api/v2/pages/{pid}/children", params={"limit": args.limit})
+    results = res.get("results", [])
+    if args.json:
+        return jdump(results)
+    if not results:
+        print("(no child pages)")
+        return
+    for c in results:
+        print(f"{c.get('id')}  {c.get('title')}")
+
+
+def cmd_conf_search(args):
+    cql = args.query if args.cql else f'text ~ "{args.query}"'
+    res = api_request("GET", "/wiki/rest/api/search", params={"cql": cql, "limit": args.limit})
+    results = res.get("results", [])
+    if args.json:
+        return jdump(results)
+    if not results:
+        print("(no results)")
+        return
+    for r in results:
+        c = r.get("content", {})
+        title = c.get("title") or r.get("title", "")
+        print(f"{c.get('id','-'):<12} {c.get('type',''):<8} {title}")
+
+
+def resolve_space_id(key):
+    if str(key).isdigit():
+        return str(key)
+    res = api_request("GET", "/wiki/api/v2/spaces", params={"keys": key, "limit": 1})
+    results = res.get("results", [])
+    if not results:
+        die(EX_NOTFOUND, f"no Confluence space with key: {key}")
+    return str(results[0]["id"])
+
+
+def cmd_conf_create(args):
+    body_text = read_maybe_stdin(args.body) if args.body is not None else ""
+    payload = {"spaceId": resolve_space_id(args.space), "status": "current", "title": args.title,
+               "body": {"representation": "atlas_doc_format", "value": json.dumps(text_to_adf(body_text))}}
+    if args.parent:
+        payload["parentId"] = str(args.parent)
+    res = api_request("POST", "/wiki/api/v2/pages", body=payload)
+    if args.json:
+        return jdump(res)
+    print(f"created page {res.get('id')}: {res.get('title')}")
+
+
+def cmd_conf_update(args):
+    if args.title is None and args.body is None:
+        die(EX_USAGE, "nothing to update (pass --title and/or --body)")
+    cur = api_request("GET", f"/wiki/api/v2/pages/{args.id}", params={"body-format": "atlas_doc_format"})
+    version = ((cur.get("version") or {}).get("number") or 1) + 1
+    title = args.title if args.title is not None else cur.get("title")
+    if args.body is not None:  # replace body
+        value = json.dumps(text_to_adf(read_maybe_stdin(args.body)))
+    else:  # title-only change: preserve the existing body (v2 update requires body)
+        value = (cur.get("body", {}).get("atlas_doc_format") or {}).get("value") or json.dumps(text_to_adf(""))
+    payload = {"id": str(args.id), "status": "current", "title": title,
+               "body": {"representation": "atlas_doc_format", "value": value},
+               "version": {"number": version}}
+    res = api_request("PUT", f"/wiki/api/v2/pages/{args.id}", body=payload)
+    if args.json:
+        return jdump(res)
+    print(f"updated page {args.id} (version {version})")
+
+
+def cmd_conf_comment(args):
+    res = api_request("POST", "/wiki/api/v2/footer-comments",
+                      body={"pageId": str(args.page),
+                            "body": {"representation": "atlas_doc_format",
+                                     "value": json.dumps(text_to_adf(read_maybe_stdin(args.body)))}})
+    if args.json:
+        return jdump(res)
+    print(f"comment added to page {args.page} (id {res.get('id')})")
+
+
+# --------------------------------------------------------------------------- #
+# commands: generic search (Jira + Confluence)
+# --------------------------------------------------------------------------- #
+def cmd_search_generic(args):
+    q = args.query
+    jr = api_request("POST", f"/rest/api/{API}/search/jql",
+                     body={"jql": f'text ~ "{q}"', "maxResults": args.limit,
+                           "fields": ["summary", "status", "issuetype"]}, soft=True)
+    issues = (jr or {}).get("issues", [])
+    cr = api_request("GET", "/wiki/rest/api/search",
+                     params={"cql": f'text ~ "{q}"', "limit": args.limit}, soft=True)
+    pages = (cr or {}).get("results", [])
+    if args.json:
+        return jdump({"jira": [{"key": i.get("key"), "summary": i.get("fields", {}).get("summary")} for i in issues],
+                      "confluence": [{"id": r.get("content", {}).get("id"),
+                                      "title": r.get("content", {}).get("title") or r.get("title")} for r in pages]})
+    print("Jira:")
+    for i in issues:
+        print("  " + issue_line(i))
+    if not issues:
+        print("  (none)")
+    print("Confluence:")
+    for r in pages:
+        c = r.get("content", {})
+        print(f"  {c.get('id','-'):<12} {c.get('title') or r.get('title','')}")
+    if not pages:
+        print("  (none)")
+
+
+# --------------------------------------------------------------------------- #
+# commands: doctor
+# --------------------------------------------------------------------------- #
+def cmd_doctor(args):
+    if args.fix_ca:
+        try:
+            CA_CACHE.unlink()
+            print(f"removed cached CA bundle {CA_CACHE}")
+        except FileNotFoundError:
+            print("no cached CA bundle to remove")
+        except OSError as e:
+            eprint(f"could not remove {CA_CACHE}: {e}")
+    print(f"atlassian-toolkit {VERSION}")
+    print(f"python:  {platform.python_version()} ({platform.system()})")
+    ctx = build_ssl_context()
+    n = ctx.cert_store_stats().get("x509", 0)
+    if n:
+        print(f"TLS CA:  {n} certificate(s) loaded")
+    else:
+        print("TLS CA:  0 certificates  [!] empty trust store -- HTTPS will fail")
+        print("         fix: install CA certs (Debian: apt-get install -y ca-certificates; "
+              "Rocky/RHEL: dnf install -y ca-certificates),")
+        print("              or `pip install certifi`, or set ATLASSIAN_CA_BUNDLE=/path/to/ca-bundle.crt")
+    base_url, email, token = load_auth(require=False)
+    if not (base_url and email and token):
+        print("auth:    not configured  -> run: atlassian auth login")
+        return
+    print(f"site:    {base_url}")
+    print(f"email:   {email}")
+    me = api_request("GET", f"/rest/api/{API}/myself", soft=True)
+    print(f"jira:    OK -- {me.get('displayName')} ({me.get('accountId')})" if me else "jira:    FAILED (see warning above)")
+    cf = api_request("GET", "/wiki/api/v2/spaces", params={"limit": 1}, soft=True)
+    print("confluence: OK" if cf is not None else "confluence: FAILED (see warning above)")
+
+
+# --------------------------------------------------------------------------- #
+# argument parser
+# --------------------------------------------------------------------------- #
+def _group_default_help(parser):
+    parser.set_defaults(func=lambda a, _p=parser: _p.print_help())
+
+
+def add_jira_commands(jp):
+    """Attach the jira command group to subparser action `jp`."""
+    m = jp.add_parser("me", help="show the authenticated user")
+    m.add_argument("--json", action="store_true")
+    m.set_defaults(func=cmd_me)
+
+    u = jp.add_parser("user", help="look up users (for accountId)")
+    u.add_argument("query", help="name or email fragment")
+    u.add_argument("--limit", type=int, default=10)
+    u.add_argument("--json", action="store_true")
+    u.set_defaults(func=cmd_user)
+
+    pr = jp.add_parser("project", help="projects")
+    prsub = pr.add_subparsers(metavar="<subcommand>")
+    _group_default_help(pr)
+    prl = prsub.add_parser("list", help="list visible projects")
+    prl.add_argument("--search")
+    prl.add_argument("--limit", type=int, default=50)
+    prl.add_argument("--json", action="store_true")
+    prl.set_defaults(func=cmd_project_list)
+    prt = prsub.add_parser("types", help="issue types for a project")
+    prt.add_argument("project", help="project key, e.g. FUZZ")
+    prt.add_argument("--json", action="store_true")
+    prt.set_defaults(func=cmd_project_types)
+
+    s = jp.add_parser("search", help="search issues with JQL")
+    s.add_argument("jql", help="JQL query")
+    s.add_argument("--limit", type=int, default=DEFAULT_SEARCH_LIMIT)
+    s.add_argument("--fields")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--raw", action="store_true")
+    s.set_defaults(func=cmd_search)
+
+    i = jp.add_parser("issue", help="work with issues")
+    isub = i.add_subparsers(metavar="<subcommand>")
+    _group_default_help(i)
+
+    ig = isub.add_parser("get", help="show one issue")
+    ig.add_argument("key")
+    ig.add_argument("--description", action="store_true")
+    ig.add_argument("--comments", action="store_true")
+    ig.add_argument("--fields")
+    ig.add_argument("--json", action="store_true")
+    ig.add_argument("--raw", action="store_true")
+    ig.set_defaults(func=cmd_issue_get)
+
+    ic = isub.add_parser("create", help="create an issue")
+    ic.add_argument("--project", required=True)
+    ic.add_argument("--type", required=True, help="issue type, e.g. Task/Bug/Story")
+    ic.add_argument("--summary", required=True)
+    ic.add_argument("--description", help="text, or '-' for stdin")
+    ic.add_argument("--assignee", help="accountId")
+    ic.add_argument("--priority")
+    ic.add_argument("--label", action="append")
+    ic.add_argument("--parent")
+    ic.add_argument("--field", action="append", metavar="KEY=VALUE")
+    ic.add_argument("--json", action="store_true")
+    ic.set_defaults(func=cmd_issue_create)
+
+    ie = isub.add_parser("edit", help="edit an issue")
+    ie.add_argument("key")
+    ie.add_argument("--summary")
+    ie.add_argument("--description", help="text, or '-' for stdin")
+    ie.add_argument("--assignee")
+    ie.add_argument("--priority")
+    ie.add_argument("--add-label", action="append")
+    ie.add_argument("--remove-label", action="append")
+    ie.add_argument("--field", action="append", metavar="KEY=VALUE")
+    ie.set_defaults(func=cmd_issue_edit)
+
+    icm = isub.add_parser("comment", help="add a comment")
+    icm.add_argument("key")
+    icm.add_argument("body", help="comment text, or '-' for stdin")
+    icm.add_argument("--json", action="store_true")
+    icm.set_defaults(func=cmd_issue_comment)
+
+    ics = isub.add_parser("comments", help="list comments")
+    ics.add_argument("key")
+    ics.add_argument("--limit", type=int, default=20)
+    ics.add_argument("--json", action="store_true")
+    ics.set_defaults(func=cmd_issue_comments)
+
+    it = isub.add_parser("transition", help="list or apply a status transition")
+    it.add_argument("key")
+    it.add_argument("to", nargs="?", help="target transition name; omit to list")
+    it.add_argument("--json", action="store_true")
+    it.set_defaults(func=cmd_issue_transition)
+
+    il = isub.add_parser("links", help="list remote links (e.g. linked Confluence pages)")
+    il.add_argument("key")
+    il.add_argument("--json", action="store_true")
+    il.set_defaults(func=cmd_issue_links)
+
+
+def add_confluence_commands(cp):
+    pg = cp.add_parser("page", help="fetch a page's content (id or URL)")
+    pg.add_argument("page", help="numeric page id or a .../wiki/.../pages/<id>/... URL")
+    pg.add_argument("--full", action="store_true", help="do not truncate the body")
+    pg.add_argument("--json", action="store_true")
+    pg.set_defaults(func=cmd_conf_page)
+
+    de = cp.add_parser("descendants", help="list child pages (one level)")
+    de.add_argument("page", help="numeric page id or URL")
+    de.add_argument("--limit", type=int, default=50)
+    de.add_argument("--json", action="store_true")
+    de.set_defaults(func=cmd_conf_descendants)
+
+    cs = cp.add_parser("search", help="search content with CQL (or text)")
+    cs.add_argument("query", help="text to search, or a raw CQL string with --cql")
+    cs.add_argument("--cql", action="store_true", help="treat query as raw CQL")
+    cs.add_argument("--limit", type=int, default=25)
+    cs.add_argument("--json", action="store_true")
+    cs.set_defaults(func=cmd_conf_search)
+
+    cc = cp.add_parser("create", help="create a page")
+    cc.add_argument("--space", required=True, help="space key (e.g. ENG) or numeric spaceId")
+    cc.add_argument("--title", required=True)
+    cc.add_argument("--body", help="page body text, or '-' for stdin")
+    cc.add_argument("--parent", help="parent page id")
+    cc.add_argument("--json", action="store_true")
+    cc.set_defaults(func=cmd_conf_create)
+
+    cu = cp.add_parser("update", help="update a page (title and/or body)")
+    cu.add_argument("id", help="page id")
+    cu.add_argument("--title")
+    cu.add_argument("--body", help="new body text, or '-' for stdin")
+    cu.add_argument("--json", action="store_true")
+    cu.set_defaults(func=cmd_conf_update)
+
+    cm = cp.add_parser("comment", help="add a footer comment to a page")
+    cm.add_argument("page", help="page id")
+    cm.add_argument("body", help="comment text, or '-' for stdin")
+    cm.add_argument("--json", action="store_true")
+    cm.set_defaults(func=cmd_conf_comment)
+
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="atlassian",
+        description="Streamlined Atlassian Cloud CLI (Jira + Confluence). Compact output "
+                    "by default; --json for structured output, --raw for the full API response.")
+    p.add_argument("--version", action="version", version=f"atlassian-toolkit {VERSION}")
+    sub = p.add_subparsers(dest="group", metavar="<group>")
+
+    jp = sub.add_parser("jira", help="Jira issues, search, projects, users")
+    jpsub = jp.add_subparsers(metavar="<command>")
+    _group_default_help(jp)
+    add_jira_commands(jpsub)
+
+    cp = sub.add_parser("confluence", help="Confluence pages and search")
+    cpsub = cp.add_subparsers(metavar="<command>")
+    _group_default_help(cp)
+    add_confluence_commands(cpsub)
+
+    sg = sub.add_parser("search", help="search Jira + Confluence together")
+    sg.add_argument("query")
+    sg.add_argument("--limit", type=int, default=10)
+    sg.add_argument("--json", action="store_true")
+    sg.set_defaults(func=cmd_search_generic)
+
+    a = sub.add_parser("auth", help="authenticate and manage saved credentials")
+    asub = a.add_subparsers(metavar="<subcommand>")
+    _group_default_help(a)
+    al = asub.add_parser("login", help="log in and save an API token")
+    al.add_argument("--site")
+    al.add_argument("--email")
+    al.add_argument("--token-stdin", action="store_true")
+    al.set_defaults(func=cmd_auth_login)
+    asub.add_parser("status", help="show current identity").set_defaults(func=cmd_auth_status)
+    asub.add_parser("logout", help="remove saved credentials").set_defaults(func=cmd_auth_logout)
+
+    d = sub.add_parser("doctor", help="check TLS, config, and connectivity")
+    d.add_argument("--fix-ca", action="store_true")
+    d.set_defaults(func=cmd_doctor)
+
+    return p
+
+
+def main(argv=None):
+    from_cli = argv is None
+    raw = sys.argv[1:] if from_cli else list(argv)
+    prog = os.path.basename(sys.argv[0]) if from_cli else "atlassian"
+
+    if raw[:1] == ["--version"]:
+        print(f"atlassian-toolkit {VERSION}")
+        return
+    # multi-call dispatch: `jira ...` / `confluence ...` inject their group
+    if prog in ("jira", "confluence"):
+        raw = [prog] + raw
+
+    parser = build_parser()
+    args = parser.parse_args(raw)
+    func = getattr(args, "func", None)
+    if not func:
+        parser.print_help()
+        sys.exit(EX_USAGE)
+    try:
+        func(args)
+    except BrokenPipeError:
+        try:
+            sys.stdout.close()
+        finally:
+            os._exit(EX_OK)
+
+
+if __name__ == "__main__":
+    main()

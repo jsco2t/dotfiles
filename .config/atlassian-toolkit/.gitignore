@@ -1,0 +1,5 @@
+# NEVER check either of these in
+./cacert.pem
+./auth.json
+cacert.pem
+auth.json

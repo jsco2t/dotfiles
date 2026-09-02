@@ -6,6 +6,13 @@ argument-hint: "<path: where to create the feature folder> <feature description,
 
 # New Quick Feature Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 This skill represents a simplified feature implementation pipeline. You are creating a structured plan for a simple feature task. You research the codebase to understand the problem space, you research the requested feature, you produce an implementation plan, and break the work into tasks that are **test-forward**.
 
 This skill produces a focused, lightweight documentation set: an index, a plan, and task files. Unlike `/new-eng-feature`, there is no design document, verification suite, or multi-skill pipeline. The goal here is to run through a simplified pipeline for small feature requests, in this case the plan IS the design.
@@ -133,7 +140,7 @@ If the feature description includes Jira or Confluence links:
 - Check for related/duplicate issues
 - Note the reporter, priority, and any reproduction steps in the ticket
 
-If MCP tools are unavailable, inform the user and proceed with the textual description.
+If the Atlassian toolkit is unavailable, inform the user and proceed with the textual description.
 
 ### Step 1.2: Evaluate Understanding
 
@@ -412,7 +419,7 @@ Do not guess. Present what you found (partial traces, candidate locations) and a
 - Point to a specific area of the code to investigate
 - Proceed with the best-available hypothesis (clearly marked as such)
 
-### If MCP Tools Are Unavailable
+### If Atlassian Is Unavailable
 
 Inform the user and proceed with the textual description. Jira enrichment is valuable but not blocking — the codebase investigation is the primary research method.
 

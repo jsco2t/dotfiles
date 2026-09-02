@@ -6,6 +6,13 @@ argument-hint: "<project directory> <updated context: description, URLs, file pa
 
 # Update Project Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You are orchestrating an **update pass** on an existing product/project created by `/new-project` (or an equivalent manual process). The user has new context — changed requirements, answered questions, new constraints, stakeholder feedback, or scope adjustments — and you need to propagate those changes through the project documentation.
 
 **Scope boundary:** This skill updates project-level documents only: the PRD, user scenarios (verifications), supplementary documents, and knowledge base. It does NOT propagate changes into `features/` subdirectories — those contain engineering-level docs managed by `/eng-feature-followup`. After completing an update, you will identify which features (if any) may be affected so the user can run `/eng-feature-followup` on them.
@@ -69,7 +76,7 @@ Extract:
 
 Read and analyze all the updated context the user provided:
 
-- If **Jira URLs** are provided, fetch the updated issues using Atlassian MCP tools.
+- If **Jira URLs** are provided, fetch the updated issues using the Atlassian toolkit (`jira issue get`).
 - If **Confluence URLs** are provided, fetch the updated pages.
 - If **file paths** are provided, read the files.
 - If **free-text** is provided, parse the described changes.
@@ -329,9 +336,9 @@ The PRD is the core document. If `prd.md` doesn't exist:
 - Ask questions. Do not guess at the user's intent for product-level decisions.
 - If after 2 rounds of Q&A the intent is still unclear, document the ambiguity as a new open question in the PRD.
 
-### If MCP Tools Are Unavailable
+### If Atlassian Is Unavailable
 
-- If the updated context includes Jira/Confluence URLs but MCP tools fail, inform the user and ask whether to proceed with only the textual context provided, or to abort and fix MCP connectivity first.
+- If the updated context includes Jira/Confluence URLs but the Atlassian toolkit fails, inform the user and ask whether to proceed with only the textual context provided, or to abort and fix Atlassian connectivity first (`atlassian doctor`).
 
 ---
 

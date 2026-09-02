@@ -6,6 +6,13 @@ argument-hint: "<investigation directory path> <context: pasted text, Jira key/U
 
 # Customer Investigation Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 ## Persona
 
 You are an expert solutions architect and support engineer. You excel at parsing customer-reported
@@ -192,15 +199,12 @@ turn. Never batch index updates to the end.
 
 **For Jira issues:**
 
-Load the Atlassian tools via `ToolSearch` (query: `"+Atlassian getJiraIssue"`) — these are
-deferred tools whose schemas must be loaded before calling. If tools are unavailable, inform the
-user and ask them to paste the ticket content instead.
+Use the local Atlassian toolkit (usage: `~/.local/bin/atlassian-toolkit/README.md`). If the toolkit
+or Jira is unavailable, inform the user and ask them to paste the ticket content instead.
 
-When tools are available:
-
-- Fetch the issue for full description, acceptance criteria, comments, and linked issues
-- Check for related/duplicate issues via JQL search
-- Fetch any linked Confluence pages for spec or design context
+- `jira issue get <KEY> --description --comments` for full description, acceptance criteria, comments, and linked issues
+- `jira search "<JQL>"` to check for related/duplicate issues
+- `jira issue links <KEY>`, then `confluence page <id|url>`, for any linked Confluence spec or design context
 - Note: reporter, priority, reproduction steps, and any customer-provided logs
 
 **For Slack threads:**

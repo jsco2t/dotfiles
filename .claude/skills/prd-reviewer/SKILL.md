@@ -6,6 +6,13 @@ argument-hint: "<PRD source: file path, Jira/Confluence URL, GitHub URL, or inli
 
 # PRD Reviewer
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You review Product Requirements Documents with two goals:
 
 1. **Summarize** — describe in plain, approachable language what the PRD is about and what the hard requirements are.
@@ -38,14 +45,14 @@ Read the file. If it references other documents (links, file paths), read those 
 
 ### Jira / Confluence
 
-Use the Atlassian MCP tools to gather the PRD and its full context. **Traverse exactly this set, then stop:**
+Use the local Atlassian toolkit (usage: `~/.local/bin/atlassian-toolkit/README.md`) to gather the PRD and its full context. All commands here are read-only. **Traverse exactly this set, then stop:**
 
-1. **Root issue/page** — fetch it (`mcp__atlassian__getJiraIssue` or `mcp__atlassian__getConfluencePage`)
+1. **Root issue/page** — fetch it (`jira issue get <KEY> --description --comments` or `confluence page <id|url>`)
 2. **Epic parent** — if the root is a story/task, fetch its parent epic
-3. **Epic children** — fetch all children of the epic (`mcp__atlassian__searchJiraIssuesUsingJql` with `parent = <epic-key>` or `"Epic Link" = <epic-key>`)
-4. **Linked Confluence pages** — `mcp__atlassian__getJiraIssueRemoteIssueLinks` on the root issue and its epic
-5. **Confluence descendants** — `mcp__atlassian__getConfluencePageDescendants` on any linked Confluence pages (one level of descendants)
-6. **Comments** — read comments on the root issue and epic (included when fetching with `comment` field)
+3. **Epic children** — fetch all children of the epic (`jira search 'parent = <epic-key>'`, or `jira search '"Epic Link" = <epic-key>'`)
+4. **Linked Confluence pages** — `jira issue links <KEY>` on the root issue and its epic
+5. **Confluence descendants** — `confluence descendants <id|url>` on any linked Confluence pages (one level of descendants)
+6. **Comments** — read comments on the root issue and epic (`--comments` on `jira issue get`, or `jira issue comments <KEY>`)
 
 **Stop rule**: one hop beyond the epic's children. Do not recursively traverse linked issues beyond the immediate epic family. If a linked item references further documents, note them in the source manifest but do not fetch them.
 

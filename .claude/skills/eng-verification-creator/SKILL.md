@@ -6,6 +6,13 @@ argument-hint: "<path to eng-implementation-plan.md> <path to engineering-design
 
 # Engineering Verification Creator Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You are creating a comprehensive set of manual verification test documents for a feature. Your goal is to produce documents that a developer or QA engineer can follow step-by-step to verify every aspect of a feature works correctly end-to-end.
 
 **The specifications in Jira and Confluence are the authoritative source of truth.** Every requirement, acceptance criterion, and behavioral specification called out in those documents MUST have corresponding verification tests. Additional verifications beyond the spec are expected — but spec compliance coverage is mandatory and must be demonstrably complete.
@@ -355,9 +362,9 @@ Read both the engineering implementation plan and design document thoroughly. Ex
 
 #### Step 1.2: Fetch Jira Issues
 
-For every Jira issue referenced in the input documents, use MCP tools to fetch the full details:
+For every Jira issue referenced in the input documents, use the local Atlassian toolkit (usage: `~/.local/bin/atlassian-toolkit/README.md`) to fetch the full details:
 
-- Use `mcp__claude_ai_Atlassian__getJiraIssue` (or `mcp__claude_ai_Atlassian_2__getJiraIssue`) to fetch each issue
+- `jira issue get <KEY> --description --comments` to fetch each issue
 - Extract: summary, description, acceptance criteria, comments with decisions
 - Follow epic links to find child stories that may have additional requirements
 - Check for linked issues that add constraints or dependencies
@@ -370,13 +377,13 @@ For every Jira issue referenced in the input documents, use MCP tools to fetch t
 | FUZZ-XXXX  | [from issue summary]                       | [specific testable criteria from issue]   |
 ```
 
-If MCP tools are unavailable, extract requirements from what's documented in the research and design documents, but warn the user that direct Jira verification was not performed.
+If the Atlassian toolkit or Jira is unavailable, extract requirements from what's documented in the research and design documents, but warn the user that direct Jira verification was not performed.
 
 #### Step 1.3: Fetch Confluence Pages
 
 For every Confluence page referenced in the input documents:
 
-- Use `mcp__claude_ai_Atlassian__getConfluencePage` (or `mcp__claude_ai_Atlassian_2__getConfluencePage`) to fetch page content
+- `confluence page <id|url>` to fetch page content
 - Extract behavioral specifications, examples, Q&A decisions, and edge cases
 - These often contain the most detailed and specific requirements (e.g., "always try to migrate", "default-deny semantics")
 - Pay special attention to examples sections — these often define exact expected behavior

@@ -217,6 +217,7 @@ Is the code structured to accommodate likely future changes without requiring st
    - Include the project's established patterns from CLAUDE.md and sibling code sampling
    - Instruct the fork to **execute the review directly — do not re-delegate or spawn further agents**
    - Instruct the fork to report findings with confidence scores, file paths, and line numbers
+   - Instruct the fork to write each finding's description as **complete sentences that lead with the concrete architectural cost** (what becomes hard to change, what can't be tested, what will ripple), not label:value fragments — so the consolidated report can use the text verbatim
    - Include: "Every finding must name a concrete cost — what becomes hard to change, what can't be tested, what will ripple. If you can't name the cost, it's not a finding."
    - Include the honesty instruction: "It is acceptable to find no issues. It is unacceptable to report non-issues just to appear productive."
 
@@ -238,25 +239,65 @@ Rate each potential finding on a scale from 0-100:
 
 **Only report findings with confidence >= 80.** Architecture review is inherently opinionated — the high threshold ensures only findings with concrete costs survive.
 
-## Output Guidance
+## Output — Reporting findings
 
-Start by clearly stating what you're reviewing and the mode (diff vs whole-code).
+Start by stating what you reviewed and the mode (diff vs whole-code).
+
+Report findings as a numbered list, **most severe first**. Never bury a finding inside a prose paragraph, and never put findings in a table — the reader must be able to scan the list and decide what to do about each finding from its first two lines alone.
+
+Every finding uses this block, exactly:
+
+```text
+### N. <Headline — what becomes harder, less testable, or more fragile, and for whom>
+Severity: <Critical | Important> | Confidence: <0-100> | State: <most precise state below>
+File: <path:line> · Dimension: <which architecture dimension>
+
+Issue: <Complete sentences. Lead with the concrete architectural cost — what becomes
+hard to change, what can't be tested, what will ripple — then the mechanism and the
+evidence (file:line). Add language context when it matters (why this bites in this
+specific stack). Introduce any pattern or term the first time you name it. A cost you
+cannot name is not a finding.>
+
+Fix: <Concrete and specific — what to change, not "improve this".>
+
+Reviewers: <architecture dimension>
+```
+
+- **Severity, Confidence, and State always appear on the first line, verbatim.** They are the reader's decision inputs — never hide, omit, or demote them.
+- **The headline names the consequence, not the code.** Understandable without opening the file.
+- **`Issue:` is prose** that names a concrete cost — architecture review without a named cost is taste, not a finding.
+- **`Reviewers:` is a trailing secondary tag** naming the dimension.
+
+**State — pick the single most precise value** (architecture review is often whole-code — when there is no diff to attribute against, use `Broken` with no provenance suffix):
+
+- `Broken — this change` — the change introduces a structural defect that fails or blocks today.
+- `Broken — pre-existing, impact raised` — the defect predates the change; this change increases its cost or blast radius.
+- `Broken — pre-existing` — predates the change and this change doesn't worsen it; flagged because the change sits right beside it.
+- `Latent — <condition>` — no cost today; the named growth or change makes it bite.
+- `Cosmetic` — naming or organization; no structural cost at stake.
+
+Group findings under severity headings:
+- **## Critical (confidence >= 90)** — architectural defects that should be addressed before merge.
+- **## Important (confidence 80-89)** — structural improvements that will pay off.
+
+Most severe first, confidence descending within each.
+
+If any out-of-scope observations were noticed, list them briefly at the end under **Other observations (out of scope)** — one line each, no development.
 
 **If no findings survive the threshold**, say so directly. Briefly note any structural qualities that are working well — affirming good-enough simplicity is part of the pragmatist's job. A clean review is a valuable outcome.
 
-For each finding above threshold, provide:
+### After the findings: ask what to do
 
-- Clear description with confidence score
-- **Dimension** — which architecture dimension this falls under
-- File path and line number
-- **The concrete cost** — what becomes harder, less testable, or more fragile because of this
-- **Language context** — why this matters in this specific language/stack (when applicable)
-- Concrete suggestion for improvement
+Do not stop silently and do not act on your own. First print a one-line index of the findings so the choice is never buried:
 
-Group findings by severity:
-- **Critical** (confidence >= 90): Architectural defects that should be addressed before merge
-- **Important** (confidence 80-89): Structural improvements that will pay off
+```text
+1. [Critical · 92 · Broken — pre-existing, impact raised] Handler can't be unit-tested without a live DB
+2. [Important · 84 · Latent — second consumer] Wrapper adds indirection with no current payoff
+```
 
-If any out-of-scope observations were noticed, list them briefly at the end under "Other observations (out of scope)" — one line each, no development.
+Then use **AskUserQuestion** to let the reader choose what to do:
 
-Structure your response for maximum actionability — developers should understand the architectural cost and how to address it, not just that something could be different.
+- **Explain one in depth** — expand a single finding.
+- **Re-run at a lower confidence threshold** — surfaces more findings; this re-runs the review and is slower.
+- **Write the report to a file** — save the full report to a path.
+- **Nothing further** — done.

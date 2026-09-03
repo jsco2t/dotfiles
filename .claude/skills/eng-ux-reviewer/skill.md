@@ -261,6 +261,8 @@ Launch review sub-agents to parallelize the auditable concerns:
 6. **Information Architecture agent** — reviews 3.6, evaluating organization, hierarchy, and cognitive load.
 7. **Error States agent** — reviews 3.7, tracing all error and failure paths.
 
+Instruct every sub-agent to write each finding's description as **complete sentences that lead with the user-facing consequence** (what the user can't do or gets wrong), not label:value fragments — so the consolidated report can use the text verbatim.
+
 After all sub-agents report back, the **main thread performs the integrative pass** (3.4 — Experience Quality). This assessment must see the full picture — all sub-agent findings plus its own holistic reading of the interface. The integrative pass is not delegated.
 
 **No agent should make code changes. This is a review-only process.**
@@ -314,20 +316,37 @@ Briefly describe the interface as you understand it from the code. For CLI: show
 
 ### Findings
 
-For each finding above the confidence threshold:
+Report findings as a numbered list, **most severe first**. Never bury a finding inside a prose paragraph, and never put findings in a table — the reader must be able to scan the list and decide what to do about each finding from its first two lines alone.
 
-- **Confidence score** and **category** (Layout, A11y, Reachability, Patterns, Experience, Discoverability, Information Architecture, Error Handling)
-- **Standard reference** where applicable (WCAG criterion, clig.dev guideline, platform HIG section)
-- **Surface type** this applies to (if the review covers multiple surfaces)
-- **File path and line number**
-- **What the user experiences** — describe the problem from the user's perspective, not the developer's
-- **Why it matters** — impact on usability, accessibility, or experience quality
-- **Concrete suggestion** — a specific, actionable improvement (not "make this better" but "add a `--format json` flag so output can be piped to jq")
+Every finding uses this block, exactly:
 
-Group findings by severity:
+```text
+### N. <Headline — what the user can't do or gets wrong: the experience consequence>
+Severity: <Critical | Important> | Confidence: <0-100> | State: <Blocks / Inaccessible | Convention violation | Friction | Cosmetic>
+File: <path:line> · Category: <Layout | A11y | Reachability | Patterns | Experience | Discoverability | Information Architecture | Error Handling>[ · Standard: <WCAG criterion / clig.dev / HIG section>][ · Surface: <CLI | TUI | Web>]
 
-- **Critical** (confidence >= 90): Accessibility failures, broken interactions, misleading UI, experience-breaking layout issues
-- **Important** (confidence 80–89): Convention violations, discoverability gaps, friction points, missing feedback states
+Issue: <Complete sentences describing the problem from the USER's perspective, not the
+developer's — what they attempt, what happens, and who is blocked or confused. Then the
+evidence (file:line) and, where applicable, the standard it violates.>
+
+Fix: <A specific, actionable improvement — not "make this better" but e.g. "add a `--format
+json` flag so output can be piped to jq".>
+
+Reviewers: <UX category>
+```
+
+**State — pick the single most precise value:**
+
+- `Blocks / Inaccessible` — a broken interaction, keyboard trap, or WCAG failure that stops a user.
+- `Convention violation` — a platform / clig.dev / HIG / WCAG standard is unmet.
+- `Friction` — works, but degrades the experience.
+- `Cosmetic` — polish; no real usability cost.
+
+Group findings under severity headings:
+- **## Critical (confidence >= 90)** — accessibility failures, broken interactions, misleading UI, experience-breaking layout issues.
+- **## Important (confidence 80-89)** — convention violations, discoverability gaps, friction points, missing feedback states.
+
+Most severe first, confidence descending within each. **Severity, Confidence, and State always appear on the first line, verbatim.** The headline names the experience consequence; `Issue:` is prose from the user's perspective; `Reviewers:` is a trailing secondary tag naming the UX category.
 
 ### Summary
 
@@ -335,3 +354,19 @@ Group findings by severity:
 - Which review areas surfaced the most issues
 - One sentence: the single highest-impact improvement
 - If the interface is solid, say so — a clean bill of health is a valid and valuable outcome
+
+### After the findings: ask what to do
+
+Do not stop silently. First print a one-line index of the findings so the choice is never buried:
+
+```text
+1. [Critical · 95 · Blocks / Inaccessible] Primary action unreachable by keyboard; screen-reader users can't submit
+2. [Important · 82 · Convention violation] Errors print to stdout, breaking `2>` redirection
+```
+
+Then use **AskUserQuestion** to let the reader choose what to do:
+
+- **Explain one in depth** — expand a single finding.
+- **Re-run at a lower confidence threshold** — surfaces more findings; this re-runs the review and is slower.
+- **Write the report to a file** — save the full report to a path.
+- **Nothing further** — done.

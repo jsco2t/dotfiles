@@ -95,6 +95,8 @@ Recommend specific additional documents that should be created, with a brief des
 
 - Have those sub-agents review the documents and report back.
 
+- Instruct each sub-agent to write every finding's description as **complete sentences that lead with the consequence** (what the reader gets wrong, or what they can't find), not label:value fragments — so the consolidated report can use the text verbatim.
+
 - Use the main thread to process the results and produce a unified report.
 
 - No agent should make document changes. This is a review only task.
@@ -111,35 +113,65 @@ Rate each potential issue on a scale from 0-100:
 
 **Only report issues with confidence >= 80.** Focus on issues that truly matter — quality over quantity.
 
-## Output Guidance
+## Output — Reporting findings
 
 Start by clearly stating what you're reviewing (file or directory, number of documents, the subject matter).
 
-For each high-confidence issue, provide:
+Report findings as a numbered list, **most severe first**. Never bury a finding inside a prose paragraph, and never put findings in a table — the reader must be able to scan the list and decide what to do about each finding from its first two lines alone.
 
-- Clear description with confidence score
-- File path and location within the document (section heading or line number)
-- Why this matters to the reader
-- Concrete fix suggestion or rewrite
+Every finding uses this block, exactly:
 
-Group issues by category:
+```text
+### N. <Headline — what the reader gets wrong or can't find: the consequence, not the doc mechanism>
+Severity: <Critical | Important> | Confidence: <0-100> | State: <most precise state below>
+Location: <file · section heading or line>
 
-### Critical (Truth & Accuracy)
+Issue: <Complete sentences. Lead with what the reader would do wrong or fail to find,
+then the evidence — quote the offending clause and, where it contradicts the source,
+cite the source (file:line or command). Introduce any term or system the first time
+you name it.>
 
-Issues where the document is factually wrong, contradicts its source material, or would cause the reader to do the wrong thing.
+Fix: <Concrete — the correction or rewrite, specific enough to apply.>
 
-### Important (Clarity & Completeness)
+Reviewers: <review lens: Technical Accuracy | Language | Structure>
+```
 
-Issues where the document is technically correct but confusing, incomplete, or hard to use.
+- **Severity, Confidence, and State always appear on the first line, verbatim.** They are the reader's decision inputs — never hide, omit, or demote them.
+- **The headline names the consequence to the reader, not the doc's internals.** Understandable without opening the document.
+- **`Issue:` is prose** — subjects and verbs, not stacked fragments. Lead with the reader-facing consequence and quote the evidence.
+- **`Reviewers:` is a trailing secondary tag** naming the review lens.
 
-### Structure (Architecture & Splits)
+**State — pick the single most precise value** (when reviewing whole documents with no diff, use `Wrong` with no provenance suffix):
 
-Recommendations for splitting documents, reordering content, or creating new companion documents.
+- `Wrong — this change` — the change made the doc contradict the code or behavior.
+- `Wrong — pre-existing` — the doc already contradicts its source of truth, or would make the reader do the wrong thing.
+- `Missing` — a real gap a reader will hit.
+- `Unclear` — correct, but will confuse or mislead.
+- `Structure` — a split, reorder, or companion-doc recommendation.
+- `Cosmetic` — formatting, style, or a typo.
 
-### Document Set Gaps
+Group findings under severity headings:
+- **## Critical (confidence >= 90)** — the document is factually wrong, contradicts its source, or would make the reader do the wrong thing.
+- **## Important (confidence 80-89)** — correct but confusing, incomplete, or hard to use.
 
-Missing documents that should be created to complete the set, with a description of what each should cover.
+Most severe first, confidence descending within each.
 
-If no high-confidence issues exist, confirm the documentation meets standards with a brief summary of what's working well.
+**Document set gaps.** After the findings, list any missing documents that should be created to complete the set — one line each, naming what each should cover. (These are set-level `Missing` items; keep them here rather than in the numbered list.)
 
-Structure your response for maximum actionability — the author should know exactly what to fix, where, and why.
+**If no high-confidence issues exist**, confirm the documentation meets standards with a brief summary of what's working well.
+
+### After the findings: ask what to do
+
+Do not stop silently and do not act on your own. First print a one-line index of the findings so the choice is never buried:
+
+```text
+1. [Critical · 95 · Wrong — pre-existing] Documented flag `--foo` was removed; the example command fails
+2. [Important · 82 · Missing] No mention of the required auth token; new users hit 401 with no guidance
+```
+
+Then use **AskUserQuestion** to let the reader choose what to do:
+
+- **Explain one in depth** — expand a single finding.
+- **Re-run at a lower confidence threshold** — surfaces more findings; this re-runs the review and is slower.
+- **Write the report to a file** — save the full report to a path.
+- **Nothing further** — done.

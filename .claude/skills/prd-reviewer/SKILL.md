@@ -154,6 +154,8 @@ Review the PRD across four dimensions, each mapped to a specific question. Refer
 
 **Write findings in natural prose, not label:value pairs.** Each finding should read like a paragraph a colleague wrote — with headers for scannability, but sentences for substance. The reader should be able to skim headers to find relevant findings, then read the body without mentally reassembling fragments.
 
+**Under each finding's `####` heading, put a metadata line, verbatim:** `Severity: <Blocker | Important | Minor> | Confidence: <0-100> | State: <Conflict | Blocks tasking | Ambiguous | Missing | Strength>`. Severity, Confidence, and State are the reader's decision inputs — always shown on that line, never omitted. The heading names the consequence; the metadata line comes next; the prose body follows.
+
 - Lead with impact — what's broken or blocked — before presenting evidence
 - Group evidence so the contradiction or gap is visually obvious
 - Use headers (`####`) for individual findings so they're scannable
@@ -324,6 +326,24 @@ If writing to a file, use this structure:
 ```
 
 If outputting to the conversation, use the same structure but skip the file metadata header.
+
+---
+
+## After the review: ask what to do
+
+Whether you wrote to a file or the conversation, do not stop silently. First print a one-line index of the findings so the choice is never buried:
+
+```text
+1. [Blocker · 95 · Conflict] R5 and R12 disagree on whether guest checkout is in scope
+2. [Important · 82 · Missing] No error behavior for R4; engineers can't define done
+```
+
+Then use **AskUserQuestion** to let the reader choose what to do:
+
+- **Explain one in depth** — expand a single finding.
+- **List the top blockers** — show the priority-ordered unblock list again.
+- **Write the review to a file** — save the full review to a path.
+- **Nothing further** — done.
 
 ---
 

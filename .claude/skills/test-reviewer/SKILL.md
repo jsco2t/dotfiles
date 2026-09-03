@@ -152,7 +152,7 @@ Gather the test changes and the production code they test, then launch four revi
 3. **Security & Data** — Dimensions 2 and 3.
 4. **Boundaries & Craft** — Core: Test Architecture, Test Code Quality, Maintenance Burden. Dimensions 4 and 6. (The broadest brief: it judges whether the tests are well-made and whether they test the right seams at the right level.)
 
-Give each agent the test files, the corresponding production code, its brief above, and any emphasis the user stated. Then use the main thread to consolidate: merge findings that refer to the same location, drop duplicates, and apply the confidence bar.
+Give each agent the test files, the corresponding production code, its brief above, and any emphasis the user stated. Instruct each agent to write every finding's description as **complete sentences that lead with the consequence** (what would go undetected, or what the test fails to prove), not label:value fragments — so the consolidated report can use the text verbatim. Then use the main thread to consolidate: merge findings that refer to the same location, drop duplicates, and apply the confidence bar.
 
 **No agent makes code changes. This is a review-only task.**
 
@@ -172,24 +172,63 @@ Rate each finding 0–100 on how confident you are that addressing it will meani
 
 ---
 
-## Output
+## Output — Reporting findings
 
 Open with one line stating what you reviewed, how the scope was determined, and any emphasis applied — e.g. `Reviewed 3 test files (uncommitted changes). Emphasis: authz boundaries.` Follow with a brief characterization of the test code's overall health.
 
-For each finding above the bar:
+Report findings as a numbered list, **most severe first**. Never bury a finding inside a prose paragraph, and never put findings in a table — the reader must be able to scan the list and decide what to do about each finding from its first two lines alone. **Say clearly whether each finding is about the tests or about the code under test** — "this test doesn't cover it" and "this code is wrong" are opposite conclusions.
 
-- Confidence score and category (core responsibility name, or dimension name)
-- File path and line number
-- The specific problem and why it matters
-- A concrete suggestion — not just "fix this" but *how*
+Every finding uses this block, exactly:
 
-Group by severity:
+```text
+### N. <Headline — what would go undetected, or what the test fails to prove, and when it bites>
+Severity: <Critical | Important> | Confidence: <0-100> | State: <most precise state below>
+File: <path:line> · Category: <core responsibility or dimension name>
 
-- **Critical** (confidence ≥ 90): address before merge
-- **Important** (confidence 75–89): strongly recommended
+Issue: <Complete sentences. Lead with the consequence — which regression slips through,
+or which change the passing test would not catch — then the mechanism and the evidence
+(file:line). Introduce any helper, fixture, or framework the first time you name it.>
 
-Close with a count by severity and one sentence on the most impactful improvement available. If the tests are solid, say so — a clean bill of health is a valid and valuable outcome. Don't manufacture findings to fill space; a brief note on what the tests do well reinforces good practice.
+Fix: <Concrete and specific — not "fix this" but how: the assertion to add, the seam to
+test, the flake to remove.>
 
-If the user supplied an output path, write the report there as well as summarizing in the conversation.
+Reviewers: <responsibility or dimension name>
+```
 
-Structure the response for maximum actionability: a developer should know exactly what to change and understand why it makes the tests better, not merely different.
+- **Severity, Confidence, and State always appear on the first line, verbatim.** They are the reader's decision inputs — never hide, omit, or demote them.
+- **The headline names the consequence, not the code.** Understandable without opening the file.
+- **`Issue:` is prose** — subjects and verbs, not stacked fragments. Lead with the consequence and give the reader something to picture.
+- **`Reviewers:` is a trailing secondary tag** naming the responsibility or dimension.
+
+**State — pick the single most precise value:**
+
+- `Test gap` — a real behavior has no test; a regression in it would ship uncaught. Say whether this change added the untested path.
+- `Weak test` — the test passes but does not prove what its name claims.
+- `Broken — this change` — a test added or changed here is itself wrong, flaky, or tests the wrong thing today.
+- `Broken — pre-existing, impact raised` — an existing test is flaky or misleading, and this change makes it matter more.
+- `Latent — <condition>` — the test is fine until the named condition (parallelism, ordering, environment) makes it flake.
+- `Cosmetic` — test naming, structure, or comments; no reliability or coverage at stake.
+
+When you were pointed at committed test files rather than a diff (no changeset to attribute against), use `Broken` with no provenance suffix.
+
+Group findings under severity headings:
+- **## Critical (confidence >= 90)** — address before merge.
+- **## Important (confidence 75-89)** — strongly recommended.
+
+Most severe first, confidence descending within each. Close with a count by severity and one sentence on the most impactful improvement available. If the tests are solid, say so — a clean bill of health is a valid and valuable outcome. Don't manufacture findings to fill space; a brief note on what the tests do well reinforces good practice.
+
+### After the findings: ask what to do
+
+Do not stop silently and do not act on your own. First print a one-line index of the findings so the choice is never buried:
+
+```text
+1. [Critical · 92 · Test gap] Token-expiry path has no test; an auth regression would ship uncaught
+2. [Important · 80 · Weak test] "validates input" asserts only that no error is thrown
+```
+
+Then use **AskUserQuestion** to let the reader choose what to do:
+
+- **Explain one in depth** — expand a single finding.
+- **Re-run at a lower confidence threshold** — surfaces more findings; this re-runs the review and is slower.
+- **Write the report to a file** — save the full report to a path (do this automatically if the user supplied an output path).
+- **Nothing further** — done.

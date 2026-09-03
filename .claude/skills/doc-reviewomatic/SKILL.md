@@ -336,7 +336,7 @@ Each reviewer agent receives:
 
 Each reviewer returns a list of findings, each containing:
 
-- Description of the issue
+- Description of the issue, **written as complete sentences that lead with the consequence** (what the reader gets wrong or can't find) — not a label:value fragment, so the consolidated report can use it verbatim
 - File path and line number
 - Which review responsibility category it falls under
 - A concrete fix suggestion (exact corrected text when possible)
@@ -366,7 +366,7 @@ If multiple reviewers flagged the same issue (same file, same line, overlapping 
 
 ### Produce the Review Report
 
-Present findings grouped by severity:
+Present findings as a numbered list, **most severe first**. Never bury a finding inside a prose paragraph, and never put findings in a table — the reader must be able to scan the list and decide what to do about each finding from its first two lines alone.
 
 ```markdown
 # Documentation Review Report
@@ -376,28 +376,44 @@ Present findings grouped by severity:
 
 ## Critical (confidence >= 90)
 
-### [Finding title]
+### 1. <Headline — what the reader gets wrong or can't find: the consequence, not the doc mechanism>
+Severity: Critical | Confidence: <0-100> | State: <most precise state below>
+Location: <file · section heading or line>[ · Category: <e.g. Command Verification, Grammar, Frontmatter Compliance>]
 
-- **File:** path/to/file.md:42
-- **Confidence:** 95
-- **Reviewer:** [A: Technical Accuracy | B: Readability & Language | C: Structure & Consistency]
-- **Category:** [e.g., Command Verification, Grammar, Frontmatter Compliance]
-- **Issue:** [clear description of the problem]
-- **Suggestion:** [concrete fix — show the exact corrected text when possible]
+Issue: <Complete sentences. Lead with what the reader would do wrong or fail to find,
+then the evidence — quote the offending clause and, where it contradicts the source, cite
+the source (file:line or command). Introduce any term or system the first time you name it.>
+
+Fix: <Concrete — the correction or rewrite, exact corrected text when possible.>
+
+Reviewers: <A: Technical Accuracy | B: Readability & Language | C: Structure & Consistency>
 
 ## Important (confidence 80-89)
 
-[same format]
+[same block, with Severity: Important]
 
 ## Summary
 
-- **Total findings:** N
-- **Critical:** N
-- **Important:** N
+- **Total findings:** N   **Critical:** N   **Important:** N
 - **Reviewers deployed:** A (Technical Accuracy), B (Readability & Language), C (Structure & Consistency)
-
-[If no findings above threshold: "No issues found above the confidence threshold. The documentation meets standards."]
 ```
+
+**State — pick the single most precise value** (when reviewing whole documents with no diff, use `Wrong` with no provenance suffix):
+
+- `Wrong — this change` — the change made the doc contradict the code or behavior.
+- `Wrong — pre-existing` — the doc already contradicts its source of truth, or would make the reader do the wrong thing.
+- `Missing` — a real gap a reader will hit.
+- `Unclear` — correct, but will confuse or mislead.
+- `Structure` — a split, reorder, frontmatter, or convention fix.
+- `Cosmetic` — formatting, style, or a typo.
+
+Rules for the block:
+- **Severity, Confidence, and State always appear on the first line, verbatim** — they are the reader's decision inputs; never hide, omit, or demote them.
+- **The headline names the consequence to the reader, not the doc's internals** — understandable without opening the document.
+- **`Issue:` is prose** — complete sentences that lead with the reader-facing consequence, not label:value fragments.
+- **`Reviewers:` is a trailing secondary tag** — it records which reviewer (A/B/C) flagged it and never leads.
+
+If no findings are above threshold: "No issues found above the confidence threshold. The documentation meets standards." — and note briefly what the docs do well.
 
 ---
 
@@ -405,7 +421,14 @@ Present findings grouped by severity:
 
 **This phase only runs in `review` and `scan` modes.**
 
-After presenting the review report, ask the user which findings should be posted as PR comments — **unless** `--auto-comment` was passed, in which case post all findings at or above the threshold.
+After presenting the review report, **first print the one-line finding index so the choice is never buried in the report**:
+
+```text
+1. [Critical · 95 · Wrong — this change] Documented `--foo` flag no longer exists; the example command fails
+2. [Important · 82 · Missing] No mention of the required auth token; new users hit 401 with no guidance
+```
+
+Then ask the user which findings should be posted as PR comments — **unless** `--auto-comment` was passed, in which case post all findings at or above the threshold.
 
 ```
 AskUserQuestion:

@@ -184,19 +184,43 @@ List everything you fixed directly, grouped by category:
 - [Category] file:line — description of what was fixed
 ```
 
-### Issues Requiring Attention
-For issues you couldn't auto-fix, provide:
-```
-### Needs Attention (N issues)
+### Issues requiring attention
 
-#### Critical
-- **[Confidence: XX]** file:line — Description
-  - Why this matters: [reference to reviewer pattern]
-  - Suggested fix: [specific guidance]
+For issues you couldn't auto-fix, report a numbered list, **most severe first**. Never bury a finding inside a prose paragraph, and never put findings in a table — the reader must be able to scan the list and decide what to do about each finding from its first two lines alone.
 
-#### Important
-...
+Every finding uses this block, exactly:
+
+```text
+### N. <Headline — what breaks and for whom: the consequence, not the code mechanism>
+Severity: <Critical | Important | Minor> | Confidence: <0-100> | State: <most precise state below>
+File: <path:line>[ · Category: <what area this is>]
+
+Issue: <Complete sentences. Lead with what goes wrong and on which platform the reader
+would see it (Raspberry Pi, openSUSE, EL10, ...), then the mechanism and the evidence
+(file:line). Introduce any tool or convention the first time you name it.>
+
+Fix: <Concrete and specific — which functions need tests and the test structure, the
+exact CHANGELOG line, the platform to guard — not "add tests".>
+
+Reviewers: <reviewer pattern: devA | devB | devC>
 ```
+
+- **Severity, Confidence, and State always appear on the first line, verbatim.** They are the reader's decision inputs — never hide, omit, or demote them.
+- **The headline names the consequence, not the code.** Understandable without opening the file.
+- **`Issue:` is prose** — subjects and verbs, not stacked fragments. Lead with the consequence and give the reader something to picture.
+- **`Reviewers:` is a trailing secondary tag** naming the reviewer pattern (devA / devB / devC).
+
+**State — pick the single most precise value:**
+
+- `Broken — this change` — the change introduces a defect that fails today.
+- `Broken — pre-existing, impact raised` — the defect predates the change; this change increases its likelihood, frequency, or blast radius.
+- `Broken — pre-existing` — predates the change and this change doesn't worsen it; flagged because the change sits right beside it.
+- `Latent — <condition>` — does not fail in normal operation; the named platform or input triggers it.
+- `Test gap` — the code is correct, but no test would catch it regressing.
+- `Weak test` — a test passes but does not prove what its name claims.
+- `Cosmetic` — naming, comments, or stale docs; no behavior at stake.
+
+Group findings under severity headings — **## Critical (confidence >= 90)**, **## Important (confidence 80-89)**, **## Minor (confidence 70-79)** — most severe first, confidence descending within each. (Report threshold is 70; auto-fix threshold is 80.)
 
 ### Checklist Summary
 End with a quick status on the PR submission checklist:
@@ -210,6 +234,21 @@ End with a quick status on the PR submission checklist:
 - [x] Exported functions documented
 ...
 ```
+
+### After the report: ask what to do
+
+Do not stop silently. First print a one-line index of the needs-attention findings so the choice is never buried:
+
+```text
+1. [Critical · 95 · Broken — this change] Ignored error return in the mount path
+2. [Minor · 74 · Test gap] New overlay logic has no test on EL10
+```
+
+Then use **AskUserQuestion** to let the reader choose what to do:
+
+- **Fix more of them** — apply fixes for the findings you pick.
+- **Explain one in depth** — expand a single finding.
+- **Leave the rest** — done; the auto-fixes stand.
 
 ## Confidence Scoring
 

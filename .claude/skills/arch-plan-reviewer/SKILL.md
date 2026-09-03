@@ -259,20 +259,36 @@ sound. Say so directly.
 
 **Section 3: Findings**
 
-For each finding above threshold:
+Report findings as a numbered list, **most severe first**. Never bury a finding in a prose paragraph, and never put findings in a table — the reader must be able to scan the list and decide what to do about each from its first two lines alone.
 
-- Confidence score
-- Dimension (which architecture dimension)
-- **Plan section** and **decision at stake** (anchor to the plan, not to
-  code that doesn't exist)
-- The concrete cost or risk
-- Language context (when applicable)
-- Concrete suggestion
+Every finding uses this block, exactly:
 
-Group by severity:
-- **Critical** (>= 90): Architectural decisions that should be revised
-  before implementation
-- **Important** (80-89): Concerns that should be weighed
+```text
+### N. <Headline — the decision at stake and what it costs, in plain terms>
+Severity: <Critical | Important> | Confidence: <0-100> | State: <Blocker | Risk | Alternative | Gap>
+Plan section: <section or decision point — anchor to the plan, not to code that doesn't exist>
+
+Issue: <Complete sentences. Lead with the concrete cost or risk the decision carries —
+what becomes hard to change, untestable, or fragile — then the reasoning and any language
+context. Introduce any pattern or term the first time you name it.>
+
+Fix: <Concrete recommendation — the alternative to weigh or the decision to make.>
+
+Reviewers: <architecture dimension>
+```
+
+**State — pick the single most precise value:**
+
+- `Blocker` — the plan cannot work as written; implementing it as described will fail or corner the team.
+- `Risk` — a structural risk that should be decided deliberately before implementation.
+- `Alternative` — a materially better approach exists; name it and the tradeoff.
+- `Gap` — a decision the plan leaves unaddressed that engineering will hit.
+
+Group findings under severity headings:
+- **## Critical (confidence >= 90)** — architectural decisions that should be revised before implementation.
+- **## Important (confidence 80-89)** — concerns that should be weighed.
+
+Most severe first, confidence descending within each. **Severity, Confidence, and State always appear on the first line, verbatim** — they are the reader's decision inputs. The headline names the consequence, not the plan's internals; `Issue:` is prose that names a concrete cost; `Reviewers:` is a trailing secondary tag naming the dimension. (Sub-agent forks should return each finding's description as complete sentences that lead with the cost, not fragments, so this report can use them verbatim.)
 
 **Section 4: Summary**
 
@@ -282,6 +298,22 @@ architectural perspective.
 
 If no findings survived the threshold and no alternative approaches are
 worth considering, say so directly. A clean review is a valuable outcome.
+
+### After the review: ask what to do
+
+Do not stop silently. First print a one-line index of the findings and candidate approaches so the choice is never buried:
+
+```text
+1. [Critical · 92 · Blocker] Scheduler and store share one package; can't be tested in isolation
+2. [Important · 84 · Alternative] Event bus where a direct call is simpler and traceable
+```
+
+Then use **AskUserQuestion** to let the reader choose what to do:
+
+- **Explain one in depth** — expand a single finding or candidate approach.
+- **Re-run at a lower confidence threshold** — surfaces more findings; this re-runs the review and is slower.
+- **Write the report to a file** — save the full review to a path.
+- **Nothing further** — done.
 
 ## What This Skill Is NOT
 

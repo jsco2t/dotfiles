@@ -393,7 +393,7 @@ Each reviewer agent receives:
 
 Each reviewer returns a list of findings, each containing:
 
-- Description of the issue
+- Description of the issue, **written as complete sentences that lead with the consequence** (what breaks and for whom) — not a label:value fragment, so the consolidated report can use it verbatim
 - File path and line number
 - Which review responsibility category it falls under
 - **Reviewer attribution** — which persona this matches
@@ -426,7 +426,7 @@ If multiple reviewers flagged the same issue (same file, same line, overlapping 
 
 ### Produce the Review Report
 
-Present findings grouped by severity:
+Present findings as a numbered list, **most severe first**. Never bury a finding inside a prose paragraph, and never put findings in a table — the reader must be able to scan the list and decide what to do about each finding from its first two lines alone.
 
 ```markdown
 # Code Review Report
@@ -436,28 +436,47 @@ Present findings grouped by severity:
 
 ## Critical (confidence >= 90)
 
-### [Finding title]
+### 1. <Headline — what breaks and for whom: the consequence, not the code mechanism>
+Severity: Critical | Confidence: <0-100> | State: <most precise state below>
+File: <path:line>[ · Category: <e.g. Protobuf Schema Safety, Thread Safety, Silent Error Swallowing>]
 
-- **File:** path/to/file.go:42
-- **Confidence:** 95
-- **Reviewer:** [persona name]
-- **Category:** [e.g., Protobuf Schema Safety, Thread Safety, Silent Error Swallowing]
-- **Issue:** [clear description of the problem]
-- **Suggestion:** [concrete fix]
+Issue: <Complete sentences. Lead with what goes wrong and what the reader would observe;
+then the mechanism and the evidence they could verify themselves (file:line, a fact they
+could grep for). Introduce any function, library, or convention the first time you name it.>
+
+Fix: <Concrete and specific, with idiomatic Go where it helps.>
+
+Reviewers: <persona name(s) that flagged this>
 
 ## Important (confidence 80-89)
 
-[same format]
+[same block, with Severity: Important]
 
 ## Summary
 
-- **Total findings:** N
-- **Critical:** N
-- **Important:** N
-- **Reviewers deployed:** [list of personas that found issues]
-
-[If no findings above threshold: "No issues found above the confidence threshold. The code meets standards."]
+- **Total findings:** N   **Critical:** N   **Important:** N
+- **Reviewers deployed:** [personas that found issues]
 ```
+
+**State — pick the single most precise value:**
+
+- `Broken — this change` — the change introduces a defect that fails today.
+- `Broken — pre-existing, impact raised` — the defect predates the change; this change increases its likelihood, frequency, or blast radius.
+- `Broken — pre-existing` — predates the change and this change doesn't worsen it; flagged because the change sits right beside it.
+- `Latent — <condition>` — does not fail in normal operation; the named input or state triggers it.
+- `Test gap` — the code is correct, but no test would catch it regressing.
+- `Weak test` — a test passes but does not prove what its name claims.
+- `Cosmetic` — naming, comments, or stale docs; no behavior at stake.
+
+When reviewing whole files rather than a diff (no changeset to attribute against), use `Broken` with no provenance suffix.
+
+Rules for the block:
+- **Severity, Confidence, and State always appear on the first line, verbatim** — they are the reader's decision inputs; never hide, omit, or demote them.
+- **The headline names the consequence, not the code** — understandable without opening the file.
+- **`Issue:` is prose** — complete sentences that lead with the consequence, not label:value fragments.
+- **`Reviewers:` is a trailing secondary tag** — it records the persona(s) and never leads.
+
+If no findings are above threshold: "No issues found above the confidence threshold. The code meets standards." — and note briefly what the code does well.
 
 ---
 
@@ -465,7 +484,14 @@ Present findings grouped by severity:
 
 **This phase only runs in `review` and `scan` modes.**
 
-After presenting the review report, ask the user which findings should be posted as PR comments — **unless** `--auto-comment` was passed, in which case post all findings at or above the threshold.
+After presenting the review report, **first print the one-line finding index so the choice is never buried in the report**:
+
+```text
+1. [Critical · 95 · Broken — this change] Proto field number reused, breaks stored-message decoding
+2. [Important · 82 · Latent — concurrent access] Map written without the mutex held
+```
+
+Then ask the user which findings should be posted as PR comments — **unless** `--auto-comment` was passed, in which case post all findings at or above the threshold.
 
 ```
 AskUserQuestion:

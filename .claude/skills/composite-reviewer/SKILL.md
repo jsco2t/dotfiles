@@ -161,6 +161,7 @@ Abstraction layers, wrapper types, or interface indirection that add complexity 
 - Identify the language(s) and stack present in the diff.
 - Create sub-agents -- each tasked with **one** of the review responsibilities above that applies to the detected stack.
 - Have those sub-agents review the code identified to be reviewed and report back.
+- Instruct each sub-agent to write every finding's description as **complete sentences that lead with the consequence** (what breaks and for whom), not label:value fragments — so the consolidated report can use the text verbatim.
 - Use the main AI thread to process the results and produce a report.
 - No agent should make code changes. This is a review only task.
 - **DO NOT** attempt to compress or optimize the review - the goal is review quality.
@@ -177,15 +178,61 @@ Rate each potential issue on a scale from 0-100:
 
 **Only report issues with confidence >= 80.** Focus on issues that truly matter.
 
-## Output Guidance
+## Output — Reporting findings
 
-For each high-confidence issue, provide:
+Report the review as a numbered list of findings, **most severe first**. Report each item individually and with clarity — never bury a finding inside a prose paragraph, and never put findings in a table. The reader must be able to scan the list and decide what to do about each finding from its first two lines alone.
 
-- Clear description with confidence score
-- **Reviewer attribution** -- which persona pattern this matches
-- File path and line number
-- Specific explanation of why this matters
-- Concrete fix suggestion with language-idiomatic code
-- Do not compress the report - report each item individually and with clarity
+Every finding uses this block, exactly:
 
-Group issues by severity (Critical > Important > Moderate). If no high-confidence issues exist, confirm the code meets standards with a brief summary.
+```text
+### N. <Headline — what breaks and for whom: the consequence, not the code mechanism>
+Severity: <Critical | Important> | Confidence: <0-100> | State: <most precise state below>
+File: <path:line>[ · Category: <what area this is>]
+
+Issue: <Complete sentences. Lead with what goes wrong and what the reader would
+observe; then the mechanism and the evidence they could verify themselves (file:line,
+a fact they could grep for). Introduce any function, library, or convention the first
+time you name it.>
+
+Fix: <Concrete and specific, with language-idiomatic code where it helps — what to
+change, not "improve this".>
+
+Reviewers: <persona name(s) that flagged this>
+```
+
+- **Severity, Confidence, and State always appear on the first line, verbatim.** They are the reader's decision inputs — never hide, omit, or demote them.
+- **The headline names the consequence, not the code.** Someone who has not opened the file must understand what goes wrong from the headline alone.
+- **`Issue:` is prose** — subjects and verbs, not stacked fragments. Lead with the consequence and give the reader something to picture.
+- **`Reviewers:` is a trailing secondary tag** naming the persona(s) that flagged it. It never leads.
+
+**State — pick the single most precise value:**
+
+- `Broken — this change` — the change introduces a defect that fails today.
+- `Broken — pre-existing, impact raised` — the defect predates the change; this change increases its likelihood, frequency, or blast radius.
+- `Broken — pre-existing` — predates the change and this change doesn't worsen it; flagged because the change sits right beside it.
+- `Latent — <condition>` — does not fail in normal operation; the named input or state triggers it.
+- `Test gap` — the code is correct, but no test would catch it regressing.
+- `Weak test` — a test passes but does not prove what its name claims.
+- `Cosmetic` — naming, comments, or stale docs; no behavior at stake.
+
+When you were pointed at whole files rather than a diff (no changeset to attribute against), use `Broken` with no provenance suffix.
+
+Group findings under severity headings (`## Critical (confidence >= 90)`, `## Important (confidence 80-89)`), most severe first and confidence descending within each. Open with one line stating what you reviewed and the scope.
+
+**If nothing survives the threshold**, say so in one sentence and note briefly what the code does well. A clean review is a valid outcome — never manufacture findings.
+
+### After the findings: ask what to do
+
+Do not stop silently and do not act on your own. First print a one-line index of the findings so the choice is never buried:
+
+```text
+1. [Critical · 95 · Broken — this change] Unsanitized input reaches the SQL query
+2. [Important · 82 · Latent — empty batch] Nil dereference when the batch is empty
+```
+
+Then use **AskUserQuestion** to let the reader choose what to do:
+
+- **Explain one in depth** — expand a single finding.
+- **Re-run at a lower confidence threshold** — surfaces more findings; this re-runs the review and is slower.
+- **Write the report to a file** — save the full report to a path.
+- **Nothing further** — done.

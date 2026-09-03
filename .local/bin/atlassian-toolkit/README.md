@@ -41,8 +41,9 @@ the file: `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
 | `jira issue get <KEY>` | Show one issue | `jira issue get FUZZ-1234 --description --comments` |
 | `jira issue create` | Create an issue | `jira issue create --project FUZZ --type Task --summary "..." --description -` |
 | `jira issue edit <KEY>` | Edit fields / labels | `jira issue edit FUZZ-1234 --summary "..." --add-label triage` |
-| `jira issue comment <KEY> <text>` | Add a comment (`-` = stdin) | `jira issue comment FUZZ-1234 "Done."` |
-| `jira issue comments <KEY>` | List comments | `jira issue comments FUZZ-1234` |
+| `jira issue comment <KEY> <text>` | Add a comment, or edit one with `--id <id>` (`-` = stdin) | `jira issue comment FUZZ-1234 "Done."`  ·  `… "Fixed typo." --id 90210` |
+| `jira issue comment-delete <KEY> <id>` | Delete a comment — **permanent** | `jira issue comment-delete FUZZ-1234 90210` |
+| `jira issue comments <KEY>` | List comments (comment ids shown here) | `jira issue comments FUZZ-1234` |
 | `jira issue transition <KEY> [name]` | Apply/list transitions | `jira issue transition FUZZ-1234 "In Review"` |
 | `jira issue links <KEY>` | Remote links (e.g. linked Confluence pages) | `jira issue links FUZZ-1234` |
 | `jira project list` | List visible projects | `jira project list --search fuzz` |
@@ -69,12 +70,32 @@ the file: `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
 
 ## Common flags
 
-- `--json` — compact machine-readable output. `--raw` — full Jira API JSON (`issue get`, `search`).
+- `--json` — sanitized, schema-controlled output (see [JSON output schema](#json-output-schema)); `--raw` — the full, unfiltered Jira API response.
+- `--comments` — include comments in `search` / `issue get` `--json` (and `--raw`) output.
 - `--limit N` / `--fields a,b,c` — bound result size and fields. `--full` — untruncated Confluence body.
 - `--help` — on every group and command.
 - Text inputs (`--description`, comment body) accept a literal string or `-` to read stdin.
 - `--field KEY=VALUE` (repeatable, `issue create`/`edit`) sets any raw Jira field; value is
   JSON-decoded when possible (e.g. `--field 'priority={"name":"High"}'`).
+
+## JSON output schema
+
+`--json` emits a stable, sanitized shape the toolkit owns (not the raw REST payload — that's
+`--raw`). `jira search --json` wraps results as `{"schema":1,"issues":[...]}`; `jira issue get
+--json` returns one issue object. Per issue:
+
+| Field | Notes |
+| --- | --- |
+| `key` `type` `summary` `status` `priority` | strings |
+| `statusCategory` | `To Do` \| `In Progress` \| `Done` — bucket on this, not `status` |
+| `assignee` | display name, or `null` |
+| `updated` | `YYYY-MM-DD` |
+| `parent` | `{key, type, status}`, when the issue has one |
+| `comments` | `[{author, created, text}]` — only with `--comments`; ADF flattened, oldest→newest |
+
+`issue get --json` also includes `reporter`, `labels`, and `description` (with `--description`).
+`--comments` on `search` embeds comments from the search response, which may be a subset on
+very high-comment issues; use `jira issue comments <KEY>` for the complete, ordered list.
 
 ## Troubleshooting
 

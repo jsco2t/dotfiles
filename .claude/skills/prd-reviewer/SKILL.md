@@ -1,6 +1,6 @@
 ---
 name: prd-reviewer
-description: Reviews a Product Requirements Document for clarity, completeness, conflicts, and engineering readiness. Summarizes the PRD in plain language, builds a numbered requirement inventory, then performs an in-depth review covering what makes sense, what's missing, what conflicts, and what blocks engineering from creating discrete tasks. Accepts markdown files, Jira/Confluence links, GitHub issues, or inline text.
+description: Reviews a Product Requirements Document -- or a lean delivery/implementation doc such as a DRD -- for clarity, completeness, conflicts, and engineering readiness, judging each against what its own document type needs (it never pushes traditional-PRD sections onto a doc that deliberately omits them). Summarizes the document in plain language, builds a numbered requirement inventory, then performs an in-depth review covering what makes sense, what's missing, what conflicts, and what blocks engineering from creating discrete tasks. Accepts markdown files, Jira/Confluence links, GitHub issues, or inline text.
 argument-hint: "<PRD source: file path, Jira/Confluence URL, GitHub URL, or inline text> [output path]"
 ---
 
@@ -21,6 +21,8 @@ You review Product Requirements Documents with two goals:
 The backbone of both outputs is a **numbered requirement inventory** (R1..Rn) that everything else references.
 
 **This skill is read-only.** Do not write comments to Jira, edit Confluence pages, transition issues, create follow-up tickets, or modify any source material. Queries only.
+
+**Document-type awareness.** This skill reviews any requirements document — a full Product Requirements Document, or a lean delivery/implementation doc (e.g. a **Delivery Requirements Document, DRD**) that deliberately scopes down to problem, solution, deliverables, and completion criteria. Judge the document against **what its own type needs**, not a fixed PRD checklist. A delivery/DRD-style doc intentionally omits target-user personas, business justification, market/adoption metrics, and user scenarios — **never report their absence as a gap, and never recommend adding them.** For such a doc, "complete" means the deliverables, acceptance criteria, constraints, and dependencies needed to implement the work are present and traceable. Detect the type from the document itself (its title, e.g. "Delivery Requirements Document"; whether it centers on a deliverable inventory and definition of done rather than personas and success metrics) — when unsure, ask the user which kind of document this is before reporting missing-section gaps.
 
 ## Input
 
@@ -177,18 +179,18 @@ This section builds trust in the review — if you only point out problems, the 
 
 ### 2.2 What Is Missing
 
-Identify gaps in the PRD. For each gap, name the **concrete engineering consequence** — a gap without a named consequence is taste, not a finding.
+Identify gaps in the document. For each gap, name the **concrete engineering consequence** — a gap without a named consequence is taste, not a finding. **Judge "missing" against the document's type** (see *Document-type awareness* above): a lean delivery/DRD-style doc omits personas, business justification, and user scenarios by design — for it, a gap is a missing deliverable, acceptance criterion, constraint, or dependency that blocks implementation, not a missing PRD section.
 
-Check for:
+Check for (skip any the document's type does not call for):
 
-- **Undefined user flows** — happy paths described but error/edge cases absent
+- **Undefined failure/edge behavior** — the happy path is described but error and edge cases are absent where the requirements imply them
 - **Missing error handling** — what happens when things fail?
 - **Absent non-functional requirements** — performance, scalability, security, observability, data retention, compliance
 - **Missing data models** — entities referenced but never defined
 - **Unspecified API contracts** — integrations mentioned but interfaces not described
 - **Missing migration/rollback plans** — how to get from current state to new state, and back if needed
 - **Absent prioritization** — no indication of what to build first or what can be cut
-- **Missing user personas or scenarios** — who specifically uses this, and how?
+- **Missing user personas or scenarios** — *(full PRDs only)* who specifically uses this, and how? A delivery/DRD doc omits this by design — **do not flag it.**
 - **Undefined terms** — domain concepts used without definition
 - **TBD / placeholder sections** — content promised but not delivered
 

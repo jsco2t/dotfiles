@@ -39,7 +39,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.4.0"
 
 CONFIG_DIR = Path(os.environ.get("JIRA_TOOLKIT_CONFIG_DIR",
                                  os.environ.get("ATLASSIAN_TOOLKIT_CONFIG_DIR",
@@ -54,6 +54,12 @@ DEFAULT_SEARCH_LIMIT = 25
 CONFLUENCE_MAX_CHARS = 4000
 DEFAULT_ISSUE_FIELDS = ["summary", "status", "issuetype", "priority", "assignee", "reporter", "labels", "updated"]
 DEFAULT_SEARCH_FIELDS = ["summary", "status", "issuetype", "assignee", "updated"]
+
+# Owned, sanitized --json output contract (see README "JSON output schema").
+SCHEMA_VERSION = 1
+# Fields fetched for structured output (--json/--raw); richer than the compact text
+# default so priority/parent populate the schema. `comment` is appended by --comments.
+SCHEMA_SEARCH_FIELDS = ["summary", "status", "issuetype", "priority", "assignee", "updated", "parent"]
 
 EX_OK, EX_USAGE, EX_AUTH, EX_NOTFOUND, EX_API, EX_NET = 0, 1, 2, 3, 4, 5
 
@@ -427,6 +433,40 @@ def short_date(s):
     return (s or "")[:10]
 
 
+def status_category(status):
+    """Category name ('To Do' / 'In Progress' / 'Done') from a Jira status field."""
+    if isinstance(status, dict):
+        return (status.get("statusCategory") or {}).get("name") or ""
+    return ""
+
+
+def issue_json(issue, include_comments=False):
+    """Sanitized, flat view of a Jira issue -- the toolkit's owned --json contract
+    (see README "JSON output schema"). Drops self/avatar/accountId noise; ADF -> text."""
+    f = issue.get("fields", {})
+    out = {
+        "key": issue.get("key"),
+        "type": name_of(f.get("issuetype")),
+        "summary": f.get("summary"),
+        "status": name_of(f.get("status")),
+        "statusCategory": status_category(f.get("status")),
+        "priority": name_of(f.get("priority")),
+        "assignee": name_of(f.get("assignee")) or None,
+        "updated": short_date(f.get("updated")),
+    }
+    parent = f.get("parent")
+    if isinstance(parent, dict):
+        pf = parent.get("fields", {})
+        out["parent"] = {"key": parent.get("key"), "type": name_of(pf.get("issuetype")),
+                         "status": name_of(pf.get("status"))}
+    if include_comments:
+        comments = (f.get("comment") or {}).get("comments", [])
+        out["comments"] = [{"author": name_of(c.get("author")),
+                            "created": short_date(c.get("created")),
+                            "text": adf_to_text(c.get("body")).strip()} for c in comments]
+    return out
+
+
 def issue_line(issue):
     f = issue.get("fields", {})
     return f"{issue.get('key','?'):<14} {name_of(f.get('status')):<14} {f.get('summary','')}"
@@ -561,11 +601,9 @@ def cmd_issue_get(args):
         return jdump(issue)
     f = issue.get("fields", {})
     if args.json:
-        out = {"key": issue.get("key"), "status": name_of(f.get("status")),
-               "type": name_of(f.get("issuetype")), "summary": f.get("summary"),
-               "assignee": name_of(f.get("assignee")), "reporter": name_of(f.get("reporter")),
-               "priority": name_of(f.get("priority")), "labels": f.get("labels", []),
-               "updated": short_date(f.get("updated"))}
+        out = issue_json(issue, include_comments=args.comments)
+        out["reporter"] = name_of(f.get("reporter"))
+        out["labels"] = f.get("labels", [])
         if args.description:
             out["description"] = adf_to_text(f.get("description"))
         return jdump(out)
@@ -637,11 +675,23 @@ def cmd_issue_edit(args):
 
 
 def cmd_issue_comment(args):
-    res = api_request("POST", f"/rest/api/{API}/issue/{args.key}/comment",
-                      body={"body": text_to_adf(read_maybe_stdin(args.body))})
+    body = {"body": text_to_adf(read_maybe_stdin(args.body))}
+    if args.id:  # edit an existing comment
+        res = api_request("PUT", f"/rest/api/{API}/issue/{args.key}/comment/{args.id}", body=body)
+        if args.json:
+            return jdump(res)
+        print(f"comment {args.id} updated on {args.key}")
+        return
+    res = api_request("POST", f"/rest/api/{API}/issue/{args.key}/comment", body=body)
     if args.json:
         return jdump(res)
     print(f"comment added to {args.key} (id {res.get('id')})")
+
+
+def cmd_issue_comment_delete(args):
+    # Permanent: Jira has no undo for a deleted comment.
+    api_request("DELETE", f"/rest/api/{API}/issue/{args.key}/comment/{args.id}", expect_json=False)
+    print(f"comment {args.id} deleted from {args.key}")
 
 
 def cmd_issue_comments(args):
@@ -695,7 +745,14 @@ def cmd_issue_links(args):
 # commands: jira - search (JQL)
 # --------------------------------------------------------------------------- #
 def cmd_search(args):
-    fields = args.fields.split(",") if args.fields else list(DEFAULT_SEARCH_FIELDS)
+    if args.fields:
+        fields = args.fields.split(",")
+    elif args.json or args.raw:
+        fields = list(SCHEMA_SEARCH_FIELDS)   # richer set so priority/parent populate the schema
+    else:
+        fields = list(DEFAULT_SEARCH_FIELDS)  # compact text default
+    if args.comments and "comment" not in fields:
+        fields.append("comment")
     limit = args.limit
     collected = []
     page_token = None
@@ -712,11 +769,8 @@ def cmd_search(args):
     if args.raw:
         return jdump({"issues": collected})
     if args.json:
-        return jdump([{"key": i.get("key"), "status": name_of(i.get("fields", {}).get("status")),
-                       "type": name_of(i.get("fields", {}).get("issuetype")),
-                       "summary": i.get("fields", {}).get("summary"),
-                       "assignee": name_of(i.get("fields", {}).get("assignee")),
-                       "updated": short_date(i.get("fields", {}).get("updated"))} for i in collected])
+        return jdump({"schema": SCHEMA_VERSION,
+                      "issues": [issue_json(i, include_comments=args.comments) for i in collected]})
     if not collected:
         print("(no issues)")
         return
@@ -926,6 +980,7 @@ def add_jira_commands(jp):
     s.add_argument("jql", help="JQL query")
     s.add_argument("--limit", type=int, default=DEFAULT_SEARCH_LIMIT)
     s.add_argument("--fields")
+    s.add_argument("--comments", action="store_true", help="include comments in --json/--raw output")
     s.add_argument("--json", action="store_true")
     s.add_argument("--raw", action="store_true")
     s.set_defaults(func=cmd_search)
@@ -967,11 +1022,17 @@ def add_jira_commands(jp):
     ie.add_argument("--field", action="append", metavar="KEY=VALUE")
     ie.set_defaults(func=cmd_issue_edit)
 
-    icm = isub.add_parser("comment", help="add a comment")
+    icm = isub.add_parser("comment", help="add a comment (or edit one with --id)")
     icm.add_argument("key")
     icm.add_argument("body", help="comment text, or '-' for stdin")
+    icm.add_argument("--id", help="edit this existing comment id instead of adding a new one")
     icm.add_argument("--json", action="store_true")
     icm.set_defaults(func=cmd_issue_comment)
+
+    icd = isub.add_parser("comment-delete", help="delete a comment by id (permanent)")
+    icd.add_argument("key")
+    icd.add_argument("id", help="comment id (from `issue comments`)")
+    icd.set_defaults(func=cmd_issue_comment_delete)
 
     ics = isub.add_parser("comments", help="list comments")
     ics.add_argument("key")

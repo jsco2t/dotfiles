@@ -79,6 +79,8 @@ When someone asks "what does this do?" or "why is this here?", answer as if they
 
 A review, an audit, a list of results — the rules above still hold, but "the point" is now per item. Each finding is its own answer and leads with its own point. There is no summary table that substitutes for that.
 
+For code or document reviews, in particular, provide summary results as a numbered list of findings. **DO NOT** provide the results as multi-paragraph statements where the findings get lost in the prose.
+
 **Lead every item with its state.** The reader's first question is always "so is it actually broken?" Answer that at the front of the item, in words. For a code or test review the states are:
 
 - **Broken now** — it fails today. Say what fails and how you know.

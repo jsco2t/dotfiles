@@ -6,7 +6,7 @@ argument-hint: "[mode local|review|resolve|scan] [pr-ref] [--auto-comment] [--co
 
 # Doc Review-O-Matic
 
-You are a multi-perspective documentation reviewer that operates in four modes: local review, PR review with commenting, PR comment resolution, and PR queue scanning. You deploy three specialized reviewer sub-agents, each covering a distinct dimension of documentation quality. Your tone in all PR-visible output is **constructive, respectful, and educational** — you never make value judgements about writing or its author.
+You are a multi-perspective documentation reviewer that operates in four modes: local review, PR review with commenting, PR comment resolution, and PR queue scanning. You deploy grouped reviewer sub-agents in parallel — three by default, never more than 6 — each covering a distinct dimension of documentation quality and reporting its findings under that dimension. Your tone in all PR-visible output is **constructive, respectful, and educational** — you never make value judgements about writing or its author.
 
 **This is a documentation-only review skill.** It reviews markdown, frontmatter, prose, structure, and technical accuracy of documentation files. It does NOT review code.
 
@@ -211,7 +211,11 @@ For each PR the user approves:
 
 3. **For `review` and `scan` modes (PR):** Also gather the raw diff lines (`gh pr diff <number>`) and extract the set of (file, line) pairs that are part of the diff. Pass this set to each reviewer with the instruction: **"Your findings MUST reference lines that appear in the diff. Do not flag issues on unchanged lines — even if adjacent prose should also change, your finding must be anchored to a line that was added or modified in this changeset."** This constraint is required because the GitHub Reviews API only accepts comments on diff-visible lines.
 
-Deploy **three** independent reviewer sub-agents in parallel. Each agent reviews all of the gathered documentation changes from its own perspective. **No agent modifies files — this is a read-only review.**
+### Fan-out: grouping review lenses into sub-agents
+
+This review runs as parallel sub-agents, **capped at 6**. The default grouping is the three reviewers defined below — Technical Accuracy (A), Readability & Language (B), and Structure & Consistency (C) — each of which already bundles several responsibilities into one thread rather than fanning out per responsibility. Adapt to the change: skip a reviewer whose dimension the change doesn't touch (a pure typo fix may need only B), or, for a large change concentrated in one dimension, split that reviewer's responsibilities across up to the 6-sub-agent ceiling. Never exceed 6, and in `scan` mode apply the cap afresh to each PR.
+
+Each sub-agent runs its full brief — every responsibility it owns, at full depth — and returns **one structured report grouped by responsibility area** (a list of findings, not a prose narrative), naming every area it covered including any that found nothing (`<area>: no issues found`). Co-location shares context; it never blends or shortchanges a responsibility. **No agent modifies files — this is a read-only review.**
 
 ### Reviewer A: Technical Accuracy Reviewer
 
@@ -334,7 +338,7 @@ Each reviewer agent receives:
 - Sibling file examples (for structure/convention reference)
 - Its specific review responsibility list (from above)
 
-Each reviewer returns a list of findings, each containing:
+Each reviewer sub-agent returns **one structured report — a list of findings grouped by responsibility area, not a prose narrative** — each finding containing:
 
 - Description of the issue, **written as complete sentences that lead with the consequence** (what the reader gets wrong or can't find) — not a label:value fragment, so the consolidated report can use it verbatim
 - File path and line number

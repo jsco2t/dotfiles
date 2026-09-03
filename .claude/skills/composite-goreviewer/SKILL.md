@@ -186,12 +186,34 @@ Abstraction layers, wrapper types, or interface indirection that add complexity 
 ## Process Guidance
 
 - Gather all of the changes to be reviewed.
-- Create sub-agents -- each tasked with **one** of the review responsibilities above.
-- Have those sub-agents review the code identified to be reviewed and report back.
-- Instruct each sub-agent to write every finding's description as **complete sentences that lead with the consequence** (what breaks and for whom), not label:value fragments — so the consolidated report can use the text verbatim.
+
+### Fan-out: grouping review lenses into sub-agents
+
+This review runs as parallel sub-agents. To keep it fast and token-efficient, **never launch more than 6 sub-agents**, and pack the review responsibilities into them — do **not** launch one sub-agent per responsibility or per persona.
+
+Why: every sub-agent builds and carries its own context — the change, project conventions, the files it must read. A dozen sub-agents each re-read the same code and each hold a large context: slow and token-hungry, with no more coverage than the same six well-packed threads. Co-locating related lenses lets one sub-agent read the code once and apply several lenses to it.
+
+- **Step 1 — Select the applicable lenses.** With the change in hand, decide which review responsibilities the change actually implicates. Drop any whose subject matter is absent from the change — never invent coverage for concerns not present. Selection is driven by the diff, not a fixed list.
+- **Step 2 — Pack the selected lenses into sub-agents, capped at 6.** 6 is a *ceiling*, not a target: a narrow change may need only 2 or 3 sub-agents, and when the change is small, fewer is better. Apply the default grouping below *after* selection — instantiate a bucket only if at least one selected lens landed in it; never spin up a sub-agent to hold lenses the change didn't select. Co-locate lenses that reason about the same code, and weight toward the change: give the concern it most implicates its own (or a lightly-loaded) sub-agent. If ≤6 lenses apply you MAY give each its own sub-agent, but you never need to and never exceed 6.
+- **Step 3 — Each sub-agent runs every lens it owns, in full.** A sub-agent with three lenses performs three distinct passes — one per lens, each with that lens's complete responsibility and rigor. Co-location shares context; it does not blend lenses, skip any, or reduce depth. A lens gets the same review inside a shared thread as it would alone.
+- **Step 4 — Each sub-agent returns ONE structured report, grouped by persona.** Return findings as a structured list — not a prose narrative — organized under each persona the sub-agent was assigned, and **name every assigned persona, including any that found nothing** (`<Persona>: no issues found`), so the main thread can consolidate mechanically and verify every lens ran. Each finding carries: the issue description (**complete sentences that lead with the consequence** — what breaks and for whom — not label:value fragments), file path and line number, the review responsibility category, the **persona attribution**, a concrete fix suggestion (with idiomatic Go where it helps), and a confidence score (0-100).
+
+**This caps threads, not coverage.** Every applicable lens still runs at full depth and reports under its own name. Forbidden: dropping an applicable lens, blurring two lenses into one vaguer pass, shortchanging any lens inside a shared thread, or exceeding 6 sub-agents. Quality and per-lens focus are non-negotiable; only the thread count drops.
+
+**Default grouping of the 9 personas** (adapt to the change; instantiate a bucket only if the change selected at least one of its lenses):
+
+1. **Security & Hardening** — Security & Data Protection Reviewer + Infrastructure Hardening Specialist
+2. **Correctness & Language** — Systems Correctness Analyst + Language Specialist
+3. **API & Architecture** — API Design & Schema Guardian + Architecture & Abstraction Guardian
+4. **Observability & Operability** — Observability & Operability Reviewer
+5. **Conventions & Integration** — Convention & Documentation Steward + Integration & Deployment Reviewer
+
+That is five buckets covering all nine personas; the sixth sub-agent slot is free — use it to split the bucket the change most heavily implicates (e.g., separate Security from Infrastructure Hardening on a security-heavy change).
+
+Then:
+
 - Use the main AI thread to process the results and produce a report.
 - No agent should make code changes. This is a review only task.
-- **DO NOT** attempt to compress or optimize the review - the goal is review quality.
 
 ## Confidence Scoring
 

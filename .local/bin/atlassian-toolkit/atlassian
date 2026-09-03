@@ -436,11 +436,14 @@ def parse_confluence_id(s):
     s = s.strip()
     if s.isdigit():
         return s
-    m = re.search(r"/pages/(\d+)", s)
+    m = re.search(r"[?&]pageId=(\d+)", s)   # legacy /wiki/pages/viewpage.action?pageId=NNNN
+    if m:
+        return m.group(1)
+    m = re.search(r"/pages/(\d+)", s)        # /wiki/spaces/<KEY>/pages/NNNN/Title
     if m:
         return m.group(1)
     die(EX_USAGE, f"could not parse a Confluence page id from: {s} "
-                  "(pass a numeric id or a .../wiki/spaces/.../pages/<id>/... URL)")
+                  "(pass a numeric id, a .../pages/<id>/... URL, or a ...?pageId=<id> URL)")
 
 
 # --------------------------------------------------------------------------- #

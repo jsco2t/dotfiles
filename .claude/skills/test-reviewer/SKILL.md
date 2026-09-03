@@ -145,14 +145,14 @@ Idiomatic test code in the language under review. Flag non-idiomatic patterns wh
 
 ## Process
 
-Gather the test changes and the production code they test, then launch four review agents in parallel. Each owns a coherent brief; together they cover every responsibility and dimension exactly once.
+Gather the test changes and the production code they test, then fan out to parallel review agents. **Cap the fan-out at 6.** The default grouping is the four briefs below — each bundles several responsibilities and dimensions into one thread rather than fanning out per responsibility, and together they cover every responsibility and dimension exactly once. Adapt to the change: drop a brief whose concern the tests under review don't touch, or split the broadest brief when the change is large and concentrated in it — never exceeding 6.
 
 1. **Value & Regression** — Core: Value Assessment. Dimension 1.
 2. **Reliability & Concurrency** — Core: Reliability and Determinism. Dimension 5.
 3. **Security & Data** — Dimensions 2 and 3.
 4. **Boundaries & Craft** — Core: Test Architecture, Test Code Quality, Maintenance Burden. Dimensions 4 and 6. (The broadest brief: it judges whether the tests are well-made and whether they test the right seams at the right level.)
 
-Give each agent the test files, the corresponding production code, its brief above, and any emphasis the user stated. Instruct each agent to write every finding's description as **complete sentences that lead with the consequence** (what would go undetected, or what the test fails to prove), not label:value fragments — so the consolidated report can use the text verbatim. Then use the main thread to consolidate: merge findings that refer to the same location, drop duplicates, and apply the confidence bar.
+Give each agent the test files, the corresponding production code, its brief above, and any emphasis the user stated. Each agent runs its full brief and returns **one structured report grouped by responsibility/dimension** — a list of findings, not a prose narrative — naming every area it covered, including any that found nothing (`<area>: no issues found`). Instruct each agent to write every finding's description as **complete sentences that lead with the consequence** (what would go undetected, or what the test fails to prove), not label:value fragments — so the consolidated report can use the text verbatim. Then use the main thread to consolidate: merge findings that refer to the same location, drop duplicates, and apply the confidence bar.
 
 **No agent makes code changes. This is a review-only task.**
 

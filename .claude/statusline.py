@@ -4,17 +4,35 @@ Claude Code status line script.
 Reads JSON from stdin, writes a compact one-line status to stdout.
 
 Output format:
-  <model> | <branch> | ctx:<used>% | 5h:<level>[(<reset>)] | 7d:<level>[(<reset>)] | sb:<on|off>
+  <model> | <branch> | ctx <bar> <pct>% | [sess <bar> <pct>% $spent/$cap]
+      | [5h ...] | [7d ...] | [spend ...] | sb:<on|off>
 
-Rate limit thresholds (applied to both 5-hour and 7-day windows):
-  none  = no data (not a subscriber, or before first API response)
-  low   = 0–49% used
-  med   = 50–79% used
-  high  = 80–100% used  → also shows time until reset, e.g. 5h:high(1h23m)
+Usage bars (context %, the per-session spend bar, and the 5h / 7d / spend
+rate-limit windows) render a small fixed-width gauge plus the numeric
+percentage, warming from green -> yellow -> orange -> red as they approach the
+cap. The gauge fills with `█`, marks the current position with a single
+fixed-width `│` tick, and tracks the remainder with `░`. The 5h and 7d windows
+always append the time until reset in decimal notation — hours for 5h, days for
+7d — e.g. `5h ████│ 88% (4.7h)`, `7d ██│░░ 40% (6.1d)`. (The spend window
+appends its reset only near the cap, in the compact m/h/d form.)
 
-Color: segments that track a limit (context %, 5h window, 7d window) warm
-from green -> yellow -> orange -> red as they approach the cap; sandbox-off
-shows orange as a heads-up. Set NO_COLOR=1 to disable all coloring.
+The `sess` segment tracks this session's own cost — Claude Code's
+`cost.total_cost_usd`, the same number `/usage` prints as "Total cost" — against
+a dollar cap that defaults to $50 and is overridable via `session_usd` in
+~/.claude/statusline-budget.json. It is a fallback: shown only when neither the
+5h nor the 7d utilization window can be determined, since those platform bars
+are more accurate and take precedence when present. That makes it the live
+budget signal on enterprise / gateway accounts where `rate_limits` is null and
+the 5h / 7d windows are unavailable. (It is gated on 5h/7d only, so it can still
+appear alongside a `spend` window on an account that populates just that one.)
+
+The rate-limit segments appear only when Claude Code actually provides the data
+(`rate_limits.five_hour` / `.seven_day` / `.spend_limit`). On accounts where
+`rate_limits` is null — e.g. some enterprise / gateway deployments — the windows
+are omitted rather than shown empty, and light up automatically if the data
+starts flowing (spend_limit is the one most likely to populate on such accounts).
+
+Color: set NO_COLOR=1 to disable all coloring (https://no-color.org/).
 """
 
 import json
@@ -27,8 +45,7 @@ import time
 SETTINGS_PATH = os.path.expanduser("~/.claude/settings.json")
 
 # --- Color -----------------------------------------------------------------
-# 256-color SGR codes; widely supported by modern terminals. Honors the
-# NO_COLOR convention (https://no-color.org/).
+# 256-color SGR codes; widely supported by modern terminals.
 RESET = "\033[0m"
 USE_COLOR = os.environ.get("NO_COLOR") is None
 
@@ -39,9 +56,6 @@ C_RED = "38;5;196"     # at / near the cap
 C_GRAY = "38;5;244"    # no data / informational
 C_MODEL = "38;5;44"    # neutral accent (model)
 C_BRANCH = "38;5;141"  # neutral accent (git branch)
-
-# 5-hour level -> color. Warms toward red as usage climbs.
-LEVEL_COLOR = {"none": C_GRAY, "low": C_GREEN, "med": C_ORANGE, "high": C_RED}
 
 
 def colorize(text: str, code: str) -> str:
@@ -62,6 +76,34 @@ def pct_color(pct) -> str:
     if pct < 85:
         return C_ORANGE
     return C_RED
+
+
+# --- Progress bar ----------------------------------------------------------
+# A compact fixed-width gauge: whole `█` cells show how full the bar is, a
+# single thin `│` tick marks the leading edge (current usage), and `░` is the
+# unfilled track. The tick is always exactly one character wide, so the marker
+# never changes size with the percentage.
+BAR_WIDTH = 5
+_BAR_FULL = "█"     # filled cell
+_BAR_MARK = "│"     # fixed-width leading-edge marker (current position)
+_BAR_TRACK = "░"    # unfilled track
+
+
+def make_bar(pct, width: int = BAR_WIDTH) -> str:
+    """Render a width-cell gauge for a 0–100 percentage.
+
+    Whole `█` cells show the filled extent, a single fixed-width `│` tick marks
+    the current position at the fill's leading edge, and the remainder is `░`
+    track. Values are clamped to [0, 100]; a None percentage yields an empty
+    track. At 100% the bar is solid with no tick — the fill has reached the end.
+    """
+    if pct is None:
+        return _BAR_TRACK * width
+    p = max(0.0, min(100.0, float(pct)))
+    filled = int(p / 100.0 * width)  # whole cells fully filled (floor)
+    if filled >= width:
+        return _BAR_FULL * width
+    return _BAR_FULL * filled + _BAR_MARK + _BAR_TRACK * (width - filled - 1)
 
 
 def get_git_branch(cwd: str) -> str:
@@ -91,17 +133,6 @@ def get_sandbox_enabled() -> bool:
         return False
 
 
-def rate_limit_level(used_pct) -> str:
-    """Map a used percentage (0–100) to a display level label."""
-    if used_pct is None:
-        return "none"
-    if used_pct < 50:
-        return "low"
-    if used_pct < 80:
-        return "med"
-    return "high"
-
-
 def format_reset(resets_at) -> str:
     """Return a compact relative-time string for a Unix epoch reset timestamp.
 
@@ -129,21 +160,168 @@ def format_reset(resets_at) -> str:
     return f"{hours}h{remaining_mins}m"
 
 
-def build_rate_segment(label: str, window) -> str:
-    """Build a colored rate-limit segment string for one rate window.
+def format_reset_decimal(resets_at, unit: str) -> str:
+    """Reset time in decimal notation for a fixed unit, e.g. '(4.7h)', '(6.1d)'.
 
-    label  -- display prefix, e.g. '5h' or '7d'
-    window -- dict with 'used_percentage' and 'resets_at', or None
+    `unit` is 'h' (hours) or 'd' (days). Returns empty string if resets_at is
+    None or already in the past. Used by the 5h / 7d windows, which always show
+    their reset countdown — hours for 5h, days for 7d — rather than only near the
+    cap.
     """
-    used_pct = window.get("used_percentage") if window else None
-    level = rate_limit_level(used_pct)
-    color = LEVEL_COLOR.get(level, C_GRAY)
-    if level == "high" and window:
+    if resets_at is None:
+        return ""
+    secs = int(resets_at) - int(time.time())
+    if secs <= 0:
+        return ""
+    if unit == "h":
+        return f"({secs / 3600:.1f}h)"
+    if unit == "d":
+        return f"({secs / 86400:.1f}d)"
+    return ""
+
+
+def build_usage_segment(label: str, pct, reset_str: str = "") -> str:
+    """Build a colored `label bar pct%` segment (optionally with a reset time).
+
+    The bar and the numeric percentage share one threshold color, so the glyph
+    and the number always agree on how close to the cap the value is.
+    """
+    text = f"{label} {make_bar(pct)} {pct:.0f}%"
+    if reset_str:
+        text += f" {reset_str}"
+    return colorize(text, pct_color(pct))
+
+
+def build_rate_segment(label: str, window, reset_unit: str = ""):
+    """Colored bar segment for one rate window, or None when data is absent.
+
+    `window` is a dict with 'used_percentage' and 'resets_at', or None. Returns
+    None (segment omitted) when the window or its percentage is missing, so a
+    null `rate_limits` simply drops these segments instead of showing them
+    empty.
+
+    `reset_unit` controls the reset countdown. With 'h' or 'd' (the 5h and 7d
+    windows) it is always shown in decimal notation, e.g. `(4.7h)` / `(6.1d)`.
+    Left empty (the spend window) the countdown appears only once usage is high
+    (>= 80%), in the compact m/h/d form.
+    """
+    if not window:
+        return None
+    used_pct = window.get("used_percentage")
+    if used_pct is None:
+        return None
+    if reset_unit:
+        reset_str = format_reset_decimal(window.get("resets_at"), reset_unit)
+    elif used_pct >= 80:
         reset_str = format_reset(window.get("resets_at"))
-        label_text = f"{label}:{level}({reset_str})" if reset_str else f"{label}:{level}"
     else:
-        label_text = f"{label}:{level}"
-    return colorize(label_text, color)
+        reset_str = ""
+    return build_usage_segment(label, used_pct, reset_str)
+
+
+# --- Cross-session usage fallback (scaffolding, not currently wired) --------
+# Groundwork for one day reconstructing 5h/7d usage from local transcripts when
+# the platform sends no `rate_limits` (enterprise/managed accounts). There is no
+# statusline_usage.py module today, so build_computed_segment below is unused; it
+# is kept as the landing pad for that feature. Such a bar would need a cap the
+# platform does not expose, so it would draw only against a user-defined budget,
+# otherwise showing the raw value. The per-session spend bar (further down) is
+# the shipped, working alternative and needs none of this.
+BUDGET_PATH = os.path.expanduser("~/.claude/statusline-budget.json")
+
+
+def load_budget():
+    """Optional user budget: {"unit":"usd"|"tokens","five_hour":N,"seven_day":M}."""
+    try:
+        with open(BUDGET_PATH, encoding="utf-8") as fh:
+            budget = json.load(fh)
+        if isinstance(budget, dict) and budget.get("unit") in ("usd", "tokens"):
+            return budget
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _human_usd(value) -> str:
+    return f"${value / 1000:.1f}k" if value >= 1000 else f"${value:.0f}"
+
+
+def _human_tokens(value) -> str:
+    if value >= 1e6:
+        return f"{value / 1e6:.1f}M"
+    if value >= 1e3:
+        return f"{value / 1e3:.0f}k"
+    return str(int(value))
+
+
+def build_computed_segment(label: str, window, budget, budget_key: str) -> str:
+    """Fallback segment from transcript-derived usage (stdin had no window).
+
+    With a matching budget -> a threshold-colored bar plus the value; otherwise a
+    plain informational value (no invented cap). `window` is one window dict from
+    statusline_usage (keys: cost_usd, tokens).
+    """
+    cost = window.get("cost_usd", 0.0)
+    tokens = window.get("tokens", 0)
+    if budget and budget.get(budget_key):
+        cap = budget[budget_key]
+        if budget["unit"] == "usd":
+            pct = cost / cap * 100 if cap else 0
+            text = f"{label} {make_bar(pct)} {pct:.0f}% ~{_human_usd(cost)}"
+        else:
+            pct = tokens / cap * 100 if cap else 0
+            text = f"{label} {make_bar(pct)} {pct:.0f}% {_human_tokens(tokens)}"
+        return colorize(text, pct_color(pct))
+    return colorize(f"{label} ~{_human_usd(cost)}", C_MODEL)
+
+
+# --- Per-session spend bar -------------------------------------------------
+# The one live budget signal available on accounts with no `rate_limits` is the
+# session's own cost. Claude Code computes it and passes it on stdin as
+# cost.total_cost_usd (the number `/usage` prints as "Total cost"), so no pricing
+# table is needed. It is drawn as a bar against a dollar cap (default $50).
+DEFAULT_SESSION_BUDGET_USD = 50.0
+
+
+def load_session_budget_usd() -> float:
+    """Dollar cap for the session spend bar.
+
+    Reads `session_usd` from statusline-budget.json when present and positive;
+    otherwise returns DEFAULT_SESSION_BUDGET_USD so the bar always renders — even
+    with no config file at all.
+    """
+    try:
+        with open(BUDGET_PATH, encoding="utf-8") as fh:
+            budget = json.load(fh)
+        cap = float(budget.get("session_usd", DEFAULT_SESSION_BUDGET_USD))
+        if cap > 0:
+            return cap
+    except (OSError, ValueError, TypeError):
+        pass
+    return DEFAULT_SESSION_BUDGET_USD
+
+
+def _spend_usd(value: float) -> str:
+    """Compact dollar string: cents below $100, whole dollars or $Nk above."""
+    if value >= 1000:
+        return f"${value / 1000:.1f}k"
+    if float(value).is_integer():
+        return f"${value:.0f}"
+    return f"${value:.2f}"
+
+
+def build_spend_segment(cost_usd: float, cap_usd: float) -> str:
+    """`sess <bar> <pct>% $spent/$cap`, sharing one threshold color.
+
+    The bar is clamped to the cap, but the percentage is truthful: $60 against a
+    $50 cap reads `120%` with a full red bar rather than looking capped.
+    """
+    pct = (cost_usd / cap_usd * 100.0) if cap_usd else 0.0
+    text = (
+        f"sess {make_bar(pct)} {pct:.0f}% "
+        f"{_spend_usd(cost_usd)}/{_spend_usd(cap_usd)}"
+    )
+    return colorize(text, pct_color(pct))
 
 
 def shorten_model(display_name: str) -> str:
@@ -178,19 +356,31 @@ def main():
     if branch:
         branch = colorize(branch, C_BRANCH)
 
-    # Context window usage — color warms as it fills.
-    ctx_pct = data.get("context_window", {}).get("used_percentage")
+    # Context window usage — a progress bar warming as it fills.
+    ctx_pct = (data.get("context_window") or {}).get("used_percentage")
     if ctx_pct is not None:
-        ctx_str = colorize(f"ctx:{ctx_pct:.0f}%", pct_color(ctx_pct))
+        ctx_str = build_usage_segment("ctx", ctx_pct)
     else:
-        ctx_str = colorize("ctx:--", C_GRAY)
+        ctx_str = colorize("ctx --", C_GRAY)
 
-    # Rate limits — 5-hour and 7-day windows.
+    # Per-session spend against a dollar cap (default $50). Sourced from Claude
+    # Code's own session cost on stdin. Gate on key presence, not truthiness:
+    # $0.00 at session start is legitimate data, not a missing field.
+    spend_seg = None
+    if "cost" in data:
+        cost_usd = (data.get("cost") or {}).get("total_cost_usd")
+        if cost_usd is not None:
+            spend_seg = build_spend_segment(
+                float(cost_usd), load_session_budget_usd()
+            )
+
+    # Rate limits — 5-hour, 7-day, and spend windows; each shown only when
+    # present. On enterprise/gateway accounts spend_limit is the window most
+    # likely to be populated, so it is read here too (see build_rate_segment).
     rate_limits = data.get("rate_limits") or {}
-    five_hour = rate_limits.get("five_hour")
-    seven_day = rate_limits.get("seven_day")
-    five_str = build_rate_segment("5h", five_hour)
-    seven_str = build_rate_segment("7d", seven_day) if seven_day is not None else None
+    five_str = build_rate_segment("5h", rate_limits.get("five_hour"), "h")
+    seven_str = build_rate_segment("7d", rate_limits.get("seven_day"), "d")
+    spend_str = build_rate_segment("spend", rate_limits.get("spend_limit"))
 
     # Sandbox — on is green (protected); off is orange (heads-up).
     sandbox_on = get_sandbox_enabled()
@@ -201,9 +391,17 @@ def main():
     if branch:
         parts.append(branch)
     parts.append(ctx_str)
-    parts.append(five_str)
+    # The `sess` spend bar is a fallback: show it only when neither the 5h nor
+    # the 7d window could be determined. Gate on the built segment strings (None
+    # when the window is absent or its percentage is null), not on `rate_limits`.
+    if spend_seg is not None and five_str is None and seven_str is None:
+        parts.append(spend_seg)
+    if five_str is not None:
+        parts.append(five_str)
     if seven_str is not None:
         parts.append(seven_str)
+    if spend_str is not None:
+        parts.append(spend_str)
     parts.append(sb_str)
 
     sys.stdout.write(" | ".join(parts) + "\n")

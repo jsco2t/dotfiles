@@ -1,9 +1,10 @@
 {
   "env": {
-    "ANTHROPIC_MODEL": "claude-opus-4-6[1m]",
+    "ANTHROPIC_MODEL": "claude-opus-4-8[1m]",
     "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
     "CLAUDE_CODE_EFFORT_LEVEL": "max",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000"
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
+    "CLAUDE_CODE_SUPPRESS_SESSION_ATTRIBUTION": "1"
   },
   "includeCoAuthoredBy": false,
   "permissions": {
@@ -114,6 +115,16 @@
             "timeout": 3
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/skills/ship-the-result/scripts/hook_pretool.py\"",
+            "timeout": 15
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -149,22 +160,19 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "bash -c 'plugin_dir=$(ls -d \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"/plugins/cache/claude-hud/claude-hud/*/ 2>/dev/null | awk -F/ '\"'\"'{ print $(NF-1) \"\\t\" $(0) }'\"'\"' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | tail -1 | cut -f2-); exec \"/opt/homebrew/bin/node\" \"${plugin_dir}dist/index.js\"'"
+    "command": "/usr/bin/env python3 $HOME/.claude/statusline.py"
   },
   "enabledPlugins": {
     "atlassian@claude-plugins-official": false,
     "clangd-lsp@claude-plugins-official": true,
-    "claude-hud@claude-hud": true,
     "claude-md-management@claude-plugins-official": true,
     "code-simplifier@claude-plugins-official": true,
     "commit-commands@claude-plugins-official": true,
     "context7@claude-plugins-official": true,
-    "explanatory-output-style@claude-plugins-official": true,
     "feature-dev@claude-plugins-official": true,
     "frontend-design@claude-plugins-official": true,
     "gopls-lsp@claude-plugins-official": true,
     "hookify@claude-plugins-official": true,
-    "learning-output-style@claude-plugins-official": true,
     "plugin-dev@claude-plugins-official": true,
     "pyright-lsp@claude-plugins-official": true,
     "rust-analyzer-lsp@claude-plugins-official": true,
@@ -172,14 +180,7 @@
     "skill-creator@claude-plugins-official": true,
     "typescript-lsp@claude-plugins-official": true
   },
-  "extraKnownMarketplaces": {
-    "claude-hud": {
-      "source": {
-        "source": "github",
-        "repo": "jarrodwatts/claude-hud"
-      }
-    }
-  },
+  "extraKnownMarketplaces": {},
   "sandbox": {
     "enabled": true,
     "filesystem": {

@@ -4,33 +4,61 @@ Claude Code status line script.
 Reads JSON from stdin, writes a compact one-line status to stdout.
 
 Output format:
-  <model> | <branch> | ctx <bar> <pct>% | [sess <bar> <pct>% $spent/$cap]
-      | [5h ...] | [7d ...] | [spend ...] | sb:<on|off>
+  <model> | <branch> | ctx <bar> <pct>%
+      | <account-usage | sess> | [<overage>] | sb:<on|off>
 
-Usage bars (context %, the per-session spend bar, and the 5h / 7d / spend
-rate-limit windows) render a small fixed-width gauge plus the numeric
-percentage, warming from green -> yellow -> orange -> red as they approach the
-cap. The gauge fills with `█`, marks the current position with a single
-fixed-width `│` tick, and tracks the remainder with `░`. The 5h and 7d windows
-always append the time until reset in decimal notation — hours for 5h, days for
-7d — e.g. `5h ████│ 88% (4.7h)`, `7d ██│░░ 40% (6.1d)`. (The spend window
-appends its reset only near the cap, in the compact m/h/d form.)
+Usage bars (context %, the 5h / 7d / spend windows, and the API-mode sess bar)
+render a small fixed-width gauge plus the numeric percentage, warming from
+green -> yellow -> orange -> red as they approach the cap. The gauge fills with
+`█`, marks the current position with a single fixed-width `│` tick, and tracks
+the remainder with `░`. The 5h and 7d windows always append the time until
+reset in decimal notation — hours for 5h, days for 7d — e.g.
+`5h ████│ 88% (4.7h)`, `7d ██│░░ 40% (6.1d)`.
 
-The `sess` segment tracks this session's own cost — Claude Code's
-`cost.total_cost_usd`, the same number `/usage` prints as "Total cost" — against
-a dollar cap that defaults to $50 and is overridable via `session_usd` in
-~/.claude/statusline-budget.json. It is a fallback: shown only when neither the
-5h nor the 7d utilization window can be determined, since those platform bars
-are more accurate and take precedence when present. That makes it the live
-budget signal on enterprise / gateway accounts where `rate_limits` is null and
-the 5h / 7d windows are unavailable. (It is gated on 5h/7d only, so it can still
-appear alongside a `spend` window on an account that populates just that one.)
+Billing mode decides the middle segment(s):
 
-The rate-limit segments appear only when Claude Code actually provides the data
-(`rate_limits.five_hour` / `.seven_day` / `.spend_limit`). On accounts where
-`rate_limits` is null — e.g. some enterprise / gateway deployments — the windows
-are omitted rather than shown empty, and light up automatically if the data
-starts flowing (spend_limit is the one most likely to populate on such accounts).
+* Subscription (the DEFAULT whenever you are logged in to a Claude account):
+  show account utilization — the 5h / 7d windows Claude Code reports. This is
+  your claude.ai plan usage, never a dollar figure. Until a window is known
+  (the very first launch, or just after a window resets) a neutral `usage --`
+  placeholder is shown instead of dollars.
+
+* API billing: show `sess <bar> <pct>% $spent/$cap` — this session's own cost
+  (Claude Code's `cost.total_cost_usd`, the number `/usage` prints as "Total
+  cost") against a dollar cap (default $50, override with `session_usd`). This
+  is the right signal only when you are actually billed per API call.
+
+Why the split: the 5h / 7d windows are "absent until the first response
+carrying the rate-limit headers is observed, and always absent for API-key,
+Bedrock, and Vertex sessions" (Claude Code's own schema). The old script keyed
+the dollar bar on that absence, so every launch flashed `sess $X/$50` for a
+moment before the account bars arrived. Billing mode is now decided up front
+from your login (oauthAccount in ~/.claude.json) plus the Bedrock/Vertex env
+vars, so the dollar bar appears only under genuine API billing.
+
+Remaining launch flicker is removed by caching the last-seen 5h / 7d windows in
+~/.claude/statusline-cache.json: the next launch renders the bars immediately
+from cache instead of the placeholder, and each cached window is dropped once
+its `resets_at` passes. The account/billing verdict is cached in the same file,
+keyed on ~/.claude.json's mtime+size, so that file is parsed only when it
+changes.
+
+Overage indicator (hidden unless triggered): flags that you have gone into
+overage / extra-usage billing. It lights up when a gateway `spend_limit` window
+exceeds 100% (definitive), or — as a proxy for plan accounts — when a 5h / 7d
+window reaches the threshold (default 99%, the point Claude Code itself treats
+as the max_5x limit) AND your account has extra usage enabled
+(oauthAccount.hasExtraUsageEnabled). Note: Claude Code does not put
+real-time overage state in the status-line payload for non-gateway accounts (it
+lives behind the anthropic-ratelimit-unified-overage-status header), so the
+plan-account form is an inference, not ground truth.
+
+Config — all optional, in ~/.claude/statusline-budget.json:
+  session_usd        dollar cap for the API-mode sess bar (default 50)
+  billing_mode       "auto" (default) | "subscription" | "api" — force the mode
+  overage_indicator  true (default) | false — enable/disable the indicator
+  overage_threshold  window percent that trips the proxy (default 99)
+  overage_label      text of the indicator (default "⚠ overage")
 
 Color: set NO_COLOR=1 to disable all coloring (https://no-color.org/).
 """
@@ -43,6 +71,8 @@ import time
 
 
 SETTINGS_PATH = os.path.expanduser("~/.claude/settings.json")
+CLAUDE_JSON_PATH = os.path.expanduser("~/.claude.json")
+CACHE_PATH = os.path.expanduser("~/.claude/statusline-cache.json")
 
 # --- Color -----------------------------------------------------------------
 # 256-color SGR codes; widely supported by modern terminals.
@@ -283,20 +313,17 @@ def build_computed_segment(label: str, window, budget, budget_key: str) -> str:
 DEFAULT_SESSION_BUDGET_USD = 50.0
 
 
-def load_session_budget_usd() -> float:
-    """Dollar cap for the session spend bar.
+def session_budget_usd(config: dict) -> float:
+    """Dollar cap for the API-mode session spend bar.
 
-    Reads `session_usd` from statusline-budget.json when present and positive;
-    otherwise returns DEFAULT_SESSION_BUDGET_USD so the bar always renders — even
-    with no config file at all.
+    Uses `session_usd` from statusline-budget.json when present and positive;
+    otherwise DEFAULT_SESSION_BUDGET_USD so the bar always renders.
     """
     try:
-        with open(BUDGET_PATH, encoding="utf-8") as fh:
-            budget = json.load(fh)
-        cap = float(budget.get("session_usd", DEFAULT_SESSION_BUDGET_USD))
+        cap = float(config.get("session_usd", DEFAULT_SESSION_BUDGET_USD))
         if cap > 0:
             return cap
-    except (OSError, ValueError, TypeError):
+    except (TypeError, ValueError):
         pass
     return DEFAULT_SESSION_BUDGET_USD
 
@@ -337,6 +364,183 @@ def shorten_model(display_name: str) -> str:
     return name.replace(" ", "-")
 
 
+# --- Billing mode, account facts, and the sidecar cache --------------------
+# Billing mode is decided up front (not from whether `rate_limits` happens to be
+# present this render), so the dollar `sess` bar can never flash during the gap
+# before the first API response populates the account windows. The account facts
+# and the last-seen windows are cached in CACHE_PATH; see the module docstring.
+_WINDOW_NAMES = ("five_hour", "seven_day", "spend_limit")
+
+
+def _read_json(path: str) -> dict:
+    """Load a small JSON object, or {} on any error / non-object."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_cache(cache: dict) -> None:
+    """Persist the sidecar cache atomically; failures are non-fatal."""
+    tmp = f"{CACHE_PATH}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+        os.replace(tmp, CACHE_PATH)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _env_truthy(name: str) -> bool:
+    """True when an env var is set to something other than a false-y token."""
+    val = os.environ.get(name)
+    return val is not None and val.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _parse_account() -> dict:
+    """Read oauthAccount facts from ~/.claude.json. {} keys default when absent."""
+    src = _read_json(CLAUDE_JSON_PATH)
+    oauth = src.get("oauthAccount")
+    if isinstance(oauth, dict) and oauth.get("accountUuid"):
+        return {
+            "has_oauth": True,
+            "billing_type": oauth.get("billingType"),
+            "has_extra_usage": bool(oauth.get("hasExtraUsageEnabled")),
+        }
+    return {"has_oauth": False, "billing_type": None, "has_extra_usage": False}
+
+
+def get_account(cache: dict):
+    """Account facts, cached against ~/.claude.json's mtime+size.
+
+    Returns (account_dict, dirty). ~/.claude.json is parsed only when its
+    mtime/size changes, so the status line does not re-read it every render.
+    """
+    acc = cache.get("account") or {}
+    try:
+        st = os.stat(CLAUDE_JSON_PATH)
+        sig = [st.st_mtime, st.st_size]
+    except OSError:
+        sig = None
+    if sig is not None and acc.get("sig") == sig and "has_oauth" in acc:
+        return acc, False
+    fresh = _parse_account()
+    fresh["sig"] = sig
+    cache["account"] = fresh
+    return fresh, True
+
+
+def resolve_billing_mode(account: dict, config: dict) -> str:
+    """"subscription" or "api", decided before any window data is consulted.
+
+    Order: explicit `billing_mode` override -> Bedrock/Vertex env (real API
+    billing) -> presence of a logged-in oauthAccount -> API. A bare
+    ANTHROPIC_API_KEY deliberately does NOT flip the verdict: it is commonly
+    exported for SDK scripts while Claude Code still runs on a subscription, and
+    keying on it would reintroduce the very flicker this is meant to remove.
+    """
+    override = str(config.get("billing_mode", "auto")).lower()
+    if override in ("subscription", "api"):
+        return override
+    if _env_truthy("CLAUDE_CODE_USE_BEDROCK") or _env_truthy("CLAUDE_CODE_USE_VERTEX"):
+        return "api"
+    return "subscription" if account.get("has_oauth") else "api"
+
+
+def _window_fresh(entry: dict, now: int) -> bool:
+    """A cached window is usable until its reset moment passes."""
+    resets_at = entry.get("resets_at")
+    if resets_at is None:
+        return True
+    try:
+        return now < int(resets_at)
+    except (TypeError, ValueError):
+        return True
+
+
+def resolve_windows(rate_limits: dict, cache: dict, now: int):
+    """Merge live stdin windows over the last-seen cache.
+
+    Live windows win and refresh the cache; windows missing from stdin fall back
+    to the cached value until their `resets_at` passes (then they are dropped).
+    This is what lets the bars render immediately on the next launch instead of
+    flashing a placeholder while the first API response is in flight. Returns
+    (windows_dict, dirty).
+    """
+    cached = dict(cache.get("windows") or {})
+    result = {}
+    dirty = False
+    for name in _WINDOW_NAMES:
+        live = rate_limits.get(name) if isinstance(rate_limits, dict) else None
+        if isinstance(live, dict) and live.get("used_percentage") is not None:
+            entry = {
+                "used_percentage": live.get("used_percentage"),
+                "resets_at": live.get("resets_at"),
+            }
+            # Guard against a concurrent idle session: an idle client republishes
+            # the last value it observed, so within one window (same resets_at,
+            # where usage only ever climbs) never let a stale render regress the
+            # cached percentage.
+            prev = cached.get(name)
+            if (prev and prev.get("resets_at") == entry["resets_at"]
+                    and prev.get("used_percentage") is not None
+                    and prev["used_percentage"] > entry["used_percentage"]):
+                entry["used_percentage"] = prev["used_percentage"]
+            result[name] = entry
+            if cached.get(name) != entry:
+                cached[name] = entry
+                dirty = True
+        else:
+            prev = cached.get(name)
+            if prev and _window_fresh(prev, now):
+                result[name] = prev
+            elif prev is not None:
+                cached.pop(name, None)
+                dirty = True
+    if dirty:
+        cache["windows"] = cached
+    return result, dirty
+
+
+def _win_pct(window):
+    """used_percentage of a resolved window dict, or None."""
+    return window.get("used_percentage") if isinstance(window, dict) else None
+
+
+def build_overage_segment(billing_mode: str, account: dict, windows: dict, config: dict):
+    """Red overage indicator, or None when not in overage / disabled.
+
+    Definitive: a gateway `spend_limit` window past 100%. Proxy (plan accounts,
+    which never receive real-time overage state): a 5h/7d window at/over the
+    threshold while the account has extra usage enabled — i.e. past the included
+    allotment and not blocked, so the overflow is billed. Correct whether or not
+    the platform caps window utilization at 100%.
+    """
+    if not config.get("overage_indicator", True):
+        return None
+    try:
+        threshold = float(config.get("overage_threshold", 99))
+    except (TypeError, ValueError):
+        threshold = 99.0
+
+    spend_pct = _win_pct(windows.get("spend_limit"))
+    triggered = spend_pct is not None and spend_pct > 100
+    if not triggered and billing_mode == "subscription" and account.get("has_extra_usage"):
+        for name in ("five_hour", "seven_day"):
+            pct = _win_pct(windows.get(name))
+            if pct is not None and pct >= threshold:
+                triggered = True
+                break
+    if not triggered:
+        return None
+    return colorize(str(config.get("overage_label", "⚠ overage")), C_RED)
+
+
 def main():
     raw = sys.stdin.read()
     try:
@@ -344,6 +548,11 @@ def main():
     except json.JSONDecodeError:
         sys.stdout.write("(status: bad input)\n")
         return
+
+    now = int(time.time())
+    config = _read_json(BUDGET_PATH)
+    cache = _read_json(CACHE_PATH)
+    dirty = False
 
     # Model
     model_display = data.get("model", {}).get("display_name", "")
@@ -363,24 +572,30 @@ def main():
     else:
         ctx_str = colorize("ctx --", C_GRAY)
 
-    # Per-session spend against a dollar cap (default $50). Sourced from Claude
-    # Code's own session cost on stdin. Gate on key presence, not truthiness:
-    # $0.00 at session start is legitimate data, not a missing field.
+    # Billing mode — decided from the login, not from window presence this render.
+    account, acc_dirty = get_account(cache)
+    dirty = dirty or acc_dirty
+    billing_mode = resolve_billing_mode(account, config)
+
+    # Rate-limit windows: live stdin merged over the last-seen cache.
+    rate_limits = data.get("rate_limits") or {}
+    windows, win_dirty = resolve_windows(rate_limits, cache, now)
+    dirty = dirty or win_dirty
+    five_str = build_rate_segment("5h", windows.get("five_hour"), "h")
+    seven_str = build_rate_segment("7d", windows.get("seven_day"), "d")
+    spend_str = build_rate_segment("spend", windows.get("spend_limit"))
+
+    # Per-session dollar spend — shown ONLY under API billing, where it is the
+    # real signal. Gate on key presence, not truthiness: $0.00 at session start
+    # is legitimate data, not a missing field.
     spend_seg = None
-    if "cost" in data:
+    if billing_mode == "api" and "cost" in data:
         cost_usd = (data.get("cost") or {}).get("total_cost_usd")
         if cost_usd is not None:
-            spend_seg = build_spend_segment(
-                float(cost_usd), load_session_budget_usd()
-            )
+            spend_seg = build_spend_segment(float(cost_usd), session_budget_usd(config))
 
-    # Rate limits — 5-hour, 7-day, and spend windows; each shown only when
-    # present. On enterprise/gateway accounts spend_limit is the window most
-    # likely to be populated, so it is read here too (see build_rate_segment).
-    rate_limits = data.get("rate_limits") or {}
-    five_str = build_rate_segment("5h", rate_limits.get("five_hour"), "h")
-    seven_str = build_rate_segment("7d", rate_limits.get("seven_day"), "d")
-    spend_str = build_rate_segment("spend", rate_limits.get("spend_limit"))
+    # Overage indicator — hidden unless triggered.
+    overage_str = build_overage_segment(billing_mode, account, windows, config)
 
     # Sandbox — on is green (protected); off is orange (heads-up).
     sandbox_on = get_sandbox_enabled()
@@ -391,20 +606,33 @@ def main():
     if branch:
         parts.append(branch)
     parts.append(ctx_str)
-    # The `sess` spend bar is a fallback: show it only when neither the 5h nor
-    # the 7d window could be determined. Gate on the built segment strings (None
-    # when the window is absent or its percentage is null), not on `rate_limits`.
-    if spend_seg is not None and five_str is None and seven_str is None:
-        parts.append(spend_seg)
-    if five_str is not None:
-        parts.append(five_str)
-    if seven_str is not None:
-        parts.append(seven_str)
-    if spend_str is not None:
-        parts.append(spend_str)
+
+    if billing_mode == "api":
+        # API billing: the dollar bar is the real signal. Still surface a gateway
+        # window if one happens to be reported.
+        if spend_seg is not None:
+            parts.append(spend_seg)
+        for seg in (five_str, seven_str, spend_str):
+            if seg is not None:
+                parts.append(seg)
+    else:
+        # Subscription: account usage only, never dollars. Until any window is
+        # known (first-ever launch, or just after a reset) show a neutral
+        # placeholder rather than falling back to the dollar bar.
+        window_segs = [seg for seg in (five_str, seven_str, spend_str) if seg is not None]
+        if window_segs:
+            parts.extend(window_segs)
+        else:
+            parts.append(colorize("usage --", C_GRAY))
+
+    if overage_str is not None:
+        parts.append(overage_str)
     parts.append(sb_str)
 
     sys.stdout.write(" | ".join(parts) + "\n")
+
+    if dirty:
+        _write_cache(cache)
 
 
 if __name__ == "__main__":

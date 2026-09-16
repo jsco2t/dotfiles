@@ -97,6 +97,16 @@ Archive root: `archive/`
 Use subagents sparingly. The main session owns nearly all reasoning,
 orchestration, implementation, review, validation, and acceptance.
 
+When you dispatch background (async) subagents — for example, running the
+review pipeline's reviewers in parallel — and have nothing to do but wait for
+their results, you may end your turn. The workflow Stop hook is wait-aware: it
+will not force a continuation while background subagents you dispatched are
+still outstanding, and each subagent's hand-back re-invokes this session
+automatically. Waiting this way is not stopping and does not cut corners.
+Do NOT keep a subagent perpetually in flight to avoid making progress:
+consolidate results as they return and continue the current phase. If the same
+wait repeats with no task progress, the hook will require concrete progress.
+
 # Invocation Modes
 
 Supported explicit invocations:

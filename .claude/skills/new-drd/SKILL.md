@@ -47,7 +47,7 @@ Identify all resources in the initial context:
 
 - **Jira Issues**: URLs or issue keys (e.g., `FUZZ-1234`) — fetch using the Atlassian toolkit (`jira issue get <key>`)
 - **Confluence Pages**: URLs — fetch using the Atlassian toolkit (`confluence page get <url>`)
-- **GitHub Issues/PRs**: URLs or `owner/repo#number` — fetch using `gh issue view <number> --repo <owner>/<repo>`. If `gh` fails (TLS error, auth issue), ask the user to paste the issue body rather than aborting.
+- **GitHub Issues/PRs**: URLs or `owner/repo#number` — fetch using `ghtk issue get <number> --repo <owner>/<repo>` (the local GitHub toolkit; stdlib, works in-sandbox; reference: `~/.local/bin/github-toolkit/README.md`). If `ghtk` fails (auth issue), ask the user to paste the issue body rather than aborting.
 - **File paths**: Read local files
 - **URLs**: Fetch using WebFetch or WebSearch
 - **Free-text**: Parse for the problem, the proposed solution, requirements, and constraints
@@ -410,9 +410,9 @@ After final approval, update the Status field from "Draft" to "Approved" and upd
 
 If the context includes Jira/Confluence references but the toolkit fails, inform the user and ask whether to proceed with only the textual context, or to abort and fix connectivity first.
 
-### If GitHub CLI Fails
+### If GitHub Access Fails
 
-If `gh issue view` fails (TLS errors, auth issues), ask the user to paste the issue body rather than aborting. Do not silently skip referenced GitHub issues.
+If `ghtk issue get` fails (auth issues), ask the user to paste the issue body rather than aborting. Do not silently skip referenced GitHub issues.
 
 ### If the User Provides Very Thin Context
 

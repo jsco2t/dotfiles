@@ -35,28 +35,17 @@ For local mode without a scope, prefer branch changes against `main` (or `origin
 - Keep PR-visible language constructive, specific, and free of judgments about the author.
 - When invoked by another skill, return the complete report and any mutation results to the caller.
 
-### Bundled PR helpers
+### GitHub access (load on demand)
 
-Resolve the directory containing this `SKILL.md` and use its scripts directly. Do not assume a home-directory installation path.
-
-| Script | Purpose |
-| --- | --- |
-| `pr_discover.py` | Discover a PR from a reference or current branch |
-| `pr_threads.py` | Fetch review threads |
-| `pr_comment.py` | Post a batch of inline comments |
-| `pr_reply.py` | Reply to a thread; supports `--body-file` |
-| `pr_resolve.py` | Resolve a thread |
-| `pr_scan.py` | Find review-ready PRs |
-
-All helpers require only Python 3 and emit JSON:
+Uses the local GitHub toolkit (`ghtk`, stdlib-only, works in-sandbox — no sandbox bypass needed). Full reference: `~/.local/bin/github-toolkit/README.md` (read only when needed). **Below, `ghtk` is shorthand for `python3 "$HOME/.local/bin/github-toolkit/ghtk"`** — invoke it by that explicit path (do not assume it is on `PATH`). Add `--json` to any command for machine-readable output.
 
 ```bash
-python3 "<skill-dir>/pr_discover.py" [PR_REF]
-python3 "<skill-dir>/pr_threads.py" PR_NUMBER --unresolved-only --mine-only --include-outdated
-python3 "<skill-dir>/pr_comment.py" PR_NUMBER --comments-file /path/to/comments.json
-python3 "<skill-dir>/pr_reply.py" THREAD_ID "reply"
-python3 "<skill-dir>/pr_resolve.py" THREAD_ID
-python3 "<skill-dir>/pr_scan.py"
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr get [PR_REF]
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr threads PR_NUMBER --unresolved-only --mine-only --marker '<!-- comp-reviewomatic -->' --include-outdated
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr comment PR_NUMBER --comments-file /path/to/comments.json --marker '<!-- comp-reviewomatic -->'
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr reply THREAD_ID --body "reply"
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr resolve THREAD_ID
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr scan --drop-drafts --drop-human-reviewed --drop-ci-failing
 ```
 
 ## Core Skill Process
@@ -74,13 +63,13 @@ git diff main...HEAD -- path/to/file
 
 For `review` or `resolve`:
 
-1. Run `pr_discover.py`; save PR number, repository, branch, title, and URL.
-2. Fetch the current diff with `gh pr diff PR_NUMBER`.
-3. For `resolve`, fetch unresolved owned threads with `--mine-only --include-outdated`.
+1. Run `ghtk pr get`; save PR number, repository, branch, title, and URL.
+2. Fetch the current diff with `ghtk pr diff PR_NUMBER`.
+3. For `resolve`, fetch unresolved owned threads with `ghtk pr threads PR_NUMBER --unresolved-only --mine-only --marker '<!-- comp-reviewomatic -->' --include-outdated`.
 
 For `scan`:
 
-1. Run `pr_scan.py`.
+1. Run `ghtk pr scan --drop-drafts --drop-human-reviewed --drop-ci-failing`.
 2. Keep PRs that are not drafts, have no human review, and have no failing CI checks.
 3. Present PR number, title, author, files, and CI state.
 4. Review candidates one at a time. Ask before each PR unless the caller explicitly authorized processing the queue.
@@ -164,7 +153,7 @@ Write a temporary JSON array:
 [{"path":"file.go","line":42,"body":"comment text"}]
 ```
 
-Post the file with `pr_comment.py`. Each comment must explain why the issue matters and give a concrete fix. The helper adds `<!-- comp-reviewomatic -->`.
+Post the file with `ghtk pr comment PR_NUMBER --comments-file <file> --marker '<!-- comp-reviewomatic -->'`. Each comment must explain why the issue matters and give a concrete fix. The `--marker` value `<!-- comp-reviewomatic -->` is prefixed to every comment body so this skill can later find and resolve its own threads.
 
 ### 7. Resolve owned comments in `resolve`
 

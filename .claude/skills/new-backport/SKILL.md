@@ -86,10 +86,10 @@ For each commit, extract:
 2. **Original PR number** — trailing `(#NNN)` in the subject. Also try the GitHub API:
 
 ```
-gh api repos/{owner}/{repo}/commits/{full-hash}/pulls --jq '.[0].number'
+ghtk commit prs {full-hash} --repo {owner}/{repo} --json   # first prs[].number is the original PR
 ```
 
-If the API fails, fall back to the regex match. Unknown PR numbers are acceptable.
+If the API fails, fall back to the regex match. Unknown PR numbers are acceptable. (`ghtk` is the local GitHub toolkit — stdlib, works in-sandbox; reference: `~/.local/bin/github-toolkit/README.md`.)
 
 3. **Clean subject** — the commit subject with any trailing ` (#NNN)` removed.
 
@@ -324,7 +324,7 @@ Present these as suggestions:
 >
 > # 3. Push and create the PR:
 > git push -u origin {branch-name}
-> gh pr create --base {target} --head {branch-name} \
+> ghtk pr create --base {target} --head {branch-name} \
 >   --title "{pr-title}" \
 >   --body "Backport of {commit-summary} to {target}."
 >
@@ -410,14 +410,14 @@ The `(cherry picked from commit ...)` trailer is already in each cherry-picked c
 ### Step 4.7: Create the PR and Return to Original Branch
 
 ```
-gh pr create \
+ghtk pr create \
   --base {target} \
   --head {branch-name} \
   --title "{pr-title}" \
   --body "{pr-body}"
 ```
 
-Use a HEREDOC for the body. If `gh` is not available or fails, output the command for the user
+Use a HEREDOC for the body. If `ghtk` is not available or fails, output the command for the user
 to run manually.
 
 After creating the PR, return to the user's original branch before starting the next group:

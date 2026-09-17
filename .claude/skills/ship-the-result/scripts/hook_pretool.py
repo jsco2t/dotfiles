@@ -9,7 +9,7 @@
 """Claude Code PreToolUse hook for the Bash tool.
 
 Intercepts commands that write outward-facing text into project history
-(git commit, gh pr create/edit, gh release create/edit) and scans the message,
+(git commit, gh/ghtk pr create/edit, gh release create/edit) and scans the message,
 title, body and notes for conversation residue. Also scans staged changes for
 residue in comments, test names and new filenames.
 
@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from residue_check import scan_text, format_findings, safe_read_text  # noqa: E402
 
 CONFIRM_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ship-the-result"
-TRIGGERS = re.compile(r"\b(git\s+commit|gh\s+pr\s+(create|edit)|gh\s+release\s+(create|edit))\b")
+TRIGGERS = re.compile(r"\b(git\s+commit|gh\s+pr\s+(create|edit)|gh\s+release\s+(create|edit)|ghtk\s+pr\s+(create|edit))\b")
 
 # Flags whose values are outward-facing prose.
 TEXT_FLAGS = ("-m", "--message", "-t", "--title", "-b", "--body", "-n", "--notes", "-F", "--body-file", "--notes-file")

@@ -34,29 +34,18 @@ For local mode without a scope, prefer `git diff main...HEAD` or `origin/main...
 - Keep PR comments respectful, specific, and educational.
 - Return the full result to a delegating skill or agent.
 
-### Bundled PR helpers
+### GitHub access (load on demand)
 
-Resolve the directory containing this `SKILL.md`; do not assume a home-directory path.
-
-| Script | Purpose |
-| --- | --- |
-| `pr_discover.py` | Discover a PR |
-| `pr_threads.py` | Fetch threads |
-| `pr_comment.py` | Post inline comments |
-| `pr_reply.py` | Reply to a thread |
-| `pr_resolve.py` | Resolve a thread |
-| `pr_scan.py` | Find review-ready PRs |
+Uses the local GitHub toolkit (`ghtk`, stdlib-only, works in-sandbox — no sandbox bypass needed). Full reference: `~/.local/bin/github-toolkit/README.md` (read only when needed). **Below, `ghtk` is shorthand for `python3 "$HOME/.local/bin/github-toolkit/ghtk"`** — invoke it by that explicit path. Add `--json` for machine-readable output.
 
 ```bash
-python3 "<skill-dir>/pr_discover.py" [PR_REF]
-python3 "<skill-dir>/pr_threads.py" PR_NUMBER --unresolved-only --mine-only --include-outdated
-python3 "<skill-dir>/pr_comment.py" PR_NUMBER --comments-file /path/to/comments.json
-python3 "<skill-dir>/pr_reply.py" THREAD_ID "reply"
-python3 "<skill-dir>/pr_resolve.py" THREAD_ID
-python3 "<skill-dir>/pr_scan.py"
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr get [PR_REF]
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr threads PR_NUMBER --unresolved-only --mine-only --marker '<!-- comp-goreviewomatic -->' --include-outdated
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr comment PR_NUMBER --comments-file /path/to/comments.json --marker '<!-- comp-goreviewomatic -->'
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr reply THREAD_ID --body "reply"
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr resolve THREAD_ID
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr scan --drop-drafts --drop-human-reviewed --drop-ci-failing
 ```
-
-The helpers use only Python 3 and emit JSON. `pr_reply.py` also accepts `--body-file`.
 
 ## Core Skill Process
 
@@ -71,9 +60,9 @@ git diff --cached
 git diff main...HEAD -- path/to/file.go
 ```
 
-For `review` or `resolve`, discover the PR, record its metadata, and fetch `gh pr diff PR_NUMBER`. In resolve mode also fetch owned unresolved threads with `--mine-only --include-outdated`.
+For `review` or `resolve`, discover the PR (`ghtk pr get`), record its metadata, and fetch `ghtk pr diff PR_NUMBER`. In resolve mode also fetch owned unresolved threads with `ghtk pr threads PR_NUMBER --unresolved-only --mine-only --marker '<!-- comp-goreviewomatic -->' --include-outdated`.
 
-For `scan`, run `pr_scan.py`. Keep non-draft PRs with no human review and no failing CI checks. Present each candidate and changed file list, then review one at a time. Ask before each PR unless the caller authorized the queue.
+For `scan`, run `ghtk pr scan --drop-drafts --drop-human-reviewed --drop-ci-failing`. Keep non-draft PRs with no human review and no failing CI checks. Present each candidate and changed file list, then review one at a time. Ask before each PR unless the caller authorized the queue.
 
 ### 2. Establish Go context
 
@@ -144,7 +133,7 @@ In `review` or `scan`, show the report first. Post only selected findings unless
 [{"path":"file.go","line":42,"body":"comment text"}]
 ```
 
-Run `pr_comment.py`. Explain why each issue matters and give a concrete Go-appropriate fix. The helper adds `<!-- comp-goreviewomatic -->`.
+Run `ghtk pr comment PR_NUMBER --comments-file <file> --marker '<!-- comp-goreviewomatic -->'`. Explain why each issue matters and give a concrete Go-appropriate fix. The `--marker` value `<!-- comp-goreviewomatic -->` is prefixed to every comment body.
 
 ### 7. Resolve owned comments
 

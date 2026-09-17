@@ -52,30 +52,23 @@ AskUserQuestion:
 
 ---
 
-## PR Tool Scripts
+## GitHub access (load on demand)
 
-This skill includes Python helper scripts for GitHub PR interactions. They live alongside this skill file and require only Python 3 stdlib (no pip installs). All scripts output JSON to stdout.
+This skill uses the local GitHub toolkit (`ghtk`, stdlib-only, works in-sandbox — no sandbox workaround needed). Full reference: `~/.local/bin/github-toolkit/README.md` — read it only when you need details. Commands are on `PATH`: `ghtk pr ...`, `ghtk issue ...`, `ghtk doctor`. Add `--json` for machine-readable output.
 
-**Resolve the script directory** at the start of every run:
+Commands this skill uses:
 
-```bash
-SKILL_DIR="$HOME/.claude/skills/comp-goreviewomatic"
-```
+| Purpose | Command |
+| --- | --- |
+| Find PR from URL, number, or branch | `ghtk pr get [URL_OR_NUMBER]` |
+| Fetch a PR's diff | `ghtk pr diff PR_NUMBER` (add `--name-only` for just the file list) |
+| Fetch review threads (with filtering) | `ghtk pr threads PR_NUMBER [--unresolved-only] [--mine-only --marker '<!-- comp-goreviewomatic -->'] [--include-outdated]` |
+| Post inline review comments as a batch | `ghtk pr comment PR_NUMBER --comments-file /path/to/comments.json --marker '<!-- comp-goreviewomatic -->'` |
+| Reply to a review thread | `ghtk pr reply THREAD_ID --body "body text"` (or `--body-file /path/to/file.txt`) |
+| Resolve a review thread | `ghtk pr resolve THREAD_ID` |
+| Scan open PRs for review-ready candidates | `ghtk pr scan --drop-drafts --drop-human-reviewed --drop-ci-failing` |
 
-Available tools:
-
-| Script           | Purpose                                | Usage                                                                                                    |
-| ---------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `pr_discover.py` | Find PR from URL, number, or branch    | `python3 "$SKILL_DIR/pr_discover.py" [URL_OR_NUMBER]`                                                    |
-| `pr_threads.py`  | Fetch review threads (with filtering)  | `python3 "$SKILL_DIR/pr_threads.py" PR_NUMBER [--unresolved-only] [--mine-only] [--include-outdated]`    |
-| `pr_comment.py`  | Post inline review comments as a batch | `python3 "$SKILL_DIR/pr_comment.py" PR_NUMBER --comments-file /path/to/comments.json`                    |
-| `pr_reply.py`    | Reply to a review thread               | `python3 "$SKILL_DIR/pr_reply.py" THREAD_ID "body text"`                                                 |
-| `pr_resolve.py`  | Resolve a review thread                | `python3 "$SKILL_DIR/pr_resolve.py" THREAD_ID`                                                           |
-| `pr_scan.py`     | Scan open PRs for review-ready candidates | `python3 "$SKILL_DIR/pr_scan.py"`                                                                     |
-
-The `--mine-only` flag on `pr_threads.py` filters to threads containing the marker `<!-- comp-goreviewomatic -->`, which is automatically embedded in every comment this skill posts. This is how Mode 3 identifies its own comments.
-
-For long reply bodies, `pr_reply.py` supports `--body-file /path/to/file.txt` instead of an inline string.
+The `--mine-only --marker '<!-- comp-goreviewomatic -->'` combination on `ghtk pr threads` filters to threads whose comments contain this skill's marker; `ghtk pr comment --marker '<!-- comp-goreviewomatic -->'` embeds that same marker in every comment this skill posts. This is how Mode 3 identifies its own comments.
 
 ---
 
@@ -118,8 +111,7 @@ git diff main...HEAD -- path/to/file.go
 Discover the PR:
 
 ```bash
-SKILL_DIR="$HOME/.claude/skills/comp-goreviewomatic"
-python3 "$SKILL_DIR/pr_discover.py" [ARGUMENT]
+ghtk pr get [ARGUMENT]
 ```
 
 Save the PR `number`, `owner`, `repo`, `branch`, and `url` from the output.
@@ -127,13 +119,13 @@ Save the PR `number`, `owner`, `repo`, `branch`, and `url` from the output.
 Then fetch the PR diff:
 
 ```bash
-gh pr diff <number>
+ghtk pr diff <number>
 ```
 
 **For `resolve` mode, also fetch your prior threads:**
 
 ```bash
-python3 "$SKILL_DIR/pr_threads.py" <number> --unresolved-only --mine-only --include-outdated
+ghtk pr threads <number> --unresolved-only --mine-only --marker '<!-- comp-goreviewomatic -->' --include-outdated
 ```
 
 The `--include-outdated` flag is essential here. "Outdated" in GitHub means the file changed after the comment was posted — which is exactly the signal that the issue may have been addressed. Skipping outdated threads would miss the most important ones to evaluate.
@@ -143,8 +135,7 @@ The `--include-outdated` flag is essential here. "Outdated" in GitHub means the 
 Scan the PR queue for review-ready candidates:
 
 ```bash
-SKILL_DIR="$HOME/.claude/skills/comp-goreviewomatic"
-python3 "$SKILL_DIR/pr_scan.py"
+ghtk pr scan --drop-drafts --drop-human-reviewed --drop-ci-failing
 ```
 
 This scans the current repo and returns a JSON array of open PRs that meet ALL of these criteria:
@@ -191,7 +182,7 @@ AskUserQuestion:
 ```
 
 For each PR the user approves:
-1. Fetch the diff with `gh pr diff <number>`
+1. Fetch the diff with `ghtk pr diff <number>`
 2. Run the full review (Phase 2 and Phase 3)
 3. Ask about posting comments (Phase 4)
 4. Move to the next PR
@@ -224,7 +215,7 @@ For each PR the user approves:
 
 **Before deploying reviewers**, locate the project's CLAUDE.md file(s). Walk up from the repository root and check for CLAUDE.md files at the root and in relevant subdirectories. Include their contents in each reviewer's prompt so reviewers can check project-specific conventions.
 
-**For `review` and `scan` modes (PR):** Also gather the raw diff lines (`gh pr diff <number>`) and extract the set of (file, line) pairs that are part of the diff. Pass this set to each reviewer with the instruction: **"Your findings MUST reference lines that appear in the diff. Do not flag issues on unchanged lines — even if adjacent code should also change, your finding must be anchored to a line that was added or modified in this changeset."** This constraint is required because the GitHub Reviews API only accepts comments on diff-visible lines.
+**For `review` and `scan` modes (PR):** Also gather the raw diff lines (`ghtk pr diff <number>`) and extract the set of (file, line) pairs that are part of the diff. Pass this set to each reviewer with the instruction: **"Your findings MUST reference lines that appear in the diff. Do not flag issues on unchanged lines — even if adjacent code should also change, your finding must be anchored to a line that was added or modified in this changeset."** This constraint is required because the GitHub Reviews API only accepts comments on diff-visible lines.
 
 ### Fan-out: grouping review lenses into sub-agents
 
@@ -559,15 +550,13 @@ not just WHAT is wrong. Help the reader understand the principle behind the sugg
 Write all comments to a temporary JSON file and post them as a single review:
 
 ```bash
-SKILL_DIR="$HOME/.claude/skills/comp-goreviewomatic"
-
 # Write comments to temp file
 # Format: [{"path": "file.go", "line": 42, "body": "comment text"}, ...]
 
-python3 "$SKILL_DIR/pr_comment.py" <number> --comments-file /tmp/review-comments.json
+ghtk pr comment <number> --comments-file /tmp/review-comments.json --marker '<!-- comp-goreviewomatic -->'
 ```
 
-The `pr_comment.py` script automatically embeds a hidden marker (`<!-- comp-goreviewomatic -->`) in every comment. This marker is invisible on GitHub but allows Mode 3 to identify and resolve these comments later.
+The `--marker '<!-- comp-goreviewomatic -->'` flag embeds a hidden marker in every comment. This marker is invisible on GitHub but allows Mode 3 to identify and resolve these comments later.
 
 Report the result:
 
@@ -593,8 +582,7 @@ Report the result:
 ### 5.1 Fetch Skill-Posted Threads
 
 ```bash
-SKILL_DIR="$HOME/.claude/skills/comp-goreviewomatic"
-python3 "$SKILL_DIR/pr_threads.py" <number> --unresolved-only --mine-only
+ghtk pr threads <number> --unresolved-only --mine-only --marker '<!-- comp-goreviewomatic -->'
 ```
 
 This returns only threads that:
@@ -654,13 +642,13 @@ AskUserQuestion:
 For threads classified as "Addressed differently" or "Declined with rationale", reply first:
 
 ```bash
-python3 "$SKILL_DIR/pr_reply.py" "<thread_id>" "Acknowledged — [brief note about the resolution]. Resolving."
+ghtk pr reply "<thread_id>" --body "Acknowledged — [brief note about the resolution]. Resolving."
 ```
 
 Then resolve:
 
 ```bash
-python3 "$SKILL_DIR/pr_resolve.py" "<thread_id>"
+ghtk pr resolve "<thread_id>"
 ```
 
 Report results:
@@ -694,8 +682,8 @@ Report results:
 
 ## Error Handling
 
-- If `pr_discover.py` fails, stop and ask the user for the PR URL.
-- If `pr_comment.py` fails, report the error and offer to retry or skip commenting.
-- If `pr_resolve.py` fails for a specific thread (permissions), note it in the report but continue with other threads.
-- If `pr_scan.py` returns an empty list, report "No review-ready PRs found in the queue" and stop.
+- If `ghtk pr get` fails, stop and ask the user for the PR URL.
+- If `ghtk pr comment` fails, report the error and offer to retry or skip commenting.
+- If `ghtk pr resolve` fails for a specific thread (permissions), note it in the report but continue with other threads.
+- If `ghtk pr scan` returns an empty list, report "No review-ready PRs found in the queue" and stop.
 - If a reviewer sub-agent returns no findings, that's fine — include it in the summary as "No issues found."

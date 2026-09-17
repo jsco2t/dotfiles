@@ -10,21 +10,19 @@ description: Triage GitHub Copilot review threads and failing PR checks, refute 
 - PR URL or number; if omitted, discover the PR for the current branch.
 - Optional caller-provided thread list, check results, repository context, or limits such as triage-only or no-push.
 
-Resolve bundled scripts with:
+### GitHub access (load on demand)
 
-```bash
-SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/copilot-fixer"
-```
+Uses the local GitHub toolkit (`ghtk`, stdlib-only, works in-sandbox). Full reference: `~/.local/bin/github-toolkit/README.md` (read only when needed). **Below, `ghtk` is shorthand for `python3 "$HOME/.local/bin/github-toolkit/ghtk"`** — invoke it by that explicit path.
 
-| Script | Purpose | Usage |
-|--------|---------|-------|
-| `pr_discover.py` | Resolve URL, number, or current branch | `python3 "$SKILL_DIR/pr_discover.py" [PR]` |
-| `pr_threads.py` | Fetch review threads | `python3 "$SKILL_DIR/pr_threads.py" PR [--copilot-only] [--unresolved-only]` |
-| `pr_reply.py` | Reply to a thread | `python3 "$SKILL_DIR/pr_reply.py" THREAD BODY` |
-| `pr_resolve.py` | Resolve a thread | `python3 "$SKILL_DIR/pr_resolve.py" THREAD` |
-| `pr_checks.py` | Fetch checks and logs | `python3 "$SKILL_DIR/pr_checks.py" PR [--failing-only] [--logs]` |
+| Command | Purpose |
+|---------|---------|
+| `ghtk pr get [PR]` | Resolve URL, number, or current branch |
+| `ghtk pr threads PR [--author-substr copilot] [--unresolved-only]` | Fetch review threads (Copilot's, matched by author) |
+| `ghtk pr reply THREAD --body "..."` (or `--body-file PATH`) | Reply to a thread |
+| `ghtk pr resolve THREAD` | Resolve a thread |
+| `ghtk pr checks PR [--failing-only] [--logs]` | Fetch checks and failed-job logs |
 
-All scripts use Python 3 standard library and emit JSON. `pr_reply.py` also accepts `--body-file PATH`.
+All emit JSON with `--json`.
 
 ## Requirements and Skill Boundaries
 
@@ -42,13 +40,13 @@ All scripts use Python 3 standard library and emit JSON. `pr_reply.py` also acce
 
 ### 1. Resolve the PR and gather work
 
-Run `pr_discover.py`. If resolution fails, stop and request a URL or number. Check out the PR branch when fixes are authorized.
+Run `ghtk pr get`. If resolution fails, stop and request a URL or number. Check out the PR branch (`gh pr checkout PR`, a local git operation) when fixes are authorized.
 
 Fetch unresolved Copilot threads and failing checks in parallel:
 
 ```bash
-python3 "$SKILL_DIR/pr_threads.py" PR --copilot-only --unresolved-only
-python3 "$SKILL_DIR/pr_checks.py" PR --failing-only --logs
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr threads PR --author-substr copilot --unresolved-only
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr checks PR --failing-only --logs
 ```
 
 If neither exists, report that the PR is clean and stop.

@@ -60,13 +60,13 @@ The distinction: does the sentence stand on its own for a reader who never saw t
 ## Procedure
 
 1. Draft the outward-facing text from two inputs only: the original requirement and the final diff. Pretend the intermediate turns do not exist.
-2. Run the scanner: `python3 <skill-dir>/scripts/residue_check.py` with the text on stdin (`--kind name` for identifiers, `--kind comment` for comment lines). Do this yourself before `git commit` or `gh pr create`; the hook is a backstop, not the primary check.
+2. Run the scanner: `python3 <skill-dir>/scripts/residue_check.py` with the text on stdin (`--kind name` for identifiers, `--kind comment` for comment lines). Do this yourself before `git commit` or `gh`/`ghtk pr create`; the hook is a backstop, not the primary check.
 3. For every finding, apply the reader test. Rewrite if it fails. If it passes because the phrase is a genuine requirement, keep it — and when the hook blocks, re-run the identical command once to confirm.
 4. Hand the text off with no preamble about how it was cleaned.
 
 ## Hook (deterministic backstop)
 
-The scanner also runs as a Claude Code `PreToolUse` hook on the Bash tool (`scripts/hook_pretool.py`, registered in `settings.json`). It inspects `git commit`, `gh pr create|edit` and `gh release create|edit`, scans message/title/body/notes, and for commits also scans staged comment lines, test names and new filenames.
+The scanner also runs as a Claude Code `PreToolUse` hook on the Bash tool (`scripts/hook_pretool.py`, registered in `settings.json`). It inspects `git commit`, `gh`/`ghtk pr create|edit` and `gh release create|edit`, scans message/title/body/notes, and for commits also scans staged comment lines, test names and new filenames.
 
 - **It is a nudge, not a gate.** On a hit it blocks with the findings; the *same command issued again unchanged passes*. That re-run is how a genuine requirement gets confirmed — so the hook never actually prevents a commit, it just buys one rewrite.
 - **It reads safely.** File arguments to `-F`/`--body-file`/`--notes-file` go through a guard that refuses to read anything sitting directly in `$HOME`, inside a sensitive directory (`~/.ssh`, `~/.aws`, `~/.claude`, ...), or with a secret-looking name. A file it cannot scan is reported, not silently passed.

@@ -8,27 +8,21 @@ argument-hint: "<PR URL or number, or blank to discover from current branch>"
 
 You triage GitHub Copilot review comments on a pull request: refute non-issues with grounded technical reasoning, and fix valid issues with full quality verification. You also handle CI pipeline failures reported on the PR.
 
-## PR Tool Scripts
+## GitHub access (load on demand)
 
-This skill includes Python helper scripts for all GitHub PR interactions. They live alongside this skill file and require only Python 3 stdlib (no pip installs). All scripts output JSON to stdout.
+This skill uses the local GitHub toolkit (`ghtk`, stdlib-only, works in-sandbox — no sandbox workaround needed). Full reference: `~/.local/bin/github-toolkit/README.md` — read it only when you need details. Commands are on `PATH`: `ghtk pr ...`, `ghtk issue ...`, `ghtk doctor`. Add `--json` for machine-readable output.
 
-**Resolve the script directory** at the start of every run:
+Commands this skill uses:
 
-```bash
-SKILL_DIR="$HOME/.claude/skills/copilot-fixer"
-```
+| Purpose | Command |
+|---------|---------|
+| Find PR from URL, number, or branch | `ghtk pr get [URL_OR_NUMBER]` |
+| Fetch Copilot review threads | `ghtk pr threads PR_NUMBER --author-substr copilot [--unresolved-only]` |
+| Reply to a review thread | `ghtk pr reply THREAD_ID --body "body text"` (or `--body-file /path/to/file.txt`) |
+| Resolve a review thread | `ghtk pr resolve THREAD_ID` |
+| Get CI check status and failure logs | `ghtk pr checks PR_NUMBER [--failing-only] [--logs]` |
 
-Available tools:
-
-| Script | Purpose | Usage |
-|--------|---------|-------|
-| `pr_discover.py` | Find PR from URL, number, or branch | `python3 "$SKILL_DIR/pr_discover.py" [URL_OR_NUMBER]` |
-| `pr_threads.py` | Fetch review threads (Copilot/unresolved filtering) | `python3 "$SKILL_DIR/pr_threads.py" PR_NUMBER [--copilot-only] [--unresolved-only]` |
-| `pr_reply.py` | Reply to a review thread | `python3 "$SKILL_DIR/pr_reply.py" THREAD_ID "body text"` |
-| `pr_resolve.py` | Resolve a review thread | `python3 "$SKILL_DIR/pr_resolve.py" THREAD_ID` |
-| `pr_checks.py` | Get CI check status and failure logs | `python3 "$SKILL_DIR/pr_checks.py" PR_NUMBER [--failing-only] [--logs]` |
-
-For long reply bodies, `pr_reply.py` supports `--body-file /path/to/file.txt` instead of an inline string.
+`ghtk pr threads --author-substr copilot` filters to threads whose first comment author login contains "copilot" (Copilot's bot account). The PR branch checkout in Phase 1 uses `gh pr checkout` (a local git operation, not an API call); if only that step fails under the sandbox, run it with the sandbox disabled — the `ghtk` commands do not need it.
 
 ## Critical Rules
 
@@ -48,10 +42,8 @@ $ARGUMENTS
 ### Discover the PR
 
 ```bash
-SKILL_DIR="$HOME/.claude/skills/copilot-fixer"
-
 # Pass the user's argument (URL, number, or nothing) directly:
-python3 "$SKILL_DIR/pr_discover.py" [ARGUMENT]
+ghtk pr get [ARGUMENT]
 ```
 
 The script handles all three cases (URL, number, branch discovery) and outputs JSON:
@@ -81,30 +73,29 @@ Run these in parallel to collect both Copilot comments and CI status:
 ### 2.1 Fetch Copilot Review Comments
 
 ```bash
-python3 "$SKILL_DIR/pr_threads.py" <number> --copilot-only --unresolved-only
+ghtk pr threads <number> --author-substr copilot --unresolved-only
 ```
 
-Returns a JSON array of unresolved Copilot threads. Each thread includes:
+Returns `{"threads": [...], "count": N}` — the unresolved Copilot threads. Each thread includes:
 - `id` — the GraphQL thread node ID (used for replies and resolution)
 - `path` — the file path
 - `line` — the line number
-- `isCopilot` — true (since we filtered)
 - `comments` — array of comment objects with `body`, `author`, `isBot`
 
-The script dynamically identifies Copilot by filtering for Bot authors with "copilot" in the login — no hardcoded username.
+`--author-substr copilot` identifies Copilot by matching "copilot" in the thread's first comment author login — no hardcoded username.
 
 **Scope note:** Copilot may also post an overall review-summary comment on the PR (not a per-line thread). These are not review threads and cannot be resolved. This skill targets per-line review threads only.
 
 ### 2.2 Fetch CI Check Status
 
 ```bash
-python3 "$SKILL_DIR/pr_checks.py" <number> --failing-only --logs
+ghtk pr checks <number> --failing-only --logs
 ```
 
 Returns JSON with failing checks and their truncated failure logs:
 
 ```json
-{"checks": [{"name": "...", "bucket": "fail", "log": "..."}], "summary": {"total": N, "pass": N, "fail": N}}
+{"summary": {"total": N, "pass": N, "fail": N, "pending": N}, "checks": [{"name": "...", "bucket": "fail", "logs": "..."}]}
 ```
 
 ### 2.3 Classify Work
@@ -185,22 +176,22 @@ Reply to the thread with a technically grounded explanation of why the comment i
 Tone: professional, respectful, concise. These are visible to the team.
 
 ```bash
-python3 "$SKILL_DIR/pr_reply.py" "<thread_id>" "Your refutation text here"
+ghtk pr reply "<thread_id>" --body "Your refutation text here"
 ```
 
 For longer replies, write the body to a temp file and use:
 
 ```bash
-python3 "$SKILL_DIR/pr_reply.py" "<thread_id>" --body-file /tmp/reply.txt
+ghtk pr reply "<thread_id>" --body-file /tmp/reply.txt
 ```
 
 ### 4.2 Resolve the Thread
 
 ```bash
-python3 "$SKILL_DIR/pr_resolve.py" "<thread_id>"
+ghtk pr resolve "<thread_id>"
 ```
 
-The script returns `{"success": true/false}`. **If resolution fails** (insufficient permissions), note it in the final report but continue. The refutation reply is the primary deliverable; resolution is a convenience.
+`ghtk pr resolve` prints the resolution result and exits non-zero on failure. **If resolution fails** (insufficient permissions), note it in the final report but continue. The refutation reply is the primary deliverable; resolution is a convenience.
 
 ---
 
@@ -212,7 +203,7 @@ For each thread assessed as `VALID`:
 
 1. Post an acknowledgment reply:
    ```bash
-   python3 "$SKILL_DIR/pr_reply.py" "<thread_id>" "Valid point — this is a real issue. Fixing now."
+   ghtk pr reply "<thread_id>" --body "Valid point — this is a real issue. Fixing now."
    ```
 2. Implement the fix in the working tree.
 3. **Do NOT resolve the thread yet.** Valid-issue threads are resolved after a successful push (Phase 7) to avoid marking threads resolved when the fix hasn't landed on the remote.
@@ -221,7 +212,7 @@ For each thread assessed as `VALID`:
 
 For each failing check (from Phase 2.2 output):
 
-1. Analyze the failure log from the `log` field in the check output.
+1. Analyze the failure log from the `logs` field in the check output.
 2. Identify the root cause — build error, test failure, lint violation, etc.
 3. Implement the fix in the working tree.
 
@@ -343,7 +334,7 @@ git push
 Now that the fix is pushed, resolve the threads for issues assessed as `VALID`:
 
 ```bash
-python3 "$SKILL_DIR/pr_resolve.py" "<thread_id>"
+ghtk pr resolve "<thread_id>"
 ```
 
 This ordering ensures threads are only marked resolved after the fix is live on the remote.
@@ -416,7 +407,7 @@ If your fix breaks the build or tests, fix the regression before pushing. If you
 
 ### If Thread Resolution Fails
 
-The `pr_resolve.py` script returns `{"success": false}` on permission errors. Leave the refutation reply in place and note in the report that thread resolution requires elevated permissions.
+`ghtk pr resolve` exits non-zero on permission errors. Leave the refutation reply in place and note in the report that thread resolution requires elevated permissions.
 
 ### If the Pipeline Cannot Be Detected
 

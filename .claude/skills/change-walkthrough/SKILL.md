@@ -22,7 +22,7 @@ Determine what changes to walk through, using this priority:
 
 If the user provided arguments, interpret them:
 
-- **PR number** (e.g., `#123`, `PR 123`): Use `gh pr diff <number>` to get the diff. Also fetch PR description with `gh pr view <number>` for context.
+- **PR number** (e.g., `#123`, `PR 123`): Use `ghtk pr diff <number>` to get the diff. Also fetch PR description with `ghtk pr get <number>` for context. (`ghtk` is the local GitHub toolkit — stdlib, works in-sandbox; reference: `~/.local/bin/github-toolkit/README.md`.)
 - **Commit range** (e.g., `abc123..def456`, `HEAD~3`): Use `git diff <range>` and `git log <range>` for commit messages.
 - **Branch name** (e.g., `feature-branch`): Use `git diff main...<branch>` and `git log main...<branch>`.
 - **File paths**: Use `git diff` on those specific files (staged + unstaged).

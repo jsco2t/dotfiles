@@ -74,25 +74,18 @@ AskUserQuestion:
 
 ---
 
-## PR Tool Scripts
+## PR tooling (GitHub toolkit)
 
-This skill carries the same Python helpers as the reviewers (copied verbatim; Python 3 stdlib only, JSON to stdout). The router uses them only for **PR discovery, queue scanning, and reading threads** — never for posting.
+This skill uses the local GitHub toolkit (`ghtk`, stdlib-only, on `PATH`, works in-sandbox — no sandbox workaround needed). Full reference: `~/.local/bin/github-toolkit/README.md` (read only when needed). The router uses it only for **PR discovery, queue scanning, and reading threads** — never for posting; the downstream reviewers own all posting.
 
-**Resolve the script directory at the start of every run:**
+| Purpose | Command |
+| --- | --- |
+| Resolve a PR from URL, number, or branch | `ghtk pr get [URL_OR_NUMBER]` |
+| List review-ready open PRs (not draft, no human review, CI not failing) | `ghtk pr scan --drop-drafts --drop-human-reviewed --drop-ci-failing` |
+| Read unresolved threads for the resolve-mode marker census | `ghtk pr threads PR_NUMBER --unresolved-only --include-outdated` |
+| Survey a PR's changed files (file-type census) | `ghtk pr diff PR_NUMBER --name-only` |
 
-```bash
-SKILL_DIR="$HOME/.claude/skills/reviewomatic"
-```
-
-| Script           | Router uses it to…                                        | Usage                                                                        |
-| ---------------- | -------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `pr_discover.py` | Resolve a PR from URL, number, or branch                 | `python3 "$SKILL_DIR/pr_discover.py" [URL_OR_NUMBER]`                        |
-| `pr_scan.py`     | List review-ready open PRs (not draft, no human review, CI not failing) | `python3 "$SKILL_DIR/pr_scan.py"`                              |
-| `pr_threads.py`  | Read unresolved threads for the resolve-mode marker census | `python3 "$SKILL_DIR/pr_threads.py" PR_NUMBER --unresolved-only --include-outdated` |
-
-`pr_comment.py`, `pr_reply.py`, and `pr_resolve.py` are present for parity with the other skills but the router does not call them — the downstream reviewers do.
-
-> **Sandbox:** these scripts and any `gh` call (e.g. `gh pr diff`) reach the network and GitHub, which fails under the default sandbox. Run every `pr_*.py`, `gh`, and `git` command in this router with `dangerouslyDisableSandbox: true`.
+`ghtk pr comment`, `ghtk pr reply`, and `ghtk pr resolve` exist for the downstream reviewers; the router does not call them.
 
 ---
 
@@ -132,8 +125,8 @@ git diff --numstat  main...HEAD   # optional: gauge weight when judging an incid
 ### PR Review mode
 
 ```bash
-python3 "$SKILL_DIR/pr_discover.py" [ARGUMENT]   # capture number, owner, repo, url
-gh pr diff <number> --name-only                   # the file-type census
+ghtk pr get [ARGUMENT]              # capture number, owner, repo, url
+ghtk pr diff <number> --name-only  # the file-type census
 ```
 
 ### PR Resolve mode
@@ -143,7 +136,7 @@ gh pr diff <number> --name-only                   # the file-type census
 ### PR Scan mode
 
 ```bash
-python3 "$SKILL_DIR/pr_scan.py"
+ghtk pr scan --drop-drafts --drop-human-reviewed --drop-ci-failing
 ```
 
 This returns review-ready PRs by general criteria (not draft, no human review, CI not failing) — **not** filtered to any file type, which is what a router needs. Survey each candidate individually in Phase 3 (Scan).
@@ -223,10 +216,10 @@ Two review-mode skills means the user sees **two posting gates** — that is cor
 
 Which skills need to resolve depends on **which skills previously commented**, which has nothing to do with today's file mix. So:
 
-1. Discover the PR (`pr_discover.py`) and fetch all unresolved threads (note: **no** `--mine-only` — in this copied script that flag filters to comp-reviewomatic's marker only, which would miss the other two reviewers' threads):
+1. Discover the PR (`ghtk pr get`) and fetch all unresolved threads (note: **no** `--mine-only` — the router must read *all* reviewers' threads, then inspect each thread's comment bodies for the three markers below):
 
    ```bash
-   python3 "$SKILL_DIR/pr_threads.py" <number> --unresolved-only --include-outdated
+   ghtk pr threads <number> --unresolved-only --include-outdated
    ```
 
 2. In the script's JSON output, read each thread's `comments[].body` text and check it for each reviewer's hidden marker (every comment a reviewer posts embeds its own marker, so scanning the comment bodies is sufficient):
@@ -242,8 +235,8 @@ Which skills need to resolve depends on **which skills previously commented**, w
 
 The router's scan only **finds** review-ready PRs; it does not review them and **never forwards `mode scan`** (a downstream scan re-filters to its own file type and would review a different set than you surveyed).
 
-1. Run `pr_scan.py`, present the review-ready queue to the user.
-2. For each PR to be reviewed (one at a time), survey its files (`gh pr diff <n> --name-only`), route per Phase 2, and dispatch as **`mode review` with that explicit PR number** and forwarded flags. Apply the mixed-PR doc-skip note above when both docs and code are present.
+1. Run `ghtk pr scan`, present the review-ready queue to the user.
+2. For each PR to be reviewed (one at a time), survey its files (`ghtk pr diff <n> --name-only`), route per Phase 2, and dispatch as **`mode review` with that explicit PR number** and forwarded flags. Apply the mixed-PR doc-skip note above when both docs and code are present.
 
 ---
 
@@ -256,7 +249,6 @@ The router's scan only **finds** review-ready PRs; it does not review them and *
 5. **Forward `mode`, the explicit PR number, `--auto-comment`, and `--confidence=N` verbatim.** Never forward `mode scan` — dispatch scanned PRs as `mode review`.
 6. **Pin local scope as a free-text rider in `args`** (it isn't a downstream flag; downstream interpolates `$ARGUMENTS` verbatim). Use the same channel for the mixed-PR "skip docs" instruction to a code reviewer.
 7. **Resolve mode routes by marker census**, not by file type.
-8. **Run `pr_*.py`, `gh`, and `git` with `dangerouslyDisableSandbox: true`.**
 
 ---
 

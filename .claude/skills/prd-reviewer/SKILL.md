@@ -60,7 +60,7 @@ Use the local Atlassian toolkit (usage: `~/.local/bin/atlassian-toolkit/README.m
 
 ### GitHub Issue / PR
 
-Use `gh issue view <number>` or `gh pr view <number>` to fetch the content. Check for linked issues, referenced PRs, and project board context. Read any referenced markdown files in the repository.
+Use `ghtk issue get <number>` or `ghtk pr get <number>` to fetch the content (the local GitHub toolkit; stdlib, works in-sandbox; reference: `~/.local/bin/github-toolkit/README.md`). Check for linked issues, referenced PRs, and project board context. Read any referenced markdown files in the repository.
 
 ### Inline Text
 

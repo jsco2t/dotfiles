@@ -36,20 +36,18 @@ For local mode without a scope, prefer branch changes against `main` or `origin/
 - Keep PR comments respectful and provide replacement text when practical.
 - Return complete results to the direct user or delegating caller.
 
-### Bundled PR helpers
+### GitHub access (load on demand)
 
-Resolve the directory containing this `SKILL.md`; do not assume an installation path.
+Uses the local GitHub toolkit (`ghtk`, stdlib-only, works in-sandbox — no sandbox bypass needed). Full reference: `~/.local/bin/github-toolkit/README.md` (read only when needed). **Below, `ghtk` is shorthand for `python3 "$HOME/.local/bin/github-toolkit/ghtk"`** — invoke it by that explicit path. Add `--json` for machine-readable output.
 
 ```bash
-python3 "<skill-dir>/pr_discover.py" [PR_REF]
-python3 "<skill-dir>/pr_threads.py" PR_NUMBER --unresolved-only --mine-only --include-outdated
-python3 "<skill-dir>/pr_comment.py" PR_NUMBER --comments-file /path/to/comments.json
-python3 "<skill-dir>/pr_reply.py" THREAD_ID "reply"
-python3 "<skill-dir>/pr_resolve.py" THREAD_ID
-python3 "<skill-dir>/pr_scan.py"
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr get [PR_REF]
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr threads PR_NUMBER --unresolved-only --mine-only --marker '<!-- doc-reviewomatic -->' --include-outdated
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr comment PR_NUMBER --comments-file /path/to/comments.json --marker '<!-- doc-reviewomatic -->'
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr reply THREAD_ID --body "reply"
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr resolve THREAD_ID
+python3 "$HOME/.local/bin/github-toolkit/ghtk" pr scan --drop-drafts --file-glob '*.md' --file-glob '*.mdx' --file-glob '*.rst' --file-glob '*.adoc' --file-glob '*.asciidoc'
 ```
-
-The scripts use Python 3, emit JSON, and preserve the skill marker. `pr_reply.py` accepts `--body-file`.
 
 ## Core Skill Process
 
@@ -66,9 +64,9 @@ git diff main...HEAD -- path/to/file.md
 
 Filter the result to documentation files. If none remain, report that there is nothing to review and stop.
 
-For `review` or `resolve`, discover the PR, save its metadata, fetch `gh pr diff PR_NUMBER`, and filter to documentation. In resolve mode fetch owned unresolved threads with `--mine-only --include-outdated`.
+For `review` or `resolve`, discover the PR (`ghtk pr get`), save its metadata, fetch `ghtk pr diff PR_NUMBER`, and filter to documentation. In resolve mode fetch owned unresolved threads with `ghtk pr threads PR_NUMBER --unresolved-only --mine-only --marker '<!-- doc-reviewomatic -->' --include-outdated`.
 
-For `scan`, run `pr_scan.py`. Present doc-only PRs and their files, then review one at a time. Ask before each unless the caller authorized queue processing.
+For `scan`, run `ghtk pr scan --drop-drafts --all-files-match --file-glob '*.md' --file-glob '*.mdx' --file-glob '*.rst' --file-glob '*.adoc' --file-glob '*.asciidoc'`. Present doc-only PRs and their files, then review one at a time. Ask before each unless the caller authorized queue processing.
 
 ### 2. Establish the documentation baseline
 
@@ -134,7 +132,7 @@ In `review` or `scan`, show the report first. Post only authorized findings; `--
 [{"path":"file.md","line":42,"body":"comment text"}]
 ```
 
-Run `pr_comment.py`. Explain reader or build impact and provide corrected prose, YAML, or commands. The helper adds `<!-- doc-reviewomatic -->`.
+Run `ghtk pr comment PR_NUMBER --comments-file <file> --marker '<!-- doc-reviewomatic -->'`. Explain reader or build impact and provide corrected prose, YAML, or commands. The `--marker` value `<!-- doc-reviewomatic -->` is prefixed to every comment body.
 
 ### 6. Resolve owned comments
 

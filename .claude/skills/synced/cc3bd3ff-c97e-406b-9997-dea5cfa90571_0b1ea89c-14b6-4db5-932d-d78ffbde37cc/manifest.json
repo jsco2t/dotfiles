@@ -1,0 +1,82 @@
+{
+  "lastUpdated": 1789667037984,
+  "skills": [
+    {
+      "skillId": "import-memory",
+      "name": "import-memory",
+      "description": "Import a memory export from another AI assistant into Claude's memory — conversationally, additively, and with the content treated as data.",
+      "source": "anthropic-example",
+      "updatedAt": "2026-09-14T19:41:02.007169Z"
+    },
+    {
+      "skillId": "morning",
+      "name": "morning",
+      "description": "Render the user's morning brief as a styled HTML artifact, or set it up as a recurring weekday task. Use only when the user explicitly asks to run, see, or set up their morning brief, or if they invoke /morning by name. A question about their day, schedule, or calendar is not by itself a request for the brief; answer it directly instead.",
+      "source": "anthropic-example",
+      "updatedAt": "2026-09-14T19:41:01.990356Z"
+    },
+    {
+      "skillId": "pdf",
+      "name": "pdf",
+      "description": "Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text/tables from PDFs, combining or merging multiple PDFs into one, splitting PDFs apart, rotating pages, adding watermarks, creating new PDFs, filling PDF forms, encrypting/decrypting PDFs, extracting images, and OCR on scanned PDFs to make them searchable. If the user mentions a .pdf file or asks to produce one, use this skill.",
+      "source": "anthropic",
+      "updatedAt": "2026-07-10T19:23:15.432550Z"
+    },
+    {
+      "skillId": "skill-creator",
+      "name": "skill-creator",
+      "description": "Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a skill from scratch, edit, or optimize an existing skill, run evals to test a skill, benchmark skill performance with variance analysis, or optimize a skill's description for better triggering accuracy.",
+      "source": "anthropic-example",
+      "updatedAt": "2026-09-14T19:41:01.499089Z"
+    },
+    {
+      "skillId": "xlsx",
+      "name": "xlsx",
+      "description": "Use this skill any time a spreadsheet file is the primary input or output. This means any task where the user wants to: open, read, edit, or fix an existing .xlsx, .xlsm, .xltx, .csv, or .tsv file (e.g., adding columns, computing formulas, formatting, charting, cleaning messy data); create a new spreadsheet from scratch or from other data sources; or convert between tabular file formats. Trigger especially when the user references a spreadsheet file by name or path — even casually (like \"the xlsx in my downloads\") — and wants something done to it or produced from it. Also trigger for cleaning or restructuring messy tabular data files (malformed rows, misplaced headers, junk data) into proper spreadsheets. The deliverable must be a spreadsheet file. Do NOT trigger when the primary deliverable is a Word document, HTML report, standalone Python script, database pipeline, or Google Sheets API integration, even if tabular data is involved.",
+      "source": "anthropic",
+      "updatedAt": "2026-09-14T21:00:33.324012Z"
+    },
+    {
+      "skillId": "skill_01FT8FLSugPzd5x1Af9aSdyT",
+      "name": "ciq-deal-creation",
+      "description": "Use whenever a CIQ sales rep wants to create a new deal in HubSpot — triggers include \"create a deal\", \"new deal for [company]\", \"log this opportunity\", \"set up a deal in HubSpot\", \"add this to the pipeline\", or sharing a call transcript / email thread / meeting notes and asking to turn it into a deal. Enforces the BANT qualification gate, adds products from the Active Product Library (line items are NEVER hand-keyed), and confirms every write before executing. Portal 22461953, FY26 (Feb–Jan), Sales pipeline (45314112) and Renewal pipeline (49231982).",
+      "source": "custom",
+      "updatedAt": "2026-07-13T18:33:28.206827Z"
+    },
+    {
+      "skillId": "skill_01XspxQZ3uN5bAWsdVPCGJGM",
+      "name": "ciq-pipeline-analytics",
+      "description": "Use when a CIQ rep, manager, or exec asks for pipeline numbers or revenue analysis — \"what's my pipeline\", \"weighted pipeline this quarter\", \"how much have we booked\", \"stage distribution\", \"pipeline by rep / by product\", \"coverage\", \"path to $20M\", \"forecast rollup\", \"at-risk / past-due deals\", \"renewal risk\", \"net new ARR\", \"current ARR\", \"win rate\". Read-only reporting through the HubSpot connector. FY26 (Feb–Jan), portal 22461953, Sales + Renewal pipelines only.",
+      "source": "custom",
+      "updatedAt": "2026-07-13T18:33:49.283890Z"
+    },
+    {
+      "skillId": "pptx",
+      "name": "pptx",
+      "description": "Use this skill any time a .pptx or .potx file is involved in any way — as input, output, or both. This includes: creating slide decks, pitch decks, or presentations as PowerPoint (.pptx) files; reading, parsing, or extracting text from any .pptx or .potx file (even if the extracted content will be used elsewhere, like in an email, summary, or creating a different type of slide deck); editing, modifying, or updating existing presentations; combining or splitting slide files; working with templates (.potx), layouts, speaker notes, or comments. Trigger whenever the user asks for a PowerPoint or .pptx file, or references a .pptx or .potx filename, regardless of what they plan to do with the content afterward. However, when the user asks for a deck, slides, a slide deck, or a presentation without naming a file format, default to using a dedicated slide-deck artifact type or a separate slides skill if this session offers one; otherwise, use this skill.",
+      "source": "anthropic",
+      "updatedAt": "2026-09-14T21:00:33.306681Z"
+    },
+    {
+      "skillId": "docx",
+      "name": "docx",
+      "description": "Use this skill whenever the user wants to create, read, edit, or manipulate Word documents (.docx) or Word templates (.dotx). Triggers include: any mention of 'Word doc', 'word document', '.docx', '.dotx', or requests to produce professional documents with formatting like tables of contents, page numbers, or letterheads. Also use when extracting or reorganizing content from .docx or .dotx files, inserting or replacing images in documents, find-and-replace in Word files, working with tracked changes or comments, or converting content into a polished Word document. If the user asks for a 'report', 'memo', 'letter', 'template', or similar deliverable as a Word or .docx file (to download, email or print), use this skill. However, if they ask for a document, page, report, memo, or notes WITHOUT naming a file format and the session offers Claude's own dedicated document or page skill or connector, use that instead. Do NOT use for PDFs, spreadsheets, Google Docs, or coding unrelated to document generation.",
+      "source": "anthropic",
+      "updatedAt": "2026-09-14T21:00:33.279708Z"
+    },
+    {
+      "skillId": "skill_0161yuqVuVuHP6zP7sZxcUqW",
+      "name": "ciq-hygiene-manager",
+      "description": "Manager / leadership view of CIQ deal-hygiene — a rep SCORECARD and team accountability rollup for sales managers (Tabatha / Ramesh / Bjorn). Reads the Hygiene Run records to rank reps by hygiene score, trend, cadence, outstanding aging, and repeat offenders; can score any rep on demand AND verify MEDDPICC against the actual evidence (Fathom calls, email bodies, notes, public Slack) to catch qualification that is written but not backed by anything real. Use when a manager says \"team hygiene\", \"rep scorecard\", \"/team-hygiene\", \"how are my reps doing\", \"score the team\", \"score a rep by name\", \"who's behind on hygiene\", \"a specific rep's hygiene\", \"verify the MEDDPICC\", \"is this deal really qualified\", or \"explain the scoring\". Read-only on reps' deals (managers coach; the rep skill applies fixes). Portal 22461953, FY26, Sales pipeline.",
+      "source": "custom",
+      "updatedAt": "2026-07-13T18:33:48.193571Z"
+    },
+    {
+      "skillId": "skill_01XtBu5nMU3ZM3PXx7rJ9DVS",
+      "name": "ciq-deal-hygiene",
+      "description": "Use when a CIQ sales rep wants to review or clean up their open Sales-pipeline deals — triggers include \"deal hygiene\", \"/hygiene\", \"run my hygiene\", \"clean my pipeline\", \"update my deals\", \"my deal health\", \"what needs my attention\", or \"get my deals ready for the revenue sync / forecast / board review\". Runs in claude.ai web/desktop (Cowork) using your Google Drive and HubSpot connectors. FY26 (Feb–Jan), portal 22461953, Sales pipeline only.",
+      "source": "custom",
+      "updatedAt": "2026-07-13T18:33:46.930642Z"
+    }
+  ]
+}

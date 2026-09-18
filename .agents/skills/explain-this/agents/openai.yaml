@@ -1,0 +1,4 @@
+interface:
+  display_name: "Explain This"
+  short_description: "Trace and explain code, files, or Git changes"
+  default_prompt: "Use $explain-this to trace and explain the code in the current directory."

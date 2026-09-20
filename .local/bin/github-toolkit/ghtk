@@ -1,0 +1,1357 @@
+#!/usr/bin/env python3
+"""ghtk -- streamlined GitHub CLI (pull requests, issues, reviews, CI) for skills and humans.
+
+A single self-contained, stdlib-only tool. See README.md for the usage contract.
+Run `ghtk`, `ghtk <group> --help`, or `ghtk <group> <command> --help` for help.
+
+Design notes for maintainers:
+  - HTTP is plain `urllib.request` (no `gh`, no `requests`). This is deliberate: the `gh`
+    CLI is a Go binary whose macOS system-trust TLS verification FAILS inside the Seatbelt
+    sandbox (x509: OSStatus -26276), which is why the old per-skill scripts had to run with
+    the sandbox disabled. urllib honors HTTP(S)_PROXY via getproxies() and uses OpenSSL's
+    file-based verifier, so with a real CA bundle it reaches api.github.com *inside* the
+    sandbox -- no bypass needed.
+  - TLS: some Python builds (python.org macOS framework builds) ship an EMPTY CA trust store,
+    so HTTPS fails with CERTIFICATE_VERIFY_FAILED regardless of any sandbox. build_ssl_context()
+    resolves a CA bundle at runtime (env -> Python store -> certifi -> cached -> macOS keychain
+    export -> known Linux bundles) so it works on macOS and Linux, even where ~/.config is
+    read-only. Ported from the atlassian-toolkit.
+  - Auth: a GitHub token via Authorization: Bearer. Precedence: GITHUB_TOKEN / GH_TOKEN env ->
+    `gh auth token` (reuses an existing gh login, keychain read works in-sandbox) ->
+    ~/.config/github-toolkit/auth.json. `ghtk auth login` is the fallback for machines without gh.
+  - REST at api.github.com (Accept: application/vnd.github+json); GraphQL at /graphql. GraphQL
+    returns errors INSIDE HTTP 200, so graphql() checks the errors[] array before unwrapping data.
+  - Output favors compact text to keep token cost low; --json is the structured escape hatch.
+  - Writes (pr comment/reply/resolve/create) all support --dry-run: they print the exact request
+    (method, URL, JSON body) and send nothing, so the whole surface is exercisable read-only.
+"""
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import getpass
+import http.client
+import json
+import os
+import platform
+import re
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+VERSION = "0.1.0"
+
+CONFIG_DIR = Path(os.environ.get("GITHUB_TOOLKIT_CONFIG_DIR", Path.home() / ".config" / "github-toolkit"))
+AUTH_FILE = CONFIG_DIR / "auth.json"
+CA_CACHE = CONFIG_DIR / "cacert.pem"
+CA_MAX_AGE_SEC = 30 * 24 * 3600
+
+API_ROOT = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+GRAPHQL_URL = API_ROOT + "/graphql"
+API_VERSION = "2022-11-28"
+GH_ACCEPT = "application/vnd.github+json"
+DIFF_ACCEPT = "application/vnd.github.v3.diff"
+USER_AGENT = f"ghtk/{VERSION}"
+DEFAULT_TIMEOUT = 30
+
+EX_OK, EX_USAGE, EX_AUTH, EX_NOTFOUND, EX_API, EX_NET = 0, 1, 2, 3, 4, 5
+
+
+# --------------------------------------------------------------------------- #
+# small utilities
+# --------------------------------------------------------------------------- #
+def eprint(*a):
+    print(*a, file=sys.stderr)
+
+
+def die(code, msg):
+    eprint(f"error: {msg}")
+    sys.exit(code)
+
+
+def jdump(obj):
+    print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False))
+
+
+def read_maybe_stdin(value):
+    return sys.stdin.read() if value == "-" else value
+
+
+def read_body_arg(body, body_file):
+    """Resolve a --body / --body-file pair into text (body_file wins; '-' = stdin)."""
+    if body_file is not None:
+        return sys.stdin.read() if body_file == "-" else Path(body_file).read_text()
+    if body is not None:
+        return read_maybe_stdin(body)
+    return ""
+
+
+# --------------------------------------------------------------------------- #
+# TLS (ported from atlassian-toolkit; verification always ON)
+# --------------------------------------------------------------------------- #
+def _macos_root_pem():
+    if platform.system() != "Darwin":
+        return None
+    parts = []
+    for kc in ("/System/Library/Keychains/SystemRootCertificates.keychain",
+               "/Library/Keychains/System.keychain"):
+        try:
+            out = subprocess.run(["security", "find-certificate", "-a", "-p", kc],
+                                 capture_output=True, text=True, timeout=15)
+            if out.returncode == 0 and out.stdout:
+                parts.append(out.stdout)
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return "\n".join(parts) if parts else None
+
+
+# Well-known system CA bundle locations, tried when the Python trust store is empty and
+# certifi is absent. Covers Debian/Ubuntu, RHEL/Rocky/Fedora, openSUSE, Alpine, and BSD/macOS.
+KNOWN_CA_BUNDLE_PATHS = [
+    "/etc/ssl/certs/ca-certificates.crt",   # Debian, Ubuntu, Gentoo, Arch
+    "/etc/pki/tls/certs/ca-bundle.crt",     # RHEL, Rocky, CentOS, Fedora
+    "/etc/pki/tls/cert.pem",                # RHEL/Rocky (alternate)
+    "/etc/ssl/ca-bundle.pem",               # openSUSE
+    "/etc/ssl/cert.pem",                    # Alpine, BSD, macOS
+]
+
+
+def build_ssl_context():
+    """Return an SSLContext with a working CA bundle. Verification is always ON;
+    point GITHUB_CA_BUNDLE (or SSL_CERT_FILE) at a PEM file for custom CAs."""
+    ctx = ssl.create_default_context()
+    for var in ("GITHUB_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        p = os.environ.get(var)
+        if p and os.path.exists(p):
+            ctx.load_verify_locations(cafile=p)
+            return ctx
+    if ctx.cert_store_stats().get("x509", 0) > 0:
+        return ctx
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+        return ctx
+    except Exception:
+        pass
+    try:
+        if CA_CACHE.exists() and (time.time() - CA_CACHE.stat().st_mtime) < CA_MAX_AGE_SEC:
+            ctx.load_verify_locations(cafile=str(CA_CACHE))
+            if ctx.cert_store_stats().get("x509", 0) > 0:
+                return ctx
+    except (OSError, ssl.SSLError):
+        pass
+    pem = _macos_root_pem()  # macOS: export roots from the system/admin keychains
+    if pem:
+        ctx.load_verify_locations(cadata=pem)
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            CA_CACHE.write_text(pem)
+        except OSError:
+            pass
+        return ctx
+    for path in KNOWN_CA_BUNDLE_PATHS:  # Linux/BSD: load a well-known distro CA bundle
+        if os.path.exists(path):
+            try:
+                ctx.load_verify_locations(cafile=path)
+                if ctx.cert_store_stats().get("x509", 0) > 0:
+                    return ctx
+            except ssl.SSLError:
+                continue
+    return ctx
+
+
+# --------------------------------------------------------------------------- #
+# auth
+# --------------------------------------------------------------------------- #
+_TOKEN_CACHE = None  # (token, source)
+
+
+def _gh_auth_token():
+    try:
+        out = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    tok = (out.stdout or "").strip()
+    return tok if out.returncode == 0 and tok else None
+
+
+def load_token(require=True):
+    """Resolve a GitHub token. Precedence: env -> gh auth token -> auth.json.
+    Returns (token, source) or (None, None)."""
+    global _TOKEN_CACHE
+    if _TOKEN_CACHE is not None:
+        return _TOKEN_CACHE
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    source = "env" if token else None
+    if not token:
+        token = _gh_auth_token()
+        source = "gh" if token else None
+    if not token and AUTH_FILE.exists():
+        try:
+            token = json.loads(AUTH_FILE.read_text()).get("token")
+            source = "file" if token else None
+        except (OSError, json.JSONDecodeError) as e:
+            die(EX_AUTH, f"could not read {AUTH_FILE}: {e}")
+    if not token:
+        if not require:
+            return None, None
+        die(EX_AUTH, "not authenticated. Set GITHUB_TOKEN, run `gh auth login`, or `ghtk auth login`.")
+    _TOKEN_CACHE = (token, source)
+    return _TOKEN_CACHE
+
+
+def save_auth(token):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(CONFIG_DIR, 0o700)
+    except OSError:
+        pass
+    AUTH_FILE.write_text(json.dumps({"token": token}, indent=2))
+    os.chmod(AUTH_FILE, 0o600)
+
+
+# --------------------------------------------------------------------------- #
+# HTTP core (REST + GraphQL + pagination)
+# --------------------------------------------------------------------------- #
+class ApiHTTPError(Exception):
+    def __init__(self, e):
+        self.code = e.code
+        self.headers = e.headers
+        try:
+            self.body = e.read().decode("utf-8", "replace")
+        except Exception:
+            self.body = ""
+
+
+class ApiNetError(Exception):
+    def __init__(self, exc, cert):
+        self.exc = exc
+        self.cert = cert
+
+
+def _headers(accept=GH_ACCEPT):
+    token, _ = load_token()
+    return {"Accept": accept, "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": API_VERSION, "User-Agent": USER_AGENT}
+
+
+def _url(path, params=None):
+    url = path if path.startswith("http") else API_ROOT + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params, doseq=True)
+    return url
+
+
+def _cert_help(e):
+    return ("TLS certificate verification failed. This tool auto-loads a CA bundle; "
+            "override it with GITHUB_CA_BUNDLE=/path/to/ca.pem . "
+            f"({e})")
+
+
+def _net_help(e):
+    reason = getattr(e, "reason", e)
+    return (f"network error: {reason}. If this only happens inside a sandbox, "
+            "re-run the command outside the sandbox.")
+
+
+def _rate_limited(e):
+    """A 403/429 that is a rate-limit (primary or secondary), so worth retrying."""
+    if e.code == 429:
+        return True
+    if e.code == 403:
+        if e.headers.get("Retry-After"):
+            return True
+        if e.headers.get("X-RateLimit-Remaining") == "0":
+            return True
+    return False
+
+
+def _retry_delay(e, attempt):
+    ra = e.headers.get("Retry-After")
+    if ra and ra.isdigit():
+        return min(float(ra), 60)
+    reset = e.headers.get("X-RateLimit-Reset")
+    if reset and reset.isdigit():
+        return min(max(float(reset) - time.time(), 1), 60)
+    return 2 ** attempt
+
+
+def _open(method, url, headers, data=None, timeout=DEFAULT_TIMEOUT):
+    """One request with retries. Returns (status, headers_dict, body_bytes).
+    Raises ApiHTTPError (non-retryable HTTP) or ApiNetError (TLS/network)."""
+    ctx = build_ssl_context()
+    for attempt in range(4):
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                return r.status, dict(r.headers), r.read()
+        except urllib.error.HTTPError as e:
+            if (e.code in (500, 502, 503, 504) or _rate_limited(e)) and attempt < 3:
+                time.sleep(_retry_delay(e, attempt))
+                continue
+            raise ApiHTTPError(e)
+        except ssl.SSLCertVerificationError as e:
+            raise ApiNetError(e, cert=True)
+        except (urllib.error.URLError, TimeoutError, http.client.HTTPException, ConnectionError) as e:
+            # http.client.IncompleteRead / RemoteDisconnected: transient early close on a
+            # large response -- retry rather than surfacing a traceback.
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+                continue
+            raise ApiNetError(e, cert=False)
+
+
+def _extract_error_message(body):
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return (body or "")[:300]
+    if not isinstance(data, dict):
+        return ""
+    parts = []
+    if data.get("message"):
+        parts.append(str(data["message"]))
+    for err in data.get("errors") or []:
+        if isinstance(err, dict):
+            detail = err.get("message") or f"{err.get('resource','')}.{err.get('field','')}: {err.get('code','')}"
+            parts.append(detail.strip(". "))
+        else:
+            parts.append(str(err))
+    return "; ".join(p for p in parts if p)
+
+
+def _raise_http(e: ApiHTTPError):
+    msg = f"HTTP {e.code}"
+    detail = _extract_error_message(e.body)
+    if detail:
+        msg += f": {detail}"
+    if e.code in (401, 403) and not (e.headers.get("X-RateLimit-Remaining") == "0"):
+        msg += "  (check `ghtk auth status`; the token may be wrong, expired, or missing a scope)"
+    if e.headers.get("X-RateLimit-Remaining") == "0":
+        reset = e.headers.get("X-RateLimit-Reset")
+        if reset and reset.isdigit():
+            msg += f"  (rate limit exhausted; resets in ~{int(float(reset) - time.time())}s)"
+    code = {401: EX_AUTH, 403: EX_AUTH, 404: EX_NOTFOUND}.get(e.code, EX_API)
+    if e.headers.get("X-RateLimit-Remaining") == "0":
+        code = EX_API
+    die(code, msg)
+
+
+def rest(method, path, params=None, body=None, accept=GH_ACCEPT, expect="json", soft=False):
+    """REST call. expect: 'json' | 'bytes' | 'full' (returns (status, headers, bytes))."""
+    headers = _headers(accept)
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    try:
+        status, hdrs, raw = _open(method, _url(path, params), headers, data)
+    except ApiHTTPError as e:
+        if soft:
+            return None
+        _raise_http(e)
+    except ApiNetError as e:
+        if soft:
+            return None
+        die(EX_NET, _cert_help(e.exc) if e.cert else _net_help(e.exc))
+    if expect == "bytes":
+        return raw
+    if expect == "full":
+        return status, hdrs, raw
+    return json.loads(raw) if raw else {}
+
+
+def _post(path, body):
+    """POST JSON and return the parsed response, RAISING ApiHTTPError / ApiNetError so the
+    caller can discriminate error codes (unlike rest(soft=True), which swallows them)."""
+    headers = _headers()
+    headers["Content-Type"] = "application/json"
+    _status, _hdrs, rawb = _open("POST", _url(path), headers, json.dumps(body).encode())
+    return json.loads(rawb) if rawb else {}
+
+
+def _next_link(link_header):
+    if not link_header:
+        return None
+    for part in link_header.split(","):
+        m = re.search(r'<([^>]+)>\s*;\s*rel="next"', part)
+        if m:
+            return m.group(1)
+    return None
+
+
+def rest_all(path, params=None, accept=GH_ACCEPT, container_key=None, cap=None, soft=False):
+    """GET, following Link: rel=next. Returns (items, truncated).
+    container_key: for endpoints returning {..., <key>: [...]} (e.g. check_runs)."""
+    url = _url(path, params)
+    headers = _headers(accept)
+    items, truncated = [], False
+    while url:
+        try:
+            status, hdrs, raw = _open("GET", url, headers)
+        except ApiHTTPError as e:
+            if soft:
+                return items, truncated
+            _raise_http(e)
+        except ApiNetError as e:
+            if soft:
+                return items, truncated
+            die(EX_NET, _cert_help(e.exc) if e.cert else _net_help(e.exc))
+        data = json.loads(raw) if raw else ([] if container_key is None else {})
+        page = data.get(container_key, []) if container_key else (data if isinstance(data, list) else [])
+        items.extend(page)
+        if cap and len(items) >= cap:
+            items = items[:cap]
+            truncated = truncated or bool(_next_link(hdrs.get("Link")))
+            break
+        url = _next_link(hdrs.get("Link"))
+    return items, truncated
+
+
+def graphql(query, variables=None, soft=False):
+    """POST to the GraphQL endpoint. Unwraps `data`, raising on the errors[] array
+    (which GitHub returns INSIDE an HTTP 200)."""
+    headers = _headers("application/json")
+    data = json.dumps({"query": query, "variables": variables or {}}).encode()
+    try:
+        status, hdrs, raw = _open("POST", GRAPHQL_URL, headers, data)
+    except ApiHTTPError as e:
+        if soft:
+            return None
+        _raise_http(e)
+    except ApiNetError as e:
+        if soft:
+            return None
+        die(EX_NET, _cert_help(e.exc) if e.cert else _net_help(e.exc))
+    payload = json.loads(raw) if raw else {}
+    if payload.get("errors"):
+        msgs = "; ".join(e.get("message", "") for e in payload["errors"] if isinstance(e, dict))
+        if soft:
+            return None
+        die(EX_API, f"GraphQL error: {msgs or payload['errors']}")
+    return payload.get("data") or {}
+
+
+# --------------------------------------------------------------------------- #
+# repo / PR reference resolution
+# --------------------------------------------------------------------------- #
+def _git(args):
+    try:
+        out = subprocess.run(["git"] + args, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def _parse_owner_repo(url):
+    if not url:
+        return None
+    m = re.search(r"github\.com[:/]+([^/]+)/(.+?)(?:\.git)?/?$", url.strip())
+    if m:
+        return m.group(1), m.group(2)
+    return None
+
+
+_REPO_OVERRIDE = None  # set from argv in main(): a universal --repo/-R usable in any position
+
+
+def resolve_repo(repo_arg):
+    """Return (owner, repo) from --repo owner/repo (any position), else the git 'origin' remote."""
+    repo_arg = repo_arg or _REPO_OVERRIDE
+    if repo_arg:
+        if "/" not in repo_arg:
+            die(EX_USAGE, f"--repo expects owner/repo, got: {repo_arg}")
+        owner, repo = repo_arg.split("/", 1)
+        return owner, repo.removesuffix(".git")
+    for remote in ("origin", "upstream"):
+        got = _parse_owner_repo(_git(["remote", "get-url", remote]))
+        if got:
+            return got
+    die(EX_USAGE, "could not determine the repository. Pass --repo owner/repo, "
+                  "or run inside a git checkout with a github.com remote.")
+
+
+def parse_ref(ref, owner, repo):
+    """Parse a PR ref into (owner, repo, number|None). A URL overrides owner/repo."""
+    if ref is None:
+        return owner, repo, None
+    ref = ref.strip()
+    m = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", ref)
+    if m:
+        return m.group(1), m.group(2), int(m.group(3))
+    m = re.fullmatch(r"#?(\d+)", ref)
+    if m:
+        return owner, repo, int(m.group(1))
+    die(EX_USAGE, f"could not parse a PR reference from: {ref} "
+                  "(pass a number, #number, or a .../pull/<n> URL)")
+
+
+def find_pr_by_branch(owner, repo, branch):
+    prs = rest("GET", f"/repos/{owner}/{repo}/pulls",
+               params={"head": f"{owner}:{branch}", "state": "all", "per_page": 30})
+    if not prs:  # fork head owners differ; fall back to scanning open PRs by head ref
+        prs = [p for p in rest("GET", f"/repos/{owner}/{repo}/pulls",
+                                params={"state": "open", "per_page": 100})
+               if (p.get("head") or {}).get("ref") == branch]
+    if not prs:
+        die(EX_NOTFOUND, f"no pull request found for branch '{branch}' in {owner}/{repo}")
+    prs.sort(key=lambda p: 0 if p.get("state") == "open" else 1)
+    return prs[0]
+
+
+def _url_ref(ref):
+    """(owner, repo, number) if ref is a PR/issue URL, else None."""
+    m = re.search(r"github\.com/([^/]+)/([^/]+)/(?:pull|issues)/(\d+)", (ref or "").strip())
+    return (m.group(1), m.group(2), int(m.group(3))) if m else None
+
+
+def resolve_pr(args, need_obj=False):
+    """Return (owner, repo, number, pr_obj_or_None). Handles URL/number/current-branch.
+    A full URL carries owner/repo, so it does not require a git remote."""
+    u = _url_ref(getattr(args, "ref", None))
+    if u:
+        owner, repo, num = u
+    else:
+        owner, repo = resolve_repo(getattr(args, "repo", None))
+        owner, repo, num = parse_ref(getattr(args, "ref", None), owner, repo)
+    if num is None:
+        branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+        if not branch or branch == "HEAD":
+            die(EX_USAGE, "no PR reference given and no current git branch to discover from")
+        pr = find_pr_by_branch(owner, repo, branch)
+        return owner, repo, pr["number"], pr
+    if need_obj:
+        return owner, repo, num, rest("GET", f"/repos/{owner}/{repo}/pulls/{num}")
+    return owner, repo, num, None
+
+
+def pr_summary(pr, owner, repo):
+    return {
+        "number": pr.get("number"),
+        "url": pr.get("html_url"),
+        "title": pr.get("title"),
+        "branch": (pr.get("head") or {}).get("ref"),
+        "baseRef": (pr.get("base") or {}).get("ref"),
+        "state": "draft" if pr.get("draft") else pr.get("state"),
+        "owner": owner,
+        "repo": repo,
+        "headSha": (pr.get("head") or {}).get("sha"),
+        "author": (pr.get("user") or {}).get("login"),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# commands: pr - get / diff / files
+# --------------------------------------------------------------------------- #
+def cmd_pr_get(args):
+    owner, repo, num, pr = resolve_pr(args, need_obj=True)
+    if args.raw:
+        return jdump(pr)
+    out = pr_summary(pr, owner, repo)
+    if args.json:
+        return jdump(out)
+    print(f"#{out['number']}  {out['state']}  {out['title']}")
+    print(f"branch:  {out['branch']} -> {out['baseRef']}")
+    print(f"author:  {out['author']}    head: {(out['headSha'] or '')[:12]}")
+    print(f"url:     {out['url']}")
+
+
+def cmd_pr_diff(args):
+    owner, repo, num, _ = resolve_pr(args)
+    if args.name_only:
+        files, truncated = rest_all(f"/repos/{owner}/{repo}/pulls/{num}/files", params={"per_page": 100})
+        names = [f.get("filename") for f in files]
+        if args.json:
+            return jdump({"files": names, "truncated": truncated})
+        for n in names:
+            print(n)
+        if truncated:
+            eprint("warning: file list truncated")
+        return
+    diff = rest("GET", f"/repos/{owner}/{repo}/pulls/{num}", accept=DIFF_ACCEPT, expect="bytes")
+    if args.json:
+        return jdump({"diff": diff.decode("utf-8", "replace")})
+    sys.stdout.buffer.write(diff)
+    if diff and not diff.endswith(b"\n"):
+        sys.stdout.write("\n")
+
+
+def cmd_pr_files(args):
+    owner, repo, num, _ = resolve_pr(args)
+    files, truncated = rest_all(f"/repos/{owner}/{repo}/pulls/{num}/files", params={"per_page": 100})
+    out = [{"path": f.get("filename"), "status": f.get("status"),
+            "additions": f.get("additions"), "deletions": f.get("deletions")} for f in files]
+    if args.json:
+        return jdump({"files": out, "count": len(out), "truncated": truncated})
+    for f in out:
+        print(f"{f['status']:<9} +{f['additions']:<5} -{f['deletions']:<5} {f['path']}")
+    print(f"({len(out)} file{'s' if len(out) != 1 else ''}{', truncated' if truncated else ''})")
+
+
+# --------------------------------------------------------------------------- #
+# commands: pr - threads (GraphQL)
+# --------------------------------------------------------------------------- #
+_THREADS_QUERY = """
+query($owner:String!,$repo:String!,$number:Int!,$cursor:String){
+  repository(owner:$owner,name:$repo){
+    pullRequest(number:$number){
+      reviewThreads(first:100, after:$cursor){
+        pageInfo{ hasNextPage endCursor }
+        nodes{
+          id isResolved isOutdated path line startLine diffSide
+          comments(first:100){
+            pageInfo{ hasNextPage }
+            nodes{ id databaseId body createdAt author{ login __typename } }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _fetch_threads(owner, repo, number):
+    threads, cursor = [], None
+    while True:
+        data = graphql(_THREADS_QUERY, {"owner": owner, "repo": repo, "number": number, "cursor": cursor})
+        pr = ((data.get("repository") or {}).get("pullRequest")) or {}
+        rt = pr.get("reviewThreads") or {}
+        threads.extend(rt.get("nodes") or [])
+        page = rt.get("pageInfo") or {}
+        if page.get("hasNextPage"):
+            cursor = page.get("endCursor")
+        else:
+            break
+    return threads
+
+
+def cmd_pr_threads(args):
+    owner, repo, num, _ = resolve_pr(args)
+    raw_threads = _fetch_threads(owner, repo, num)
+    out = []
+    for t in raw_threads:
+        if args.unresolved_only and t.get("isResolved"):
+            continue
+        if not args.include_outdated and t.get("isOutdated"):
+            continue
+        cwrap = t.get("comments") or {}
+        comments = cwrap.get("nodes") or []
+        bodies = [c.get("body") or "" for c in comments]
+        first_author = ((comments[0].get("author") or {}).get("login") if comments else "") or ""
+        is_mine = bool(args.marker) and any(args.marker in b for b in bodies)
+        if args.mine_only and not is_mine:
+            continue
+        if args.author_substr and args.author_substr.lower() not in first_author.lower():
+            continue
+        out.append({
+            "id": t.get("id"),
+            "isResolved": t.get("isResolved"),
+            "isOutdated": t.get("isOutdated"),
+            "path": t.get("path"),
+            "line": t.get("line"),
+            "startLine": t.get("startLine"),
+            "diffSide": t.get("diffSide"),
+            "isMine": is_mine,
+            "commentsTruncated": bool((cwrap.get("pageInfo") or {}).get("hasNextPage")),
+            "comments": [{
+                "id": c.get("id"),
+                "databaseId": c.get("databaseId"),
+                "author": (c.get("author") or {}).get("login"),
+                "isBot": (c.get("author") or {}).get("__typename") == "Bot",
+                "createdAt": c.get("createdAt"),
+                "body": c.get("body"),
+            } for c in comments],
+        })
+    if args.json:
+        return jdump({"threads": out, "count": len(out)})
+    if not out:
+        print("(no matching threads)")
+        return
+    for t in out:
+        flags = []
+        if t["isResolved"]:
+            flags.append("resolved")
+        if t["isOutdated"]:
+            flags.append("outdated")
+        loc = f"{t['path']}:{t['line']}" if t["path"] else "(no location)"
+        print(f"{t['id']}  {loc}  {'[' + ','.join(flags) + '] ' if flags else ''}({len(t['comments'])} comment(s))")
+        for c in t["comments"]:
+            first = (c["body"] or "").strip().splitlines()[0] if c["body"] else ""
+            print(f"    - {c['author']}{' (bot)' if c['isBot'] else ''}: {first[:120]}")
+
+
+# --------------------------------------------------------------------------- #
+# commands: pr - reviews
+# --------------------------------------------------------------------------- #
+def _fetch_reviews(owner, repo, num):
+    reviews, _ = rest_all(f"/repos/{owner}/{repo}/pulls/{num}/reviews", params={"per_page": 100})
+    return [{"author": (r.get("user") or {}).get("login"),
+             "type": (r.get("user") or {}).get("type"),  # "User" | "Bot"
+             "state": r.get("state"),
+             "submittedAt": r.get("submitted_at")} for r in reviews]
+
+
+def cmd_pr_reviews(args):
+    owner, repo, num, _ = resolve_pr(args)
+    out = _fetch_reviews(owner, repo, num)
+    if args.json:
+        return jdump({"reviews": out, "count": len(out)})
+    if not out:
+        print("(no reviews)")
+        return
+    for r in out:
+        print(f"{r['author']:<20} {r['type']:<6} {r['state']}")
+
+
+# --------------------------------------------------------------------------- #
+# commands: pr - checks (check-runs + legacy commit statuses)
+# --------------------------------------------------------------------------- #
+FAIL_CONCLUSIONS = {"failure", "timed_out", "action_required", "cancelled", "stale", "startup_failure"}
+PASS_CONCLUSIONS = {"success", "neutral", "skipped"}
+
+
+def _bucket_check_run(cr):
+    if cr.get("status") != "completed":
+        return "pending"
+    return "fail" if cr.get("conclusion") in FAIL_CONCLUSIONS else "pass"
+
+
+def _bucket_status(state):
+    return {"success": "pass", "pending": "pending"}.get(state, "fail")  # failure/error -> fail
+
+
+def _collect_checks(owner, repo, sha):
+    """Merge Actions check-runs AND legacy commit statuses into one list.
+    Querying only check-runs would make status-only CI look green (a real trap)."""
+    runs, _ = rest_all(f"/repos/{owner}/{repo}/commits/{sha}/check-runs",
+                       params={"per_page": 100}, container_key="check_runs")
+    checks = [{"name": cr.get("name"), "type": "check_run", "bucket": _bucket_check_run(cr),
+               "conclusion": cr.get("conclusion"), "status": cr.get("status"),
+               "link": cr.get("details_url"), "details_url": cr.get("details_url"),
+               "app": (cr.get("app") or {}).get("slug")} for cr in runs]
+    combined = rest("GET", f"/repos/{owner}/{repo}/commits/{sha}/status", params={"per_page": 100})
+    seen = set()
+    for st in (combined.get("statuses") or []):
+        ctx = st.get("context")
+        if ctx in seen:
+            continue
+        seen.add(ctx)
+        checks.append({"name": ctx, "type": "status", "bucket": _bucket_status(st.get("state")),
+                       "conclusion": st.get("state"), "status": st.get("state"),
+                       "link": st.get("target_url"), "details_url": st.get("target_url"), "app": None})
+    return checks
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def _fetch_job_log_text(path):
+    """GET a job-logs endpoint that 302-redirects to signed blob storage. urllib would
+    forward the Authorization header to the blob host (-> 401), so follow the redirect
+    manually WITHOUT auth. The CA context must be on the opener (build_opener's default
+    HTTPS handler uses the possibly-empty system store). Returns text or None."""
+    ctx = build_ssl_context()
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx), _NoRedirect)
+    try:
+        with opener.open(urllib.request.Request(_url(path), headers=_headers()), timeout=DEFAULT_TIMEOUT) as r:
+            return r.read().decode("utf-8", "replace")  # GHES may return logs directly
+    except urllib.error.HTTPError as e:
+        if e.code in (301, 302, 303, 307, 308) and e.headers.get("Location"):
+            try:
+                loc = urllib.request.Request(e.headers["Location"], headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(loc, timeout=DEFAULT_TIMEOUT, context=ctx) as r2:
+                    return r2.read().decode("utf-8", "replace")
+            except Exception:
+                return None
+        return None
+    except (urllib.error.URLError, ssl.SSLError, http.client.HTTPException, ConnectionError, OSError):
+        return None
+
+
+def _job_logs(owner, repo, details_url):
+    """Failed-job logs for an Actions check run, via .../jobs/{id}/logs (302 -> plaintext)."""
+    m = re.search(r"/job/(\d+)", details_url or "")
+    job_ids = [m.group(1)] if m else []
+    if not job_ids:  # only a run id in the URL: list its failed jobs
+        mr = re.search(r"/runs/(\d+)", details_url or "")
+        if not mr:
+            return None
+        jobs, _ = rest_all(f"/repos/{owner}/{repo}/actions/runs/{mr.group(1)}/jobs",
+                           params={"per_page": 100, "filter": "latest"}, container_key="jobs", soft=True)
+        job_ids = [str(j.get("id")) for j in jobs if j.get("conclusion") in FAIL_CONCLUSIONS]
+    chunks = []
+    for jid in job_ids[:5]:
+        text = _fetch_job_log_text(f"/repos/{owner}/{repo}/actions/jobs/{jid}/logs")
+        if text:
+            chunks.append(text[-5000:] if len(text) > 5000 else text)
+    return "\n---\n".join(chunks) if chunks else None
+
+
+def cmd_pr_checks(args):
+    owner, repo, num, pr = resolve_pr(args, need_obj=True)
+    sha = (pr.get("head") or {}).get("sha")
+    checks = _collect_checks(owner, repo, sha)
+    if args.failing_only:
+        checks = [c for c in checks if c["bucket"] == "fail"]
+    summary = {"total": len(checks),
+               "pass": sum(c["bucket"] == "pass" for c in checks),
+               "fail": sum(c["bucket"] == "fail" for c in checks),
+               "pending": sum(c["bucket"] == "pending" for c in checks)}
+    if args.logs:
+        for c in checks:
+            if c["bucket"] == "fail" and c["type"] == "check_run":
+                c["logs"] = _job_logs(owner, repo, c.get("details_url"))
+    if args.json:
+        return jdump({"sha": sha, "summary": summary, "checks": checks})
+    for c in checks:
+        print(f"{c['bucket']:<8} {c['type']:<10} {c['name']}  ({c['conclusion'] or c['status']})")
+        if args.logs and c.get("logs"):
+            print("  --- failed job logs (tail) ---")
+            for line in c["logs"].splitlines()[-40:]:
+                print(f"  {line}")
+    print(f"total={summary['total']} pass={summary['pass']} fail={summary['fail']} pending={summary['pending']}")
+
+
+# --------------------------------------------------------------------------- #
+# commands: pr - scan (open PR queue with composable filters)
+# --------------------------------------------------------------------------- #
+def cmd_pr_scan(args):
+    owner, repo = resolve_repo(getattr(args, "repo", None))
+    prs, _ = rest_all(f"/repos/{owner}/{repo}/pulls", params={"state": "open", "per_page": 100},
+                      cap=args.limit if args.limit else None)
+    out = []
+    for pr in prs:
+        num = pr.get("number")
+        if args.drop_drafts and pr.get("draft"):
+            continue
+        row = {"number": num, "url": pr.get("html_url"), "title": pr.get("title"),
+               "author": (pr.get("user") or {}).get("login"), "isDraft": pr.get("draft")}
+        if args.drop_human_reviewed:
+            if any(r["type"] == "User" for r in _fetch_reviews(owner, repo, num)):
+                continue
+        if args.file_glob:
+            files, _ = rest_all(f"/repos/{owner}/{repo}/pulls/{num}/files", params={"per_page": 100})
+            names = [f.get("filename", "") for f in files]
+            per_file = [any(fnmatch.fnmatch(n, g) for g in args.file_glob) for n in names]
+            keep = (bool(per_file) and all(per_file)) if args.all_files_match else any(per_file)
+            if not keep:
+                continue
+            row["file_count"] = len(names)
+        if args.drop_ci_failing:
+            sha = (pr.get("head") or {}).get("sha")
+            if any(c["bucket"] == "fail" for c in _collect_checks(owner, repo, sha)):
+                continue
+            row["ci_status"] = "not-failing"
+        out.append(row)
+    if args.json:
+        return jdump({"prs": out, "count": len(out)})
+    if not out:
+        print("(no matching open PRs)")
+        return
+    for r in out:
+        print(f"#{r['number']:<6} {r['author']:<18} {r['title']}")
+    print(f"({len(out)} PR{'s' if len(out) != 1 else ''})")
+
+
+# --------------------------------------------------------------------------- #
+# commands: pr - comment (batched inline review, WRITE)
+# --------------------------------------------------------------------------- #
+def _load_comments_file(path):
+    try:
+        data = json.loads(sys.stdin.read() if path == "-" else Path(path).read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        die(EX_USAGE, f"could not read comments file {path}: {e}")
+    if not isinstance(data, list):
+        die(EX_USAGE, "comments file must be a JSON array of {path,line,body[,side,start_line]}")
+    return data
+
+
+def _build_review_comment(c, marker):
+    body = c.get("body", "")
+    if marker and marker not in body:
+        body = f"{marker}\n{body}"
+    out = {"path": c["path"], "body": body}
+    for k_in, k_out in (("line", "line"), ("side", "side"), ("start_line", "start_line"), ("start_side", "start_side")):
+        if c.get(k_in) is not None:
+            out[k_out] = c[k_in]
+    return out
+
+
+def cmd_pr_comment(args):
+    owner, repo, num, pr = resolve_pr(args, need_obj=True)
+    sha = (pr.get("head") or {}).get("sha")
+    raw = _load_comments_file(args.comments_file)
+    comments = [_build_review_comment(c, args.marker) for c in raw]
+    payload = {"commit_id": sha, "event": "COMMENT", "comments": comments}
+    path = f"/repos/{owner}/{repo}/pulls/{num}/reviews"
+    if args.dry_run:
+        print(f"DRY RUN: POST {API_ROOT}{path}")
+        print(json.dumps(payload, indent=2))
+        return
+    try:
+        _post(path, payload)
+        print(f"posted review with {len(comments)} comment(s) to #{num}")
+        return
+    except ApiNetError as e:
+        die(EX_NET, _cert_help(e.exc) if e.cert else _net_help(e.exc))
+    except ApiHTTPError as e:
+        # ONLY a 422 for lines outside the diff triggers the per-comment fallback. Auth (403),
+        # not-found (404), and rate-limit are real failures -- never masquerade as "dropped".
+        if not (e.code == 422 and "diff" in (e.body or "").lower()):
+            _raise_http(e)
+    # Fallback: re-post each comment on its own; out-of-diff lines 422 (dropped), valid ones land.
+    posted, dropped = 0, []
+    for c in comments:
+        single = dict(c, commit_id=sha)
+        try:
+            _post(f"/repos/{owner}/{repo}/pulls/{num}/comments", single)
+            posted += 1
+        except ApiHTTPError as e:
+            if e.code == 422:
+                dropped.append(f"{c.get('path')}:{c.get('line')}")
+            else:
+                _raise_http(e)
+        except ApiNetError as e:
+            die(EX_NET, _cert_help(e.exc) if e.cert else _net_help(e.exc))
+    result = {"posted": posted, "dropped": len(dropped), "dropped_locations": dropped}
+    if args.json:
+        jdump(result)
+    else:
+        print(f"posted {posted} comment(s) to #{num}" + (f"; dropped {len(dropped)}: {', '.join(dropped)}" if dropped else ""))
+    if posted == 0:
+        sys.exit(EX_API)  # nothing landed -- signal failure, do not exit 0
+
+
+# --------------------------------------------------------------------------- #
+# commands: pr - reply / resolve (GraphQL, WRITE)
+# --------------------------------------------------------------------------- #
+_REPLY_MUTATION = """
+mutation($threadId:ID!,$body:String!){
+  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId, body:$body}){
+    comment{ id url }
+  }
+}
+"""
+
+_RESOLVE_MUTATION = """
+mutation($threadId:ID!){
+  resolveReviewThread(input:{threadId:$threadId}){
+    thread{ id isResolved }
+  }
+}
+"""
+
+
+def cmd_pr_reply(args):
+    body = read_body_arg(args.body, args.body_file)
+    if not body.strip():
+        die(EX_USAGE, "reply body is empty (pass a body or --body-file)")
+    variables = {"threadId": args.thread_id, "body": body}
+    if args.dry_run:
+        print(f"DRY RUN: POST {GRAPHQL_URL}  (addPullRequestReviewThreadReply)")
+        print(json.dumps(variables, indent=2))
+        return
+    data = graphql(_REPLY_MUTATION, variables)
+    comment = ((data.get("addPullRequestReviewThreadReply") or {}).get("comment")) or {}
+    if args.json:
+        return jdump({"threadId": args.thread_id, "commentId": comment.get("id"), "url": comment.get("url")})
+    print(f"replied to thread {args.thread_id} (comment {comment.get('id')})")
+
+
+def cmd_pr_resolve(args):
+    variables = {"threadId": args.thread_id}
+    if args.dry_run:
+        print(f"DRY RUN: POST {GRAPHQL_URL}  (resolveReviewThread)")
+        print(json.dumps(variables, indent=2))
+        return
+    data = graphql(_RESOLVE_MUTATION, variables)
+    thread = ((data.get("resolveReviewThread") or {}).get("thread")) or {}
+    if args.json:
+        return jdump({"threadId": args.thread_id, "isResolved": thread.get("isResolved")})
+    print(f"resolved thread {args.thread_id} (isResolved={thread.get('isResolved')})")
+
+
+# --------------------------------------------------------------------------- #
+# commands: pr - create (WRITE)
+# --------------------------------------------------------------------------- #
+def cmd_pr_create(args):
+    owner, repo = resolve_repo(getattr(args, "repo", None))
+    body = read_body_arg(args.body, args.body_file)
+    payload = {"title": args.title, "head": args.head, "base": args.base, "body": body}
+    if args.draft:
+        payload["draft"] = True
+    path = f"/repos/{owner}/{repo}/pulls"
+    if args.dry_run:
+        print(f"DRY RUN: POST {API_ROOT}{path}")
+        print(json.dumps(payload, indent=2))
+        return
+    res = rest("POST", path, body=payload)
+    if args.json:
+        return jdump({"number": res.get("number"), "url": res.get("html_url")})
+    print(f"created PR #{res.get('number')}: {res.get('html_url')}")
+
+
+# --------------------------------------------------------------------------- #
+# commands: issue - get
+# --------------------------------------------------------------------------- #
+def cmd_issue_get(args):
+    u = _url_ref(args.ref)
+    if u:
+        owner, repo, num = u
+    else:
+        owner, repo = resolve_repo(getattr(args, "repo", None))
+        m = re.fullmatch(r"#?(\d+)", (args.ref or "").strip())
+        if not m:
+            die(EX_USAGE, f"issue get expects a number, #number, or issue URL, got: {args.ref}")
+        num = int(m.group(1))
+    issue = rest("GET", f"/repos/{owner}/{repo}/issues/{num}")
+    if args.raw:
+        return jdump(issue)
+    out = {"number": issue.get("number"), "title": issue.get("title"), "state": issue.get("state"),
+           "author": (issue.get("user") or {}).get("login"),
+           "labels": [l.get("name") for l in issue.get("labels", [])],
+           "isPullRequest": "pull_request" in issue, "body": issue.get("body") or ""}
+    if args.comments:
+        cs, _ = rest_all(f"/repos/{owner}/{repo}/issues/{num}/comments", params={"per_page": 100})
+        out["comments"] = [{"author": (c.get("user") or {}).get("login"),
+                            "createdAt": c.get("created_at"), "body": c.get("body")} for c in cs]
+    if args.json:
+        return jdump(out)
+    print(f"#{out['number']}  {out['state']}  {out['title']}")
+    print(f"author:  {out['author']}" + (f"   labels: {', '.join(out['labels'])}" if out['labels'] else ""))
+    print("\n" + (out["body"] or "(no description)"))
+    if args.comments:
+        print(f"\nComments ({len(out['comments'])}):")
+        for c in out["comments"]:
+            print(f"- {c['author']} [{(c['createdAt'] or '')[:10]}]: {(c['body'] or '').strip()}")
+
+
+# --------------------------------------------------------------------------- #
+# commands: commit - prs
+# --------------------------------------------------------------------------- #
+def cmd_commit_prs(args):
+    owner, repo = resolve_repo(getattr(args, "repo", None))
+    prs, _ = rest_all(f"/repos/{owner}/{repo}/commits/{args.sha}/pulls", params={"per_page": 100})
+    out = [{"number": p.get("number"), "url": p.get("html_url"),
+            "title": p.get("title"), "state": p.get("state")} for p in prs]
+    if args.json:
+        return jdump({"prs": out, "count": len(out)})
+    if not out:
+        print("(no pull requests introduced this commit)")
+        return
+    for p in out:
+        print(f"#{p['number']}  {p['state']}  {p['title']}")
+
+
+# --------------------------------------------------------------------------- #
+# commands: auth / doctor
+# --------------------------------------------------------------------------- #
+def cmd_auth_login(args):
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    try:
+        if args.token_stdin:
+            token = sys.stdin.readline().strip()
+        elif not token:
+            token = getpass.getpass("GitHub token (create at https://github.com/settings/tokens): ").strip()
+    except EOFError:
+        die(EX_USAGE, "no interactive terminal available for `auth login`. Run it in a normal terminal, "
+                      "or pipe the token with --token-stdin, or just set GITHUB_TOKEN / use `gh auth login`.")
+    if not token:
+        die(EX_USAGE, "a token is required")
+    global _TOKEN_CACHE
+    _TOKEN_CACHE = (token, "login")
+    me = rest("GET", "/user")
+    save_auth(token)
+    if args.json:
+        return jdump({"login": me.get("login"), "saved": str(AUTH_FILE)})
+    print(f"authenticated as {me.get('login')}")
+    print(f"token saved to {AUTH_FILE} (chmod 600)")
+
+
+def cmd_auth_status(args):
+    token, source = load_token(require=False)
+    if not token:
+        die(EX_AUTH, "not authenticated. Set GITHUB_TOKEN, run `gh auth login`, or `ghtk auth login`.")
+    me = rest("GET", "/user", soft=True)
+    if me is None:
+        die(EX_AUTH, f"token found (source: {source}) but /user failed -- it may be invalid or expired")
+    if args.json:
+        return jdump({"login": me.get("login"), "source": source})
+    print(f"login:  {me.get('login')}")
+    print(f"source: {source}")
+
+
+def cmd_auth_logout(args):
+    existed = AUTH_FILE.exists()
+    if existed:
+        AUTH_FILE.unlink()
+    if args.json:
+        return jdump({"removed": existed, "path": str(AUTH_FILE)})
+    print(f"removed {AUTH_FILE}" if existed else "no saved credentials (env / gh tokens are managed elsewhere)")
+
+
+def cmd_doctor(args):
+    ca_removed = None
+    if args.fix_ca:
+        try:
+            CA_CACHE.unlink()
+            ca_removed = True
+        except FileNotFoundError:
+            ca_removed = False
+        except OSError as e:
+            ca_removed = False
+            if not args.json:
+                eprint(f"could not remove {CA_CACHE}: {e}")
+    ctx = build_ssl_context()
+    n = ctx.cert_store_stats().get("x509", 0)
+    token, source = load_token(require=False)
+    login, github_ok = None, None
+    if token:
+        me = rest("GET", "/user", soft=True)
+        github_ok = me is not None
+        login = me.get("login") if me else None
+
+    if args.json:
+        out = {"version": VERSION, "python": platform.python_version(), "platform": platform.system(),
+               "ca_certs": n, "token_source": source, "github_ok": github_ok, "login": login}
+        if ca_removed is not None:
+            out["ca_cache_removed"] = ca_removed
+        jdump(out)
+        if token and github_ok is False:
+            sys.exit(EX_NET)
+        return
+
+    if ca_removed is True:
+        print(f"removed cached CA bundle {CA_CACHE}")
+    elif ca_removed is False and args.fix_ca:
+        print("no cached CA bundle to remove")
+    print(f"github-toolkit {VERSION}")
+    print(f"python:  {platform.python_version()} ({platform.system()})")
+    if n:
+        print(f"TLS CA:  {n} certificate(s) loaded")
+    else:
+        print("TLS CA:  0 certificates  [!] empty trust store -- HTTPS will fail")
+        print("         fix: install CA certs (Debian: apt-get install -y ca-certificates; "
+              "Rocky/RHEL: dnf install -y ca-certificates),")
+        print("              or `pip install certifi`, or set GITHUB_CA_BUNDLE=/path/to/ca-bundle.crt")
+    if not token:
+        print("auth:    not configured  -> set GITHUB_TOKEN, run `gh auth login`, or `ghtk auth login`")
+        return
+    print(f"token:   present (source: {source})")
+    if github_ok:
+        print(f"github:  OK -- {login}  (api.github.com reachable)")
+    else:
+        print("github:  FAILED -- /user did not return 200 (token invalid/expired, or network; "
+              "if it only fails in a sandbox the CA fix above should have handled it)")
+        sys.exit(EX_NET)
+
+
+# --------------------------------------------------------------------------- #
+# argument parser
+# --------------------------------------------------------------------------- #
+def _group_default_help(parser):
+    parser.set_defaults(func=lambda a, _p=parser: _p.print_help())
+
+
+def _repo_parent():
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--repo", "-R", metavar="OWNER/REPO",
+                   help="target repo, usable in any position (default: the git 'origin' remote)")
+    return p
+
+
+def add_pr_commands(sp, repo_parent):
+    g = sp.add_parser("get", parents=[repo_parent], help="resolve a PR (URL / number / current branch)")
+    g.add_argument("ref", nargs="?", help="PR URL, number, #number, or omit for the current branch")
+    g.add_argument("--json", action="store_true")
+    g.add_argument("--raw", action="store_true")
+    g.set_defaults(func=cmd_pr_get)
+
+    d = sp.add_parser("diff", parents=[repo_parent], help="unified diff (or --name-only file list)")
+    d.add_argument("ref", nargs="?")
+    d.add_argument("--name-only", action="store_true", help="list changed file paths only")
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(func=cmd_pr_diff)
+
+    fl = sp.add_parser("files", parents=[repo_parent], help="changed files with stats")
+    fl.add_argument("ref", nargs="?")
+    fl.add_argument("--json", action="store_true")
+    fl.set_defaults(func=cmd_pr_files)
+
+    t = sp.add_parser("threads", parents=[repo_parent], help="review threads (GraphQL)")
+    t.add_argument("ref", nargs="?")
+    t.add_argument("--unresolved-only", action="store_true")
+    t.add_argument("--include-outdated", action="store_true", help="keep outdated threads (dropped by default)")
+    t.add_argument("--mine-only", action="store_true", help="only threads containing --marker")
+    t.add_argument("--marker", help="hidden marker string identifying this skill's comments")
+    t.add_argument("--author-substr", help="only threads whose FIRST comment author login contains this")
+    t.add_argument("--json", action="store_true")
+    t.set_defaults(func=cmd_pr_threads)
+
+    rv = sp.add_parser("reviews", parents=[repo_parent], help="list reviews (human vs bot)")
+    rv.add_argument("ref", nargs="?")
+    rv.add_argument("--json", action="store_true")
+    rv.set_defaults(func=cmd_pr_reviews)
+
+    ck = sp.add_parser("checks", parents=[repo_parent], help="CI status (check-runs + commit statuses)")
+    ck.add_argument("ref", nargs="?")
+    ck.add_argument("--failing-only", action="store_true")
+    ck.add_argument("--logs", action="store_true", help="fetch failed Actions job logs (tail)")
+    ck.add_argument("--json", action="store_true")
+    ck.set_defaults(func=cmd_pr_checks)
+
+    sc = sp.add_parser("scan", parents=[repo_parent], help="scan the open PR queue with composable filters")
+    sc.add_argument("--drop-drafts", action="store_true")
+    sc.add_argument("--drop-human-reviewed", action="store_true")
+    sc.add_argument("--drop-ci-failing", action="store_true")
+    sc.add_argument("--file-glob", action="append", metavar="GLOB", help="keep PRs touching a matching file (repeatable)")
+    sc.add_argument("--all-files-match", action="store_true", help="with --file-glob, keep a PR only if EVERY changed file matches (default: any match)")
+    sc.add_argument("--limit", type=int, default=100, help="max open PRs to consider (0 = unbounded)")
+    sc.add_argument("--json", action="store_true")
+    sc.set_defaults(func=cmd_pr_scan)
+
+    cm = sp.add_parser("comment", parents=[repo_parent], help="post batched inline review comments (WRITE)")
+    cm.add_argument("ref", nargs="?")
+    cm.add_argument("--comments-file", required=True, help="JSON array of {path,line,body[,side,start_line]} ('-' = stdin)")
+    cm.add_argument("--marker", required=True, help="hidden marker prefixed to each comment body")
+    cm.add_argument("--dry-run", action="store_true", help="print the request; send nothing")
+    cm.add_argument("--json", action="store_true")
+    cm.set_defaults(func=cmd_pr_comment)
+
+    rp = sp.add_parser("reply", help="reply to a review thread (WRITE)")
+    rp.add_argument("thread_id", help="GraphQL review thread id (from `pr threads`)")
+    rp.add_argument("--body", help="reply text, or '-' for stdin")
+    rp.add_argument("--body-file", help="read reply body from a file ('-' = stdin)")
+    rp.add_argument("--dry-run", action="store_true")
+    rp.add_argument("--json", action="store_true")
+    rp.set_defaults(func=cmd_pr_reply)
+
+    rs = sp.add_parser("resolve", help="resolve a review thread (WRITE)")
+    rs.add_argument("thread_id", help="GraphQL review thread id (from `pr threads`)")
+    rs.add_argument("--dry-run", action="store_true")
+    rs.add_argument("--json", action="store_true")
+    rs.set_defaults(func=cmd_pr_resolve)
+
+    cr = sp.add_parser("create", parents=[repo_parent], help="create a pull request (WRITE)")
+    cr.add_argument("--base", required=True, help="base branch")
+    cr.add_argument("--head", required=True, help="head branch (or owner:branch for a fork)")
+    cr.add_argument("--title", required=True)
+    cr.add_argument("--body", help="PR body text, or '-' for stdin")
+    cr.add_argument("--body-file", help="read PR body from a file ('-' = stdin)")
+    cr.add_argument("--draft", action="store_true")
+    cr.add_argument("--dry-run", action="store_true")
+    cr.add_argument("--json", action="store_true")
+    cr.set_defaults(func=cmd_pr_create)
+
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="ghtk",
+        description="Streamlined GitHub CLI (PRs, issues, reviews, CI). stdlib-only, sandbox-friendly. "
+                    "Compact output by default; --json for structured output.")
+    p.add_argument("--version", action="version", version=f"github-toolkit {VERSION}")
+    sub = p.add_subparsers(dest="group", metavar="<group>")
+    repo_parent = _repo_parent()
+
+    pr = sub.add_parser("pr", help="pull requests: get, diff, files, threads, reviews, checks, scan, comment, reply, resolve, create")
+    prsub = pr.add_subparsers(metavar="<command>")
+    _group_default_help(pr)
+    add_pr_commands(prsub, repo_parent)
+
+    iss = sub.add_parser("issue", help="issues")
+    isub = iss.add_subparsers(metavar="<command>")
+    _group_default_help(iss)
+    ig = isub.add_parser("get", parents=[repo_parent], help="fetch an issue (or PR) body and comments")
+    ig.add_argument("ref", help="issue number, #number, or URL")
+    ig.add_argument("--comments", action="store_true")
+    ig.add_argument("--json", action="store_true")
+    ig.add_argument("--raw", action="store_true")
+    ig.set_defaults(func=cmd_issue_get)
+
+    com = sub.add_parser("commit", help="commit lookups")
+    csub = com.add_subparsers(metavar="<command>")
+    _group_default_help(com)
+    cp = csub.add_parser("prs", parents=[repo_parent], help="PRs that introduced a commit")
+    cp.add_argument("sha", help="commit sha (full or abbreviated)")
+    cp.add_argument("--json", action="store_true")
+    cp.set_defaults(func=cmd_commit_prs)
+
+    a = sub.add_parser("auth", help="authenticate and manage the saved token")
+    asub = a.add_subparsers(metavar="<subcommand>")
+    _group_default_help(a)
+    al = asub.add_parser("login", help="save a GitHub token")
+    al.add_argument("--token-stdin", action="store_true")
+    al.add_argument("--json", action="store_true")
+    al.set_defaults(func=cmd_auth_login)
+    ast_ = asub.add_parser("status", help="show current identity and token source")
+    ast_.add_argument("--json", action="store_true")
+    ast_.set_defaults(func=cmd_auth_status)
+    alo = asub.add_parser("logout", help="remove the saved token")
+    alo.add_argument("--json", action="store_true")
+    alo.set_defaults(func=cmd_auth_logout)
+
+    d = sub.add_parser("doctor", help="check TLS, token, and api.github.com reachability")
+    d.add_argument("--fix-ca", action="store_true")
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(func=cmd_doctor)
+
+    return p
+
+
+def _extract_repo(raw):
+    """Pull a universal --repo/-R (and value) out of argv, in any position, so it never
+    collides with a trailing `nargs='?'` positional in a subparser (an argparse quirk where
+    `--repo X <ref>` drops <ref>). Returns (repo_or_None, remaining_argv)."""
+    repo, out, i = None, [], 0
+    while i < len(raw):
+        a = raw[i]
+        if a in ("--repo", "-R") and i + 1 < len(raw):
+            repo = raw[i + 1]
+            i += 2
+            continue
+        if a.startswith("--repo="):
+            repo = a[len("--repo="):]
+            i += 1
+            continue
+        if a.startswith("-R") and not a.startswith("--") and len(a) > 2:
+            repo = a[2:]
+            i += 1
+            continue
+        out.append(a)
+        i += 1
+    return repo, out
+
+
+def main(argv=None):
+    global _REPO_OVERRIDE
+    from_cli = argv is None
+    raw = sys.argv[1:] if from_cli else list(argv)
+    if raw[:1] == ["--version"]:
+        print(f"github-toolkit {VERSION}")
+        return
+    _REPO_OVERRIDE, raw = _extract_repo(raw)
+    parser = build_parser()
+    args = parser.parse_args(raw)
+    func = getattr(args, "func", None)
+    if not func:
+        parser.print_help()
+        sys.exit(EX_USAGE)
+    try:
+        func(args)
+    except BrokenPipeError:
+        try:
+            sys.stdout.close()
+        finally:
+            os._exit(EX_OK)
+
+
+if __name__ == "__main__":
+    main()

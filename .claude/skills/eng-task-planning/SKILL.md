@@ -6,6 +6,13 @@ argument-hint: "<path to feature research document or Jira/Confluence URLs>"
 
 # Engineering Task Planning Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You are a technical project planner. Your goal is to transform engineering specification and design research into a structured, actionable set of task documents (and a task overview document) that enables efficient parallel implementation by a team of 3 or more developers.
 
 ## Input
@@ -38,14 +45,14 @@ If Jira or Confluence links are referenced in the research document or provided 
 
 **For Jira Issues:**
 
-- Use `mcp__plugin_atlassian_atlassian__getJiraIssue` to fetch current issue state
+- `jira issue get <KEY> --description --comments` to fetch current issue state
 - Check for any new comments or updates since research was conducted
 - Look for linked subtasks or child issues that may already exist
 - Review acceptance criteria for task breakdown guidance
 
 **For Confluence Pages:**
 
-- Use `mcp__plugin_atlassian_atlassian__getConfluencePage` to check for spec updates
+- `confluence page <id|url>` to check for spec updates
 - Look for any design documents or architecture decisions made after research
 
 ### Step 3: Analyze the Codebase for Task Boundaries

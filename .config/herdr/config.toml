@@ -1,0 +1,21 @@
+onboarding = false
+[theme]
+name = "nord"
+auto_switch = false
+
+[update]
+channel = "stable"
+version_check = true
+manifest_check = true
+
+[ui.toast]
+delivery = "herdr"
+
+[keys]
+prefix = "ctrl+space"
+
+[worktrees]
+directory = "~/Developer/sources/trees"
+
+[ui]
+show_agent_labels_on_pane_borders = false

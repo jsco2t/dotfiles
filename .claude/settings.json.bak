@@ -1,0 +1,215 @@
+{
+  "env": {
+    "ANTHROPIC_MODEL": "claude-opus-4-8[1m]",
+    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+    "CLAUDE_CODE_EFFORT_LEVEL": "max",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
+    "CLAUDE_CODE_SUPPRESS_SESSION_ATTRIBUTION": "1"
+  },
+  "includeCoAuthoredBy": false,
+  "permissions": {
+    "allow": [
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(go run *)",
+      "Bash(go vet *)",
+      "Bash(gofmt *)",
+      "Bash(cargo build *)",
+      "Bash(cargo test *)",
+      "Bash(cargo check *)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo run *)",
+      "Bash(python *)",
+      "Bash(pytest *)",
+      "Bash(pip install *)",
+      "Bash(make *)",
+      "Bash(mage *)",
+      "Bash(grep *)",
+      "Bash(tail:*)",
+      "Bash(head:*)",
+      "Bash(wc:*)",
+      "Bash(sort:*)",
+      "Bash(uniq:*)",
+      "Bash(cat:*)",
+      "Bash(cut:*)",
+      "Bash(column:*)",
+      "Bash(nl:*)",
+      "Bash(tac:*)",
+      "Bash(rev:*)",
+      "Bash(fold:*)",
+      "Bash(comm:*)",
+      "Bash(diff:*)",
+      "Bash(jq:*)",
+      "Bash(yq:*)",
+      "Bash(rg:*)",
+      "Bash(less:*)",
+      "Bash(tree:*)",
+      "Bash(python3 */.claude/skills/copilot-fixer/*)",
+      "Bash(gh:*)",
+      "Bash(find:*)",
+      "Bash(pre-commit:*)",
+      "Bash(* ./mage *)",
+      "Bash(* go *)",
+      "Bash(git diff:*)",
+      "Bash(cargo:*)",
+      "Bash(rustfmt:*)",
+      "Bash(clippy:*)",
+      "Edit",
+      "Read(~/Developer/sources/personal/notebook/**)",
+      "Edit(~/Developer/sources/personal/notebook/projects/substrate/**)",
+      "Edit(~/Developer/sources/personal/notebook/projects/fuzzball/**)",
+      "Bash(gh pr list)",
+      "Bash(gh pr view)",
+      "Bash(gh pr diff)",
+      "Bash(gh api)"
+    ],
+    "deny": [
+      "Read(.env*)",
+      "Read($HOME/.ssh)",
+      "Read($HOME/.kube)",
+      "Read($HOME/.aws)",
+      "Read($HOME/.dotfiles)",
+      "Edit($HOME/.ssh)",
+      "Edit($HOME/.kube)",
+      "Edit($HOME/.aws)",
+      "Edit($HOME/.dotfiles)",
+      "Read(~/.ssh)",
+      "Read(~/.kube)",
+      "Read(~/.aws)",
+      "Read(~/.dotfiles)",
+      "Edit(~/.ssh)",
+      "Edit(~/.kube)",
+      "Edit(~/.aws)",
+      "Edit(~/.dotfiles)",
+      "Edit(rm -rf *)",
+      "Bash(git push *)"
+    ],
+    "ask": [
+      "Bash(git commit:*)"
+    ],
+    "defaultMode": "acceptEdits"
+  },
+  "model": "claude-opus-4-6[1m]",
+  "skillOverrides": {
+    "code-review": "off"
+  },
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-nod evaluate"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/allow-safe-pipes.sh",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/skills/ship-the-result/scripts/hook_pretool.py\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/jscott/.claude/hooks/herdr-agent-state.sh' session",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/workflow_session_start.py\"",
+            "timeout": 5,
+            "statusMessage": "Initializing workflow session"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/workflow_stop.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking workflow state"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "/usr/bin/env python3 $HOME/.claude/statusline.py"
+  },
+  "enabledPlugins": {
+    "atlassian@claude-plugins-official": false,
+    "clangd-lsp@claude-plugins-official": true,
+    "claude-md-management@claude-plugins-official": true,
+    "code-simplifier@claude-plugins-official": true,
+    "commit-commands@claude-plugins-official": true,
+    "context7@claude-plugins-official": true,
+    "feature-dev@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": true,
+    "gopls-lsp@claude-plugins-official": true,
+    "hookify@claude-plugins-official": true,
+    "plugin-dev@claude-plugins-official": true,
+    "pyright-lsp@claude-plugins-official": true,
+    "rust-analyzer-lsp@claude-plugins-official": true,
+    "security-guidance@claude-plugins-official": true,
+    "skill-creator@claude-plugins-official": true,
+    "typescript-lsp@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {},
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "allowWrite": [
+        "~/.cache/go-build",
+        "~/go/pkg/mod",
+        "~/.magefile/",
+        "~/.cache/",
+        "$HOME/.cache/go-build",
+        "$HOME/go/pkg/mod",
+        "$HOME/.magefile/",
+        "$HOME/.cache/"
+      ]
+    }
+  },
+  "alwaysThinkingEnabled": true,
+  "effortLevel": "high",
+  "advisorModel": "opus",
+  "skipWorkflowUsageWarning": true,
+  "network": {
+    "allowed_domains": [
+      "pkg.go.dev",
+      "*.go.dev",
+      "*.githubusercontent.com",
+      "*.github.com",
+      "crates.io",
+      "*.crates.io",
+      "docs.rs",
+      "*.docs.rs"
+    ]
+  }
+}

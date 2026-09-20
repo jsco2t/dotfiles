@@ -6,6 +6,13 @@ argument-hint: "<output directory> <spec links: Jira/Confluence URLs or file pat
 
 # New Engineering Feature Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You are orchestrating the complete engineering planning pipeline for a new feature. You will create a documentation folder structure, then run five specialized skills **in strict sequential order**, passing each skill's output forward as input to the next. You are the conductor — you set up context, invoke each skill, and maintain the connective tissue (index files, folder structure, follow-ups) between them.
 
 **You MUST run the skills in this exact order:**
@@ -502,10 +509,10 @@ After all phases are complete, present a final summary:
 - Update any internal cross-references within the document (e.g., relative links to other docs).
 - Log what was moved so the user knows.
 
-### If MCP Tools Are Unavailable
+### If Atlassian Is Unavailable
 
-- `/eng-plan-creator` and `/eng-verification-creator` rely heavily on Jira/Confluence MCP tools.
-- If MCP tools fail, inform the user and ask whether to proceed with only the information available in the provided file-based specs, or to abort and fix MCP connectivity first.
+- `/eng-plan-creator` and `/eng-verification-creator` rely heavily on the Jira/Confluence toolkit (`~/.local/bin/atlassian-toolkit/`).
+- If the Atlassian toolkit fails, inform the user and ask whether to proceed with only the information available in the provided file-based specs, or to abort and fix Atlassian connectivity first (`atlassian doctor`).
 
 ---
 

@@ -6,6 +6,13 @@ argument-hint: "<path to feature research document>"
 
 # Engineering Design Researcher Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You are conducting in-depth architectural design research for a feature. Your goal is to bridge the gap between a high level engineering implementation plan (the "what") and task planning (the "when/who") by producing a comprehensive design document (the "how").
 
 ## Input
@@ -44,9 +51,9 @@ Read the document thoroughly. Extract:
 
 If the research document references Jira issues or Confluence pages, fetch them for additional context:
 
-- Use `mcp__plugin_atlassian_atlassian__getJiraIssue` for issue details
-- Use `mcp__plugin_atlassian_atlassian__getConfluencePage` for linked docs
-- Use `mcp__plugin_atlassian_atlassian__search` for related decisions or ADRs
+- `jira issue get <KEY> --description --comments` for issue details
+- `confluence page <id|url>` for linked docs
+- `atlassian search "<text>"` for related decisions or ADRs
 
 ### Step 2: Deep Codebase Architectural Analysis
 

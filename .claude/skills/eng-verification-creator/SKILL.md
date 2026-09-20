@@ -6,6 +6,13 @@ argument-hint: "<path to eng-implementation-plan.md> <path to engineering-design
 
 # Engineering Verification Creator Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You are creating a comprehensive set of manual verification test documents for a feature. Your goal is to produce documents that a developer or QA engineer can follow step-by-step to verify every aspect of a feature works correctly end-to-end.
 
 **The specifications in Jira and Confluence are the authoritative source of truth.** Every requirement, acceptance criterion, and behavioral specification called out in those documents MUST have corresponding verification tests. Additional verifications beyond the spec are expected — but spec compliance coverage is mandatory and must be demonstrably complete.
@@ -34,11 +41,306 @@ These principles are non-negotiable. Every verification document must satisfy th
 
 4. **Manual fallbacks for everything.** Automated checks fail. Services don't start. Bootstrap races. Every verification must include what to do when the happy path doesn't work — manual creation steps, diagnostic commands, known issues with workarounds.
 
-5. **Small documents, clear progression.** Break each environment's verifications into numbered documents that build on each other. Each document should be completable in 5-30 minutes. The first document is always environment setup; the last is always cleanup. Group related verifications together in the same document.
+5. **Small documents, clear progression.** Break each environment's verifications into numbered documents. Each document should be completable in 5-30 minutes. Group related verifications together in the same document. Number documents for readability, but do NOT create ordering dependencies between them (see Principle 7).
 
 6. **Explain the "why", not just the "what".** When a test uses a specific provisioner, explain why. When a command needs a flag, explain what happens without it. When a known issue exists, explain the root cause. The tester should understand the feature, not just follow steps.
 
-7. **Documents are self contained** EVERY verification document must understand how to configure the environment for testing AND clean everything up for testing. **DO NOT** create verification documents which are just "setup" or "cleanup". Leave the system under test in the same state as when you found it.
+7. **Documents are self-contained and order-independent.** This is the most important structural rule. Every verification document MUST:
+   - **Own its own setup.** Include environment build, service startup, authentication, and any resource creation the tests need. A tester must be able to pick up ANY document and run it from scratch.
+   - **Own its own cleanup.** Tear down everything the document created — test resources, scratch files, and the environment itself. Leave the system in the same state it was found in.
+   - **Run in any order.** Documents WILL be executed in arbitrary order by different testers or AI runners. Document A must NEVER assume Document B ran first. If two documents need the same provisioner, both documents create it in their own setup.
+   - **Never be setup-only or cleanup-only.** Do NOT create documents whose sole purpose is environment setup or teardown. Every document is a complete unit: setup → tests → teardown. The ONE exception is expensive one-time environments (see Principle 15).
+
+8. **Be explicit — every step spelled out.** Verification documents may be executed by an AI agent (`/eng-verification-runner`) that follows instructions literally. Do not presume "implied steps" will be understood. Specifically:
+   - Every action must have a concrete, copy-pasteable command in a bash code block.
+   - Never write "configure the environment" without showing exactly how.
+   - Never write "verify it works" without specifying what to check and what the expected output looks like.
+   - If the output of one command is needed by a later command, capture it in an environment variable (`export WF_ID=$(...)`).
+   - State preconditions explicitly ("this step assumes the compose environment is running" — then show how to start it).
+
+9. **Test fixtures live beside the verification docs, not in temp.** Create a `fixtures/` directory beside (or within) the verification environment folders. Organize by type: `fixtures/provisioners/`, `fixtures/workflows/`, `fixtures/segments/`, etc. Reference via a `$FIXTURES` environment variable set to the fully qualified path. NEVER write fixtures to `/tmp`, `$TMPDIR`, or any temporary directory. NEVER create ad-hoc YAML fixtures inline via heredocs written to temp files — if a test needs a YAML fixture, it must be a checked-in file in the `fixtures/` directory.
+
+10. **Consistent CLI patterns.** Before writing any verification document, verify the actual CLI conventions against the source code. Lock these into a conventions table and apply uniformly across ALL documents:
+    - Binary alias (e.g., `$fb` for `fuzzball`)
+    - Workflow termination command (`stop` vs `cancel` — check which exists)
+    - Event following flag (`--follow` vs `--watch` — check which is canonical)
+    - JSON output field casing (e.g., `.ID` vs `.id` — check the proto/CLI source)
+    - Idempotent resource creation pattern (e.g., `2>/dev/null || true`)
+    Do NOT copy conventions from existing docs — they may be stale. Check the source.
+
+11. **Service workflow events safety.** When a workflow contains a `persist: true` service (or any non-terminating workload), `events --follow` on the workflow will hang forever. For these workflows:
+    - If the workflow has a `depends-on` verify job, follow that specific stage: `$fb workflow events $WF_ID verify-internal --follow`
+    - If no verify job exists, poll workflow status instead of following events
+    - ALWAYS include an explicit `$fb workflow stop` after verifying a service workflow
+    Never write a step that says "press Ctrl-C" or requires manual interruption.
+
+12. **Verify feature availability per level.** Before placing a test at a given environment level, confirm the feature is actually available there. Check compose configs for service availability (e.g., object cache, service proxy). Check Kind configs for environment types (e.g., segmented). Do not write tests for features that aren't present at that level.
+
+13. **Human and AI executable.** Every document must be runnable by a human or by the `/eng-verification-runner` skill. The AI runner follows instructions literally — it does not infer missing steps, guess at expected outputs, or fill in gaps. Write documents as if the reader has never seen the product and will execute exactly what is written, nothing more. Include an AI guidance header at the top of every verification document:
+    ```
+    > **AI Verification Runner Guidance**
+    > This document is designed to be executed by a human or by the `/eng-verification-runner` skill.
+    > - Execute steps sequentially within each test. HALT on any mismatch.
+    > - Capture all command outputs and compare against Expected Results exactly.
+    > - On MacOS, you may need to leave the sandbox to interact with the system under test.
+    > - Use `$fb workflow events $WF_ID --follow` to monitor workflow execution (not --watch or describe --watch).
+    ```
+    For cloud-level docs, add a note that cloud tests require credentials and the runner skill cannot execute them directly.
+
+14. **Simple, single-minded tests.** Each test should verify ONE thing clearly. Don't combine multiple unrelated verifications into a single test. Optimize for the number of tests that accurately verify product functionality — do NOT optimize for the fewest possible tests.
+
+15. **One-time setup exception for expensive environments.** The ONLY exception to the self-sufficiency rule (Principle 7) is environments where setup is genuinely expensive — deploying cloud infrastructure (AWS, GCP, Azure), standing up a multi-node Kind cluster, or any operation that takes 10+ minutes and produces a shared environment multiple documents test against. These environments MAY use a single setup document (`00-*-environment-setup.md`) and teardown document (`99-*-environment-teardown.md`). All other docs within that environment assume the infrastructure is deployed but must be self-sufficient for everything else (creating their own provisioners, volumes, users, groups, central config changes, and cleaning them up). Compose environments do NOT qualify for this exception — each compose doc starts and stops its own compose stack.
+
+16. **Multi-account cloud configuration.** Cloud verification docs must provide environment variables for ALL required cloud accounts. For AWS, this typically means both a nonprod/test account AND a marketplace/container account. Include both in the env var block of every cloud doc.
+
+## Document Schema (Mandatory Structure)
+
+Every verification document MUST follow this exact structure. Deviations create inconsistency between documents and increase variance during test execution. The runner skill depends on this structure for mechanical execution.
+
+### Document-Level Structure
+
+Every document follows this section order. All sections are required unless marked optional.
+
+```
+# NN - Document Title (Environment Name)
+
+**Suite:** <folder-name>
+**Purpose:** <what this document verifies>
+**Estimated Time:** <minutes>
+
+> **AI Verification Runner Guidance**
+> [Standard header — see AI Guidance Header below]
+
+---
+
+## Environment Variables              ← required, exports only
+
+---
+
+## Prerequisites                     ← required (local envs) or ## Environment Setup (cloud envs)
+
+---
+
+[Test cases — see Test Case Structure]
+
+---
+
+## Teardown                           ← required, always named "Teardown"
+
+---
+
+## Summary                            ← required, table of all tests
+```
+
+**Section naming rules (no alternatives):**
+- `## Environment Variables` — never "Environment Setup" for the export block
+- `## Prerequisites` — for compose/kind docs (build, start, authenticate, doc-specific setup)
+- `## Environment Setup` — for cloud docs only (auth, discovery, resource creation beyond cluster deploy)
+- `## Teardown` — never "Cleanup" or "Document Cleanup"
+- `## Summary` — always a table
+
+### Test Case Structure
+
+Every test case MUST have these sections in this exact order. All are required unless marked optional.
+
+```
+## TEST-ID: Test Title
+
+**Spec Reference:** FUZZ-NNNN (requirement summary)
+**Prerequisite:** <previous test IDs, or "Prerequisites above">
+**Purpose:** <what specifically this test verifies and why>
+
+### Background                        ← optional, only when the test needs conceptual explanation
+
+### Setup                             ← optional, only when the test needs per-test resource creation
+
+### Steps
+
+1. Step description:
+   ```bash
+   command
+   ```
+
+### Expected Result
+
+- <specific, observable outcomes>
+
+### Pass Criteria
+
+- [ ] <precise, unambiguous checkboxes>
+
+### Cleanup                           ← optional, only when per-test cleanup is needed beyond doc Teardown
+```
+
+**Required fields — no test may omit these:**
+- `**Spec Reference:**` — Jira key or `N/A` for non-spec tests
+- `**Prerequisite:**` — dependency chain or "Prerequisites above"
+- `**Purpose:**` — one sentence explaining what and why
+- `### Steps` — at least one numbered step with a bash code block
+- `### Expected Result` — narrative description of what should happen
+- `### Pass Criteria` — `- [ ]` checkboxes for binary pass/fail evaluation
+
+**Expected Result vs. Pass Criteria — the distinction matters:**
+- **Expected Result** describes *what should happen* in narrative form (e.g., "Workflow reaches Finished. Log contains `hello from compose`.")
+- **Pass Criteria** are *binary checkboxes* that the runner evaluates mechanically (e.g., `- [ ] Workflow status is Finished`, `- [ ] Log contains 'hello from compose'`)
+- When writing Expected Result for a test that previously lacked one, derive it from the Pass Criteria — restate the checkboxes as the observable outcome. Do not invent new expectations.
+
+### Test ID Conventions
+
+Test IDs follow a consistent scheme per environment:
+
+- **Compose:** `MVT-CC-AREA-NN` (e.g., `MVT-CC-PROV-01`, `MVT-CC-VOL-01`)
+- **Kind:** `MVT-KD-AREA-NN` (e.g., `MVT-KD-STG-01`, `MVT-KD-SEG-01`)
+- **AWS:** `AWS-AREA-NN` (e.g., `AWS-PROV-01`, `AWS-VOL-01`)
+- **Azure:** `AZ-AREA-NN` (e.g., `AZ-OWN-01`)
+- **GCP:** `GCP-AREA-NN`
+
+Within each environment, AREA codes are short functional domains: PROV (provisioner), VOL (volume), WF (workflow), AC (access control), OWN (ownership), NFS, SEG (segmentation), CLI, DT (data transfer), EP (endpoints), etc.
+
+### Test Grouping (Optional)
+
+When a document contains logically distinct groups of tests (e.g., "Core CRUD" vs. "Validation"), use a non-heading visual separator:
+
+```markdown
+---
+
+**Part A: Group Title**
+
+---
+```
+
+Do NOT use `##` headings for Part groupings — `##` is reserved for test case headings and document-level sections. Part separators are organizational aids, not structural elements.
+
+### AI Guidance Header
+
+Every document includes this blockquote immediately after the metadata block. Use this exact text for local environment docs:
+
+```markdown
+> **AI Verification Runner Guidance**
+> This document is designed to be executed by a human or by the `/eng-verification-runner` skill.
+> - **Quality over speed.** Do **NOT** compress, batch, or shortcut these tests. The goal is to verify product quality, not to finish quickly. Execute every command exactly as written and evaluate every result against the pass criteria.
+> - **Parallel execution.** Running tests in sub-agents in parallel is acceptable only when the test objectives have **NO** overlap in the resources they create, modify, or verify.
+> - Execute steps sequentially within each test. HALT on any mismatch.
+> - Capture all command outputs and compare against Expected Results exactly.
+> - On MacOS, you may need to leave the sandbox to interact with the system under test.
+> - Use `$fb workflow events $WF_ID --follow` to monitor workflow execution (not --watch or describe --watch).
+```
+
+For cloud environment docs, append:
+
+```markdown
+> - AWS/Azure/GCP tests require cloud credentials. The verification runner skill CANNOT execute cloud tests directly. These tests are designed for human execution or for an AI runner with explicit cloud access.
+```
+
+### Environment-Specific Sections
+
+Some environments require additional sections that don't apply universally. These are permitted and should NOT be stripped during normalization:
+
+- **Pre-Test Orphan Rescue** — cloud docs may include this before tests to clean up resources leaked by prior failed runs
+- **Cloud credential warnings** — additional guidance header lines for cloud docs
+- **Multi-account env blocks** — AWS docs may export variables for multiple accounts (nonprod + marketplace)
+- **Substrate inspection notes** — docs testing container internals may add `docker exec` or `kubectl exec` guidance
+
+These are functional content, not formatting variance. Preserve them.
+
+## Standardized Test Patterns
+
+When writing test commands, use these exact patterns. The runner skill recognizes them and executes them mechanically, reducing deliberation about *how* to run a step. The runner still compares output against Expected Result and Pass Criteria with full rigor — patterns speed up execution, not evaluation.
+
+### Pattern: Workflow Execute-and-Verify
+
+For tests that submit a workflow and verify it completes successfully:
+
+```bash
+export WF_ID=$($fb workflow start $FIXTURES/workflows/<fixture>.yaml --name <name> -o json | jq -r '.ID')
+$fb workflow events $WF_ID --follow
+$fb workflow log $WF_ID <job-name>
+```
+
+### Pattern: Service Workflow Verify-and-Stop
+
+For tests with `persist: true` services that don't terminate on their own:
+
+```bash
+export WF_ID=$($fb workflow start $FIXTURES/workflows/<fixture>.yaml --name <name> -o json | jq -r '.ID')
+$fb workflow events $WF_ID <verify-job-name> --follow
+# ... verification commands ...
+$fb workflow stop $WF_ID
+```
+
+Never use `events --follow` without a stage scope on a service workflow — it will hang.
+
+### Pattern: Expected Error
+
+For tests where a command SHOULD fail:
+
+```bash
+<command> 2>&1
+```
+
+Pass Criteria for expected-error tests MUST include at minimum:
+- `- [ ] Exit code is non-zero`
+- `- [ ] Error message contains '<expected text>'`
+
+### Pattern: Provisioner CRUD
+
+Add and verify:
+```bash
+$fb volume provisioner add <name> -f $FIXTURES/provisioners/<fixture>.yaml
+$fb volume provisioner list
+```
+
+Inspect:
+```bash
+$fb volume provisioner info <name> -o json
+```
+
+Remove:
+```bash
+$fb volume provisioner remove <name> -y
+```
+
+### Pattern: Volume Lifecycle
+
+Create:
+```bash
+$fb volume create <provisioner> <volume-name> [--size <size>]
+$fb volume list --provisioner <provisioner>
+```
+
+Cleanup (disable then delete):
+```bash
+$fb volume disable <provisioner> <volume-name>
+$fb volume delete <provisioner> <volume-name> -y
+```
+
+### Pattern: User Context Switch
+
+Switch to a different user, perform actions, then switch back:
+
+```bash
+$fb context use <target-context>
+$fb context login --direct -u <user> -p <password> --insecure
+# ... actions as this user ...
+$fb context use <original-context>
+$fb context login --direct -u <original-user> -p <original-password> --insecure
+```
+
+### Pattern: Idempotent Resource Creation
+
+For setup blocks that may run against an environment with leftover resources:
+
+```bash
+$fb <resource> <create-command> <args> 2>/dev/null || true
+```
+
+### Pattern: Teardown Resource Deletion
+
+For cleanup blocks where resources may already be gone:
+
+```bash
+$fb <resource> <delete-command> <args> -y 2>/dev/null || true
+```
 
 ## Verification Creation Process
 
@@ -60,9 +362,9 @@ Read both the engineering implementation plan and design document thoroughly. Ex
 
 #### Step 1.2: Fetch Jira Issues
 
-For every Jira issue referenced in the input documents, use MCP tools to fetch the full details:
+For every Jira issue referenced in the input documents, use the local Atlassian toolkit (usage: `~/.local/bin/atlassian-toolkit/README.md`) to fetch the full details:
 
-- Use `mcp__claude_ai_Atlassian__getJiraIssue` (or `mcp__claude_ai_Atlassian_2__getJiraIssue`) to fetch each issue
+- `jira issue get <KEY> --description --comments` to fetch each issue
 - Extract: summary, description, acceptance criteria, comments with decisions
 - Follow epic links to find child stories that may have additional requirements
 - Check for linked issues that add constraints or dependencies
@@ -75,13 +377,13 @@ For every Jira issue referenced in the input documents, use MCP tools to fetch t
 | FUZZ-XXXX  | [from issue summary]                       | [specific testable criteria from issue]   |
 ```
 
-If MCP tools are unavailable, extract requirements from what's documented in the research and design documents, but warn the user that direct Jira verification was not performed.
+If the Atlassian toolkit or Jira is unavailable, extract requirements from what's documented in the research and design documents, but warn the user that direct Jira verification was not performed.
 
 #### Step 1.3: Fetch Confluence Pages
 
 For every Confluence page referenced in the input documents:
 
-- Use `mcp__claude_ai_Atlassian__getConfluencePage` (or `mcp__claude_ai_Atlassian_2__getConfluencePage`) to fetch page content
+- `confluence page <id|url>` to fetch page content
 - Extract behavioral specifications, examples, Q&A decisions, and edge cases
 - These often contain the most detailed and specific requirements (e.g., "always try to migrate", "default-deny semantics")
 - Pay special attention to examples sections — these often define exact expected behavior
@@ -128,14 +430,13 @@ Use the Explore agent or direct file searches to understand:
 
 This context is essential for writing accurate, copy-pasteable commands.
 
-#### Step 2.2a: Enumerate Existing Testdata (Required)
+#### Step 2.2a: Enumerate Existing Testdata and Plan Fixtures (Required)
 
-**Before proposing any new test fixtures, you MUST inventory what already exists in the tree.** The goal is to keep the number of checked-in test files from exploding — reuse first, extend second, create new only as a last resort.
+**Before proposing any new test fixtures, you MUST inventory what already exists.** The goal is reuse first, extend second, create new only as a last resort.
 
-1. Search relevant testdata directories for existing fixtures:
-   - `apps/fuzzball/testdata/` (and any feature-specific subdirectories like `storage/v4/`)
-   - Any `testdata/` directories within packages touched by the feature
-   - Example YAMLs referenced in existing verification suites
+1. Search for existing fixtures in TWO places:
+   - **Source repo testdata**: `apps/fuzzball/testdata/` (and feature-specific subdirectories like `storage/v4/`)
+   - **Existing verification suites**: any `fixtures/` directories in prior verification docs for the same project
 
 2. For every fixture found, record: path, what it exercises, and which spec requirement(s) it could cover.
 
@@ -144,20 +445,20 @@ This context is essential for writing accurate, copy-pasteable commands.
    2. **Extend** — add a field/variant to an existing fixture if the change doesn't break other tests
    3. **Create new** — only when no existing fixture fits; justify in the test's Background section
 
-4. Reference reused fixtures via a `$TESTDATA` env var defined in the setup doc, not hardcoded paths.
+4. **Fixture placement**: ALL fixtures used by verification docs MUST live in a `fixtures/` directory beside the verification documents — NOT in temp directories, NOT only in the source repo's testdata. This makes the verification suite self-contained.
 
-If a new fixture is unavoidable, co-locate it under `apps/fuzzball/testdata/` (not in the verification doc folder) so it's discoverable for future verification suites and unit tests.
+   - Create `fixtures/` in the output directory with subdirectories by type: `fixtures/provisioners/`, `fixtures/workflows/`, `fixtures/segments/`, etc.
+   - **Copy** reused fixtures from the source repo into `fixtures/` so the verification suite doesn't depend on having the repo checked out at a specific path.
+   - Reference all fixtures via a `$FIXTURES` environment variable pointing to this directory.
+   - If a new fixture is also useful for unit tests, add it to `apps/fuzzball/testdata/` in the source repo as well — but the verification suite's copy is the primary reference.
+
+5. **Deduplication**: If copying fixtures from multiple sources, deduplicate by content. Same filename + same content → single copy. Same filename + different content → suffix with the environment or variant name (e.g., `wf-unsegmented-kind.yaml` vs `wf-unsegmented.yaml`).
+
+6. **Runtime working files**: If a test must write a file to disk (e.g., downloading an object for round-trip verification), use a `scratch/` directory beside `fixtures/` (NOT inside it). The `fixtures/` directory is strictly read-only input; `scratch/` is for runtime output that tests create and clean up.
 
 #### Step 2.3: Design Test ID Convention
 
-Create a consistent test ID scheme for the feature. Follow the pattern from existing verification docs:
-
-- **Local CLI:** `T01-CLI-NN` or `CLI-NNN`
-- **Compose:** `T03-AREA-NN` (e.g., `T03-PROV-01`, `T03-WF-01`, `T03-SETUP-01`)
-- **Kind:** `KIND-NN`
-- **AWS/Cloud:** `AWS-AREA-NNN` (e.g., `AWS-PROV-001`, `AWS-VOL-001`)
-
-Group tests by functional area within each environment (setup, CRUD, workflows, access control, migration, cleanup).
+Use the conventions defined in the Document Schema section (Test ID Conventions). Group tests by functional area within each environment (setup, CRUD, workflows, access control, migration, cleanup).
 
 ### Phase 3: Write Verification Documents
 
@@ -231,21 +532,19 @@ Each test maps to a Jira story. This matrix shows which tests cover which spec r
 
 **The Spec Coverage Matrix is mandatory.** Every Jira story from the requirements registry must appear in this matrix with at least one test reference. If a story cannot be verified in any environment, it must appear with a note explaining why.
 
-#### Step 3.3: Write Environment Setup Documents
+#### Step 3.3: Write Environment Setup
 
-Every environment folder starts with a setup document. It must include:
+Each verification document is self-sufficient and includes its own setup and teardown (Principle 7). However, include a shared **Environment Setup** section pattern that every document in an environment folder replicates:
 
-1. **Header block** with Suite, Purpose, Cluster Required, Estimated Time
-2. **Environment Setup section** — env vars to set (`export VAR=value`), copy-pasteable
-3. **Prerequisites** — tools, versions, ports, access requirements
-4. **Branch verification** — confirm correct code is checked out
-5. **Tool verification** — confirm required tools are installed and correct version
-6. **Build steps** — build binaries and/or containers as needed
-7. **Environment startup** — start compose/kind/cloud environment
-8. **Health checks** — verify all services are running
-9. **Authentication** — configure CLI context and log in
-10. **Baseline verification** — confirm the environment is in the expected initial state
-11. **Summary table** at the end
+1. **Environment Variables** — `export` block with `$fb`, `$FIXTURES`, `$FUZZBALL_REPO`, and environment-specific vars
+2. **Prerequisites** — tools, versions, ports, access requirements
+3. **Build and start** — build binaries/containers, start compose/kind environment
+4. **Authentication** — configure CLI context and log in
+5. **Baseline verification** — confirm the environment is in the expected initial state
+
+Each document repeats this pattern so it can be run independently.
+
+**One-time setup exception (Principle 15):** For environments where setup is genuinely expensive (cloud infrastructure, multi-node Kind clusters), a dedicated `00-*-environment-setup.md` and `99-*-environment-teardown.md` are allowed. All other docs within that environment assume the infrastructure is deployed but must be self-sufficient for everything else (creating their own provisioners, volumes, users, groups, central config changes, and cleaning them up). Compose environments do NOT qualify — each doc starts and stops its own compose stack.
 
 Include known issues and manual workarounds (e.g., bootstrap race conditions, macOS-specific limitations, port conflicts).
 
@@ -260,7 +559,7 @@ Each verification document covers a functional area. Follow this structure for e
 **Purpose**: [What this document verifies]
 **Estimated Time**: [minutes]
 
-> **Required:** Environment variables from `01-environment-setup.md` "Environment Setup" section are set (`$VAR1`, `$VAR2`, `$alias`).
+> **Required:** Environment variables from the "Environment Variables" section above are set (`$VAR1`, `$VAR2`, `$alias`).
 
 ---
 
@@ -314,24 +613,25 @@ Each verification document covers a functional area. Follow this structure for e
 **Rules for writing test cases:**
 
 - Every test MUST have a `Spec Reference` line linking to the Jira story it verifies. Tests that verify non-spec behaviors (e.g., debugging support, cleanup) use `Spec Reference: N/A`
-- Commands must use env vars, not hardcoded paths. Set vars once in the setup doc, reference everywhere
+- Commands must use env vars, not hardcoded paths. Set vars in the Environment Variables section, reference everywhere
 - Include `> **Note:**` blocks to explain non-obvious flags, workarounds, or context
 - Include `> **Known Issue:**` blocks for bugs or limitations the tester will encounter
-- When creating YAML/config files, use heredocs (`cat > /path << 'EOF'`) so they're copy-pasteable
-- Capture resource IDs in env vars (`export WF_ID=$(...  -o json | jq -r '.id')`) for use in subsequent commands
+- YAML/config fixtures MUST be checked-in files in `fixtures/`, referenced via `$FIXTURES`. Do NOT use heredocs to create fixture files at runtime — the fixture must exist before the test runs
+- Capture resource IDs in env vars (`export WF_ID=$(...  -o json | jq -r '.ID')`) for use in subsequent commands. Verify the JSON field casing (`.ID` vs `.id`) against the source code
 - Test both happy path AND error cases (permission denied, already exists, not found)
-- Include cleanup steps at the end of each document or in a dedicated cleanup document
+- Include cleanup steps at the end of each document (never in a separate cleanup-only document)
 
-#### Step 3.5: Write Cleanup Documents
+#### Step 3.5: Write Teardown Sections
 
-Every environment folder ends with a cleanup document. It must:
+Every verification document includes its own teardown section at the end (Principle 7). The teardown must:
 
 1. Clean up test-created resources (volumes, provisioners, users, contexts) — **while the environment is still running**
-2. Stop the environment (compose down, kind delete, cloud teardown)
-3. Clean all local state (docker volumes, temp files, jetstream data)
-4. Remove CLI contexts
-5. Verify clean state (no orphaned containers, volumes, or files)
-6. Use `2>/dev/null || true` for cleanup commands that may fail if resources were already deleted
+2. Use `2>/dev/null || true` for cleanup commands that may fail if resources were already deleted
+3. Leave the environment in the same state it was found in (other documents may run after this one)
+
+**Do NOT create standalone cleanup-only documents** (except for expensive one-time environments per Principle 15).
+
+For compose environments, include environment shutdown (compose down) at the end of each document's teardown section — since each document is self-sufficient, it starts and stops its own environment. For Kind or cloud environments that use the one-time setup exception (Principle 15), the teardown section cleans up test-created resources but does NOT destroy the shared cluster — that's the `99-*-teardown.md` document's job.
 
 ### Phase 4: Validate Coverage
 
@@ -377,17 +677,53 @@ Ask the user if they want any changes before finalizing.
 
 Before completing, verify every document against this checklist:
 
+### Schema Compliance
+- [ ] Document follows the exact section order from Document Schema
+- [ ] Tests are at H2 (`##`), subsections at H3 (`###`) — no H3 tests with H4 subsections
+- [ ] Part groupings use non-heading separators, not `##` headings
+- [ ] Teardown section is named `## Teardown` (not "Cleanup" or "Document Cleanup")
+- [ ] Environment variables section is named `## Environment Variables`
+- [ ] Every test has all required fields: Spec Reference, Prerequisite, Purpose, Steps, Expected Result, Pass Criteria
+- [ ] Test IDs follow the convention for their environment (MVT-CC-*, MVT-KD-*, AWS-*, AZ-*)
+- [ ] AI guidance header uses the standardized text from the schema
+
+### Structure & Content
 - [ ] Every command is copy-pasteable (uses env vars, not hardcoded paths)
 - [ ] Every test has a Spec Reference linking to Jira
 - [ ] Every test has Prerequisites listing dependencies
 - [ ] Every test has explicit Pass Criteria (not just "it works")
+- [ ] Every test has an Expected Result section (distinct from Pass Criteria)
 - [ ] Expected Results include concrete output examples where possible
 - [ ] Known issues and manual workarounds are documented inline
-- [ ] Env vars are defined once (in setup doc) and referenced consistently
-- [ ] Heredocs use `<< 'EOF'` (single-quoted to prevent variable expansion in YAML)
+- [ ] Env vars are defined once and referenced consistently
 - [ ] Summary table at the end of every document
-- [ ] Cleanup document removes all test artifacts
 - [ ] README has complete Spec Coverage Matrix with every Jira story
+
+### Self-Sufficiency
+- [ ] Every document has its own setup section (can run independently)
+- [ ] Every document has its own teardown section (cleans up after itself)
+- [ ] No document says "see doc X for prerequisites" (except docs in environments using the one-time setup exception)
+- [ ] No document depends on running other docs first
+
+### Fixtures & Files
+- [ ] ALL fixtures are in the `fixtures/` directory (not in `/tmp`, not inline heredocs to temp)
+- [ ] Every `$FIXTURES/...` reference points to a file that exists
+- [ ] Runtime working files use `scratch/` not `fixtures/`
+- [ ] No `/tmp` or `$TMPDIR` usage anywhere in any document
+
+### CLI Consistency
+- [ ] CLI conventions verified against source code (not copied from old docs)
+- [ ] Same binary alias used throughout (e.g., `$fb`)
+- [ ] Same workflow monitoring pattern used throughout (`events --follow`)
+- [ ] Same JSON field casing used throughout (e.g., `.ID`)
+- [ ] No `events --follow` on non-terminating service workflows without stage scoping
+- [ ] Every service/persist workflow has an explicit `$fb workflow stop` after verification
+- [ ] No "press Ctrl-C" steps
+
+### AI Executability
+- [ ] AI guidance header at the top of every verification document
+- [ ] MacOS sandbox note included in guidance header
+- [ ] Cloud docs note that runner skill cannot execute cloud tests directly
 
 ## Important Guidelines
 
@@ -403,7 +739,13 @@ Before completing, verify every document against this checklist:
 
 6. **Keep documents self-contained within their environment** — A tester running only the compose suite should never need to reference a Kind doc. Cross-references within an environment folder are fine.
 
-7. **Reuse checked-in testdata — don't grow the tree** — Phase 2.2a enumeration is required. Prefer existing fixtures (reuse → extend → create new, in that order). New fixtures go under `apps/fuzzball/testdata/` so they're discoverable for future verification suites and unit tests, never inside the verification doc folder. Reference fixtures via `$TESTDATA`, not hardcoded paths.
+7. **Reuse checked-in testdata — don't grow the tree** — Phase 2.2a enumeration is required. Prefer existing fixtures (reuse → extend → create new, in that order). Copy reused fixtures into the verification suite's `fixtures/` directory so the suite is self-contained. Reference fixtures via `$FIXTURES`, not hardcoded paths or `$TESTDATA`.
 
 8. **Version-specific behaviors need version-specific tests** — If the feature involves v1→v4 migration, test both v1 input and v4 output. If it involves API versioning, test both versions.
+
+9. **Verify CLI conventions against source code** — Do not copy CLI syntax from existing docs or from memory. Before writing any commands, read the actual CLI source code to confirm: command names, flag names, output field casing, and available subcommands. CLI conventions change between releases; stale syntax creates broken tests.
+
+10. **Never use /tmp for anything** — No temp files for fixtures, no temp files for intermediate output, no heredocs writing YAML to temp paths. Fixtures go in `fixtures/`. Runtime output goes in variables or `scratch/`. This is non-negotiable.
+
+11. **Events --follow on services will hang** — Service workflows with `persist: true` never terminate. Using `events --follow` without scoping to a terminating stage will cause the test runner (human or AI) to hang indefinitely. Always scope to the verify job stage or use polling for services.
 ```

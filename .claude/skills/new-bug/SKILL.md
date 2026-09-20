@@ -6,6 +6,13 @@ argument-hint: "<root index file path> <bug description, Jira links, or file pat
 
 # New Bug Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 You are creating a structured bug fix plan for a reported issue. You research the codebase to understand the root cause, produce a fix plan, and break the work into tasks that are **test-forward** — every bug is evidence that automated validation was insufficient, and the fix must close that gap.
 
 This skill produces a focused, lightweight documentation set: an index, a plan, and task files. Unlike `/new-eng-feature`, there is no design document, verification suite, or multi-skill pipeline. Bugs are smaller scope — the plan IS the design.
@@ -21,6 +28,9 @@ You need two inputs. If either is missing, use AskUserQuestion to ask:
 1. **Root index file** — absolute path to either:
    - A **project-level** root `index.md` (sibling to `prd.md`, has a `features/` subfolder)
    - A **feature-level** root `index.md` (sibling to `plans/`, `tasks/`, has no `prd.md`)
+   - **No root index**: The supplied path has no index file. In this case create a (or use existing)
+     `bugs/` folder. Perform the bug fix planning based on the second parameter and the current
+     source code.
 
    The `bugs/` folder will be created at the same level as this index file.
 
@@ -52,6 +62,7 @@ From the user's bug description, extract:
 - **Short description**: a dash-cased slug summarizing the problem (3-5 words max)
 
 Construct the bug folder name:
+
 - With tracker ID: `{BUG-ID}-{short-description}` (e.g., `FUZZ-6904-ephemeral-permission-fix`)
 - Without tracker ID: `{short-description}` (e.g., `volume-delete-race-condition`)
 
@@ -90,21 +101,21 @@ If the `bugs/` directory already exists, do not recreate it — add the new bug 
 
 ## Documentation Structure
 
-| Document | Purpose |
-| -------- | ------- |
-| [`plan.md`](plan.md) | Root cause analysis, fix strategy, and test gap assessment |
-| [`tasks/`](tasks/index.md) | Implementation task breakdown with test-forward approach |
+| Document                   | Purpose                                                    |
+| -------------------------- | ---------------------------------------------------------- |
+| [`plan.md`](plan.md)       | Root cause analysis, fix strategy, and test gap assessment |
+| [`tasks/`](tasks/index.md) | Implementation task breakdown with test-forward approach   |
 
 ---
 
 ## Summary
 
-| Metric | Value |
-| ------ | ----- |
-| Total Tasks | [count] |
-| Estimated Effort | [total] days |
-| Root Cause | [1-sentence summary] |
-| Test Gap | [What automated test was missing] |
+| Metric           | Value                             |
+| ---------------- | --------------------------------- |
+| Total Tasks      | [count]                           |
+| Estimated Effort | [total] days                      |
+| Root Cause       | [1-sentence summary]              |
+| Test Gap         | [What automated test was missing] |
 ```
 
 **Tasks `index.md`:**
@@ -143,7 +154,7 @@ If the bug description includes Jira or Confluence links:
 - Check for related/duplicate issues
 - Note the reporter, priority, and any reproduction steps in the ticket
 
-If MCP tools are unavailable, inform the user and proceed with the textual description.
+If the Atlassian toolkit is unavailable, inform the user and proceed with the textual description.
 
 ### Step 1.2: Reproduce Understanding
 
@@ -248,8 +259,8 @@ Create `plan.md` inside the bug folder.
 
 ### 3.3 Files Changed
 
-| File | Change |
-| ---- | ------ |
+| File   | Change                  |
+| ------ | ----------------------- |
 | [path] | [Description of change] |
 
 ---
@@ -272,17 +283,17 @@ This section is **mandatory**. A bug reaching this stage means automated validat
 
 ### 4.4 Test Plan
 
-| # | Test Case | What It Validates | Type |
-| - | --------- | ----------------- | ---- |
-| 1 | [Test name] | [What it checks] | New / Modified |
+| # | Test Case   | What It Validates | Type           |
+| - | ----------- | ----------------- | -------------- |
+| 1 | [Test name] | [What it checks]  | New / Modified |
 
 ---
 
 ## 5. Risk Assessment
 
-| Risk | Likelihood | Impact | Mitigation |
-| ---- | ---------- | ------ | ---------- |
-| [Risk] | [H/M/L] | [H/M/L] | [Strategy] |
+| Risk   | Likelihood | Impact  | Mitigation |
+| ------ | ---------- | ------- | ---------- |
+| [Risk] | [H/M/L]    | [H/M/L] | [Strategy] |
 
 ---
 
@@ -299,6 +310,7 @@ This section is **mandatory**. A bug reaching this stage means automated validat
 - The Test Gap Assessment (§4) is not optional — skip it and the plan is incomplete
 - Before/after code snippets must be copy-pasteable (correct indentation, full context)
 - If the fix requires changes to multiple files, list ALL of them in §3.3
+- Whenever the plan names a project artifact path (changelog entry, release-notes file, migration, fixture, etc.), verify the project's actual naming convention before writing it down — see Important Guidelines #9. A wrong path in the plan propagates into the task doc and the implementation; once it's down on paper, the implementer copies it.
 
 ---
 
@@ -339,10 +351,12 @@ Create one file per logical phase in `tasks/`. Name files: `01-{description}.md`
 [What to do. Include specific file paths, line numbers, and code changes. Be precise enough that the implementation is unambiguous.]
 
 **Acceptance Criteria:**
+
 - [ ] [Specific, verifiable criterion]
 - [ ] [Another criterion]
 
 **Files:**
+
 - [List every file to create or modify]
 ```
 
@@ -396,9 +410,9 @@ If no `bugs/index.md` exists, create one:
 
 ---
 
-| Bug | Status | Effort | Index |
-| --- | ------ | ------ | ----- |
-| [Bug ID — Short Title] | Planning Complete | [N]d | [link](bug-folder/index.md) |
+| Bug                    | Status            | Effort | Index                       |
+| ---------------------- | ----------------- | ------ | --------------------------- |
+| [Bug ID — Short Title] | Planning Complete | [N]d   | [link](bug-folder/index.md) |
 ```
 
 ### Step 4.4: Update the Root Index
@@ -409,11 +423,13 @@ Read the root index file (the one the user provided as input). Add or update a "
 - If no bugs section exists, add one to the Documentation Structure table:
 
 For **project-level** indexes, add to the Documentation Structure table:
+
 ```markdown
 | [`bugs/`](bugs/index.md) | Bug fix documentation and task plans | [bugs/index.md](bugs/index.md) |
 ```
 
 For **feature-level** indexes, add to the Documentation Structure table:
+
 ```markdown
 | [`bugs/`](bugs/index.md) | Bug fix documentation and task plans | [bugs/index.md](bugs/index.md) |
 ```
@@ -439,11 +455,12 @@ After all phases complete, present:
 ### If the Root Cause Cannot Be Determined
 
 Do not guess. Present what you found (partial traces, candidate locations) and ask the user for guidance via AskUserQuestion. Options:
+
 - Provide more context or reproduction steps
 - Point to a specific area of the code to investigate
 - Proceed with the best-available hypothesis (clearly marked as such)
 
-### If MCP Tools Are Unavailable
+### If Atlassian Is Unavailable
 
 Inform the user and proceed with the textual description. Jira enrichment is valuable but not blocking — the codebase investigation is the primary research method.
 
@@ -470,3 +487,14 @@ Flag this prominently. Per project rules, proto changes must be additive. If the
 7. **Bug folder naming is permanent.** The folder name becomes the canonical identifier. Get it right: `{TRACKER-ID}-{short-description}` with the tracker ID if available.
 
 8. **Don't create what wasn't asked for.** No `research/`, `reviews/`, `follow-ups/`, `verifications/`, or `design.md`. Bugs are focused. The plan IS the design. Extra structure is noise.
+
+9. **Verify repository conventions before naming artifacts.** When the plan references any repository artifact — changelog entries, release-notes files, database migrations, test fixtures, generated proto files, etc. — discover the actual project convention. Do not invent filenames from training-data memory; the cost of a wrong path in the plan is that it gets copied into the task doc and then into the working tree.
+
+   **How to verify (cheap):**
+   - Find the generator code that produces the artifact (e.g. for Fuzzball changelogs: `fuzzy/pkg/changelog/changelog.go` — the `Add()` function shows the exact filename format and the schema). Read what filename and schema it produces.
+   - List a handful of recent examples in the canonical directory (`ls changelog/pending/`, `ls changelog/releases/<latest>/`, `ls database/migrations/`). The de-facto pattern is whatever the recent commits do.
+   - Confirm your proposed name matches *exactly* — same date format, no descriptive suffixes, no extra fields, no creative reordering.
+
+   **Concrete failure mode (Fuzzball, FUZZ-7632):** a plan suggested `changelog/pending/20260612-fuzz-7632-volume-list-pagination.yaml`. The actual generator at `fuzzy/pkg/changelog/changelog.go:160-161` only ever produces `YYYYMMDD-fuzz-NNNN.yaml` with no descriptive suffix, and the schema is a fixed 4-field YAML (`issue`, `description`, `scope`, `type`) where `scope` and `type` must match values in `changelog/config.yaml`. The wrong filename made it into the task doc and would have shipped as a non-conforming artifact if not caught. A 30-second check of the generator code would have produced the right name on the first try.
+
+   **When uncertain, ask the user.** A one-question clarification is cheaper than a wrong path that propagates through the documentation and the diff.

@@ -6,6 +6,13 @@ argument-hint: "<feature description or Jira/Confluence URLs>"
 
 # Engineering Plan Creator Skill
 
+## Atlassian access (Jira & Confluence) — load on demand
+
+If — and only if — this task needs Jira or Confluence, use the local Atlassian toolkit.
+Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`. Do not
+read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
+(issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
+
 Your goal is to produce a comprehensive engineering research and implementation plan that will serve as the foundation for in-depth (task level) planning. This document is one part feature research and one part high-level specification.
 
 ## Input
@@ -26,24 +33,24 @@ First, identify all resources provided:
 
 ### Step 2: Gather Information from Atlassian (if links provided)
 
-If Jira or Confluence links are present, use the Atlassian MCP tools to gather comprehensive information:
+If Jira or Confluence links are present, use the local Atlassian toolkit (usage:
+`~/.local/bin/atlassian-toolkit/README.md`) to gather comprehensive information:
 
 **For Jira Issues:**
 
-- Use `mcp__plugin_atlassian_atlassian__getJiraIssue` to fetch issue details
-- Use `mcp__plugin_atlassian_atlassian__getJiraIssueRemoteIssueLinks` to find linked Confluence pages
-- Look at linked issues, subtasks, and epic relationships
-- Review comments for additional context and decisions
+- `jira issue get <KEY> --description --comments` to fetch issue details, comments, and decisions
+- `jira issue links <KEY>` to find linked Confluence pages
+- Look at linked issues, subtasks, and epic relationships (`jira search "<JQL>"`)
 
 **For Confluence Pages:**
 
-- Use `mcp__plugin_atlassian_atlassian__getConfluencePage` to fetch page content
-- Use `mcp__plugin_atlassian_atlassian__getConfluencePageDescendants` for child pages
+- `confluence page <id|url>` to fetch page content
+- `confluence descendants <id|url>` for child pages
 - Check for linked requirements, design docs, or technical specifications
 
 **For Discovery:**
 
-- Use `mcp__plugin_atlassian_atlassian__search` to find related documentation
+- `atlassian search "<text>"` to find related documentation across Jira and Confluence
 - Search for related issues, decisions, and historical context
 
 ### Step 3: Analyze the Codebase

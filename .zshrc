@@ -75,14 +75,18 @@ fi
 #
 # fzf support (key bindings incl. ctrl-r history search, + completion)
 #
-# Uses fzf's built-in shell integration (fzf >= 0.48), which works on any
-# OS / install location as long as fzf is on PATH. Falls back to the legacy
-# generated file if present.
+# fzf >= 0.48 supports `fzf --zsh`; older versions (e.g. Ubuntu 24.04
+# ships 0.44) do not, so we feature-detect and fall back to legacy files.
 #
 if [ -x "$(command -v fzf)" ]; then
-    source <(fzf --zsh)
-elif [ -f "$HOME/.fzf.zsh" ]; then
-    source "$HOME/.fzf.zsh"
+    if fzf_init="$(fzf --zsh 2>/dev/null)"; then
+        eval "$fzf_init"
+        unset fzf_init
+    elif [ -f "$HOME/.fzf.zsh" ]; then
+        source "$HOME/.fzf.zsh"
+    elif [ -f "/usr/share/doc/fzf/examples/key-bindings.zsh" ]; then
+        source "/usr/share/doc/fzf/examples/key-bindings.zsh"
+    fi
 fi
 
 #
@@ -93,16 +97,13 @@ HOSTID=$(echo "$HOSTID" | sed 's/[ -.]/_/g')
 HOSTID=$(echo "$HOSTID" | tr '[:upper:]' '[:lower:]')
 export SSH_AUTH_SOCK="$HOME/.ssh/ssh-agent.$HOSTID.sock"
 
-/usr/bin/ssh-add -l >&/dev/null
-if [ $? -eq 2 ]; then
-    /usr/bin/ssh-agent -a "$SSH_AUTH_SOCK" >/dev/null
+/usr/bin/ssh-add -l >/dev/null 2>&1
+ssh_rc=$?
+if [ "$ssh_rc" -eq 2 ]; then
+    rm -f "$SSH_AUTH_SOCK"
+    /usr/bin/ssh-agent -a "$SSH_AUTH_SOCK" >/dev/null 2>&1
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        /usr/bin/ssh-add --apple-load-keychain
-    fi
-elif [ ! -S "$SSH_AUTH_SOCK" ]; then
-    /usr/bin/ssh-agent -a "$SSH_AUTH_SOCK" >/dev/null
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        /usr/bin/ssh-add --apple-load-keychain
+        /usr/bin/ssh-add --apple-load-keychain 2>/dev/null
     fi
 fi
 

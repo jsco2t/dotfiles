@@ -1,0 +1,4 @@
+interface:
+  display_name: "Teach Me This"
+  short_description: "Learn a topic or codebase through guided dialogue"
+  default_prompt: "Use $teach-me-this to teach me this topic through an interactive question-and-answer session."

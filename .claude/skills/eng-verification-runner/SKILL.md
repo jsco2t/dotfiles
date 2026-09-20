@@ -89,6 +89,43 @@ You need two inputs. If either is missing or unclear, ask:
 
 If the user has not confirmed environment readiness, STOP and ask them to confirm before proceeding. Do not attempt to set up the environment yourself — that is outside this skill's scope.
 
+## Recognized Test Patterns
+
+Verification documents use standardized command patterns. When you encounter one of these patterns, execute it mechanically — no deliberation about *how* to run it. The rigor of *evaluating* the result against Expected Result and Pass Criteria is unchanged.
+
+**Pattern recognition speeds up execution, not evaluation.** You still HALT on any mismatch.
+
+### Workflow Execute-and-Verify
+
+When you see this sequence:
+```bash
+export WF_ID=$($fb workflow start ... -o json | jq -r '.ID')
+$fb workflow events $WF_ID --follow
+$fb workflow log $WF_ID <job-name>
+```
+
+Execute all three commands in order. The workflow ID capture, event following, and log retrieval are a single atomic sequence. Check the workflow reached `Finished` status, then evaluate the log output against Expected Result.
+
+### Service Workflow Verify-and-Stop
+
+When you see `events $WF_ID <stage-name> --follow` (with a stage scope), this is a service workflow. After the scoped stage completes, run any verification commands, then execute the `$fb workflow stop` that MUST follow.
+
+### Expected Error
+
+When you see `<command> 2>&1` and the Expected Result says the command should fail, this is an error-assertion test. Capture both stdout and stderr. Verify exit code is non-zero and error text matches. Do NOT treat a failed command as a test failure if failure is the expected outcome.
+
+### Provisioner / Volume / Resource CRUD
+
+These are straightforward command sequences (add → list → info → remove, or create → list → disable → delete). Execute verbatim. Compare output fields against Pass Criteria.
+
+### User Context Switch
+
+When you see `$fb context use` followed by `$fb context login`, this switches the acting user. Commands after the switch run as that user until the next context switch. Track which user is active — it matters for permission tests.
+
+### Idempotent Setup / Teardown
+
+Commands ending in `2>/dev/null || true` are idempotent — they may fail silently if the resource already exists (setup) or is already gone (teardown). Do NOT treat these failures as test failures. They are expected.
+
 ## Execution Process
 
 ### Phase 1: Pre-Flight

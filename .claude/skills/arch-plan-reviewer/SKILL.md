@@ -38,8 +38,8 @@ $ARGUMENTS
   stated requirements, and recognized patterns — do not stall or ask.
 
 This is a **report-only** skill. Do not modify the plan document or any
-source files. The caller (typically `/feature-workflow`) owns incorporation
-of findings.
+source files. The caller (typically `/task-orchestrator`, via its
+architecture-reviewer agent) owns incorporation of findings.
 
 ## Review Process
 

@@ -1,10 +1,8 @@
 {
   "env": {
-    "ANTHROPIC_MODEL": "claude-opus-4-8[1m]",
-    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
-    "CLAUDE_CODE_EFFORT_LEVEL": "max",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
-    "CLAUDE_CODE_SUPPRESS_SESSION_ATTRIBUTION": "1"
+    "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
+    "CLAUDE_CODE_SUPPRESS_SESSION_ATTRIBUTION": "1",
+    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "7"
   },
   "includeCoAuthoredBy": false,
   "permissions": {
@@ -89,21 +87,12 @@
     ],
     "defaultMode": "acceptEdits"
   },
-  "model": "claude-opus-4-6[1m]",
+  "model": "claude-opus-5-5",
   "skillOverrides": {
     "code-review": "off"
   },
   "hooks": {
     "PermissionRequest": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "claude-nod evaluate"
-          }
-        ]
-      }
     ],
     "PreToolUse": [
       {
@@ -125,6 +114,16 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|Agent|Task|Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -138,9 +137,52 @@
           },
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/hooks/workflow_session_start.py\"",
-            "timeout": 5,
-            "statusMessage": "Initializing workflow session"
+            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
+            "timeout": 20
           }
         ]
       }
@@ -150,9 +192,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/hooks/workflow_stop.py\"",
-            "timeout": 10,
-            "statusMessage": "Checking workflow state"
+            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking task-orchestrator state"
           }
         ]
       }
@@ -163,7 +205,6 @@
     "command": "/usr/bin/env python3 $HOME/.claude/statusline.py"
   },
   "enabledPlugins": {
-    "atlassian@claude-plugins-official": false,
     "clangd-lsp@claude-plugins-official": true,
     "claude-md-management@claude-plugins-official": true,
     "code-simplifier@claude-plugins-official": true,
@@ -198,7 +239,7 @@
   },
   "alwaysThinkingEnabled": true,
   "effortLevel": "high",
-  "advisorModel": "opus",
+  "advisorModel": "claude-opus-5-5",
   "skipWorkflowUsageWarning": true,
   "network": {
     "allowed_domains": [

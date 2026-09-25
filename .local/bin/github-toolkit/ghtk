@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ghtk -- streamlined GitHub CLI (pull requests, issues, reviews, CI) for skills and humans.
+"""ghtk -- streamlined GitHub CLI (pull requests, issues, reviews, CI, Actions) for skills and humans.
 
 A single self-contained, stdlib-only tool. See README.md for the usage contract.
 Run `ghtk`, `ghtk <group> --help`, or `ghtk <group> <command> --help` for help.
@@ -22,8 +22,10 @@ Design notes for maintainers:
   - REST at api.github.com (Accept: application/vnd.github+json); GraphQL at /graphql. GraphQL
     returns errors INSIDE HTTP 200, so graphql() checks the errors[] array before unwrapping data.
   - Output favors compact text to keep token cost low; --json is the structured escape hatch.
-  - Writes (pr comment/reply/resolve/create) all support --dry-run: they print the exact request
-    (method, URL, JSON body) and send nothing, so the whole surface is exercisable read-only.
+  - Writes (pr comment/reply/resolve/create, workflow run) all support --dry-run: they print the
+    exact request (method, URL, JSON body) and send nothing, so the whole surface is exercisable
+    read-only. `workflow run` (a workflow_dispatch trigger) additionally requires explicit user
+    approval as a matter of policy -- see the README and the `workflow run` --help.
 """
 from __future__ import annotations
 
@@ -42,9 +44,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 CONFIG_DIR = Path(os.environ.get("GITHUB_TOOLKIT_CONFIG_DIR", Path.home() / ".config" / "github-toolkit"))
 AUTH_FILE = CONFIG_DIR / "auth.json"
@@ -1052,6 +1055,140 @@ def cmd_commit_prs(args):
 
 
 # --------------------------------------------------------------------------- #
+# commands: workflow - run (WRITE, needs user approval) / runs / list
+# --------------------------------------------------------------------------- #
+def _workflow_id(raw):
+    """A workflow is addressed by its file BASENAME (e.g. release.yml) or numeric id, never a
+    path. Strip any leading path and validate; the caller URL-quotes it (_url does not quote
+    path components)."""
+    wf = (raw or "").strip()
+    if "/" in wf:
+        wf = wf.rsplit("/", 1)[-1]
+    if not wf:
+        die(EX_USAGE, "a workflow is required (a .yml file name like release.yml, or a numeric id)")
+    return wf
+
+
+def _parse_fields(fields):
+    """--field/-f KEY=VALUE (repeatable) -> {key: value}. Values stay STRINGS: the
+    workflow_dispatch API rejects non-string input values."""
+    out = {}
+    for item in fields or []:
+        if "=" not in item:
+            die(EX_USAGE, f"--field expects KEY=VALUE, got: {item}")
+        k, v = item.split("=", 1)
+        if not k.strip():
+            die(EX_USAGE, f"--field has an empty key: {item}")
+        out[k.strip()] = v
+    return out
+
+
+def _dispatch_inputs(args):
+    """Merge --input-file (a JSON object) with repeated --field/-f into one inputs dict
+    (--field wins on a key collision). Returns {} when none were given."""
+    inputs = {}
+    if getattr(args, "input_file", None):
+        p = args.input_file
+        try:
+            data = json.loads(sys.stdin.read() if p == "-" else Path(p).read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            die(EX_USAGE, f"could not read input file {p}: {e}")
+        if not isinstance(data, dict):
+            die(EX_USAGE, "--input-file must be a JSON object of {name: value} workflow inputs")
+        inputs.update({str(k): v for k, v in data.items()})
+    inputs.update(_parse_fields(getattr(args, "field", None)))
+    return inputs
+
+
+def _find_dispatched_run(owner, repo, wf_q, since_iso):
+    """Best-effort: return the html_url of the workflow_dispatch run created at/after
+    since_iso, or None. NEVER raises and NEVER dies -- the dispatch already succeeded, so a
+    failed lookup must not read as a failed trigger (an agent would retry and DOUBLE-FIRE the
+    workflow). Not filtered by branch, so it also works for tag dispatches."""
+    path = f"/repos/{owner}/{repo}/actions/workflows/{wf_q}/runs"
+    for attempt in range(4):
+        # Catch SystemExit too, not just Exception: die() raises SystemExit (a BaseException,
+        # NOT an Exception), so a bare `except Exception` would let a die() escape and turn an
+        # already-successful dispatch into a non-zero exit -- the double-fire this guards against.
+        try:
+            data = rest("GET", path, params={"event": "workflow_dispatch", "per_page": 10}, soft=True)
+            for run in (data or {}).get("workflow_runs", []) or []:
+                # created_at is fixed-width ISO-8601 UTC ('...Z'), so strings sort chronologically.
+                if (run.get("created_at") or "") >= since_iso:
+                    return run.get("html_url")
+        except (Exception, SystemExit):
+            pass
+        if attempt < 3:
+            time.sleep(1.5)
+    return None
+
+
+def cmd_workflow_run(args):
+    owner, repo = resolve_repo(getattr(args, "repo", None))
+    wf = _workflow_id(args.workflow)
+    wf_q = urllib.parse.quote(wf, safe="")
+    payload = {"ref": args.ref}
+    inputs = _dispatch_inputs(args)
+    if inputs:
+        payload["inputs"] = inputs
+    path = f"/repos/{owner}/{repo}/actions/workflows/{wf_q}/dispatches"
+    wf_page = (f"https://github.com/{owner}/{repo}/actions/workflows/{wf}"
+               if "." in wf else f"https://github.com/{owner}/{repo}/actions")
+    if args.dry_run:
+        print(f"DRY RUN: POST {API_ROOT}{path}")
+        print(json.dumps(payload, indent=2))
+        return
+    since = (datetime.now(timezone.utc) - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rest("POST", path, body=payload)  # 204 No Content on success; errors surface via rest()
+    run_url = _find_dispatched_run(owner, repo, wf_q, since)
+    if args.json:
+        return jdump({"workflow": wf, "ref": args.ref, "dispatched": True,
+                      "inputs": inputs, "runUrl": run_url})
+    print(f"dispatched workflow_dispatch event for {wf} at {args.ref}")
+    if run_url:
+        print(f"{run_url}  (best-effort: newest workflow_dispatch run)")
+    else:
+        print(f"{wf_page}\n(the run may take a moment to appear; `ghtk workflow runs {wf}` to check)")
+
+
+def cmd_workflow_runs(args):
+    owner, repo = resolve_repo(getattr(args, "repo", None))
+    wf_q = urllib.parse.quote(_workflow_id(args.workflow), safe="")
+    limit = args.limit if args.limit and args.limit > 0 else 20
+    data = rest("GET", f"/repos/{owner}/{repo}/actions/workflows/{wf_q}/runs",
+                params={"per_page": min(limit, 100)})
+    runs = (data or {}).get("workflow_runs", [])[:limit]
+    out = [{"runNumber": r.get("run_number"), "status": r.get("status"),
+            "conclusion": r.get("conclusion"), "event": r.get("event"),
+            "branch": r.get("head_branch"), "createdAt": r.get("created_at"),
+            "url": r.get("html_url")} for r in runs]
+    if args.json:
+        return jdump({"runs": out, "count": len(out)})
+    if not out:
+        print("(no runs)")
+        return
+    for r in out:
+        state = r["conclusion"] or r["status"] or "?"
+        print(f"#{r['runNumber']:<6} {state:<12} {(r['event'] or ''):<17} "
+              f"{(r['createdAt'] or '')[:19]}  {r['url']}")
+
+
+def cmd_workflow_list(args):
+    owner, repo = resolve_repo(getattr(args, "repo", None))
+    data = rest("GET", f"/repos/{owner}/{repo}/actions/workflows", params={"per_page": 100})
+    out = [{"id": w.get("id"), "name": w.get("name"),
+            "file": (w.get("path") or "").rsplit("/", 1)[-1], "state": w.get("state")}
+           for w in (data or {}).get("workflows", [])]
+    if args.json:
+        return jdump({"workflows": out, "count": len(out)})
+    if not out:
+        print("(no workflows)")
+        return
+    for w in out:
+        print(f"{w['file']:<34} {(w['state'] or ''):<10} {w['name']}")
+
+
+# --------------------------------------------------------------------------- #
 # commands: auth / doctor
 # --------------------------------------------------------------------------- #
 def cmd_auth_login(args):
@@ -1252,11 +1389,46 @@ def add_pr_commands(sp, repo_parent):
     cr.set_defaults(func=cmd_pr_create)
 
 
+_WORKFLOW_APPROVAL = (
+    "APPROVAL REQUIRED. Triggering or re-running ANY workflow needs explicit user approval\n"
+    "first -- an agent must never dispatch a workflow on its own. Procedure:\n"
+    "  1. rehearse with --dry-run (prints the exact request, sends nothing)\n"
+    "  2. show the user that request and get explicit approval\n"
+    "  3. only then re-run without --dry-run\n"
+    "--ref is required on purpose: there is no default branch, so you never silently\n"
+    "dispatch 'main' when a tag or another branch was meant.")
+
+
+def add_workflow_commands(sp, repo_parent):
+    r = sp.add_parser("run", parents=[repo_parent],
+                      help="trigger a workflow_dispatch event (WRITE -- needs user approval)",
+                      description=_WORKFLOW_APPROVAL,
+                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    r.add_argument("workflow", help="workflow file name (e.g. release.yml) or numeric id")
+    r.add_argument("--ref", required=True, help="branch, tag, or SHA to run on (REQUIRED -- no default)")
+    r.add_argument("--field", "-f", action="append", metavar="KEY=VALUE",
+                   help="workflow input (repeatable); sent as a string")
+    r.add_argument("--input-file", help="JSON object of workflow inputs ('-' = stdin)")
+    r.add_argument("--dry-run", action="store_true", help="print the request; send nothing")
+    r.add_argument("--json", action="store_true")
+    r.set_defaults(func=cmd_workflow_run)
+
+    rs = sp.add_parser("runs", parents=[repo_parent], help="list recent runs of a workflow")
+    rs.add_argument("workflow", help="workflow file name (e.g. release.yml) or numeric id")
+    rs.add_argument("--limit", type=int, default=20, help="max runs to show (default 20)")
+    rs.add_argument("--json", action="store_true")
+    rs.set_defaults(func=cmd_workflow_runs)
+
+    ls = sp.add_parser("list", parents=[repo_parent], help="list the repo's workflows (file name + id)")
+    ls.add_argument("--json", action="store_true")
+    ls.set_defaults(func=cmd_workflow_list)
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog="ghtk",
-        description="Streamlined GitHub CLI (PRs, issues, reviews, CI). stdlib-only, sandbox-friendly. "
-                    "Compact output by default; --json for structured output.")
+        description="Streamlined GitHub CLI (PRs, issues, reviews, CI, Actions). stdlib-only, "
+                    "sandbox-friendly. Compact output by default; --json for structured output.")
     p.add_argument("--version", action="version", version=f"github-toolkit {VERSION}")
     sub = p.add_subparsers(dest="group", metavar="<group>")
     repo_parent = _repo_parent()
@@ -1283,6 +1455,11 @@ def build_parser():
     cp.add_argument("sha", help="commit sha (full or abbreviated)")
     cp.add_argument("--json", action="store_true")
     cp.set_defaults(func=cmd_commit_prs)
+
+    wf = sub.add_parser("workflow", help="GitHub Actions: run (dispatch, WRITE -- needs approval), runs, list")
+    wfsub = wf.add_subparsers(metavar="<command>")
+    _group_default_help(wf)
+    add_workflow_commands(wfsub, repo_parent)
 
     a = sub.add_parser("auth", help="authenticate and manage the saved token")
     asub = a.add_subparsers(metavar="<subcommand>")

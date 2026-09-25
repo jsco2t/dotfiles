@@ -26,6 +26,7 @@ import argparse
 import base64
 import getpass
 import html
+import http.client
 import json
 import os
 import platform
@@ -37,9 +38,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 CONFIG_DIR = Path(os.environ.get("JIRA_TOOLKIT_CONFIG_DIR",
                                  os.environ.get("ATLASSIAN_TOOLKIT_CONFIG_DIR",
@@ -250,7 +252,7 @@ def _extract_error_message(body):
     return ""
 
 
-def _http_error(e):
+def _http_error(e, maybe_applied=False):
     body = ""
     try:
         body = e.read().decode("utf-8", "replace")
@@ -262,12 +264,19 @@ def _http_error(e):
         msg += f": {detail}"
     if e.code in (401, 403):
         msg += "  (check `atlassian auth status`; the API token may be wrong or expired)"
+    if maybe_applied:
+        msg += "  (the request may already have been applied -- check before re-running)"
     code = {401: EX_AUTH, 403: EX_AUTH, 404: EX_NOTFOUND}.get(e.code, EX_API)
     die(code, msg)
 
 
-def api_request(method, path, params=None, body=None, timeout=DEFAULT_TIMEOUT, expect_json=True, soft=False):
-    """Make an Atlassian API request. On error: die(), or if soft=True return None."""
+def api_request(method, path, params=None, body=None, timeout=DEFAULT_TIMEOUT, expect_json=True, soft=False,
+                idempotent=None):
+    """Make an Atlassian API request. On error: die(), or if soft=True return None.
+    A POST whose reply was lost may already be applied, so it is retried only when Jira provably never
+    processed it (429, connect/send failure); pass idempotent=True for read-only POSTs (JQL search)."""
+    if idempotent is None:
+        idempotent = method != "POST"
     base_url, email, token = load_auth()
     url = base_url + path
     if params:
@@ -290,19 +299,20 @@ def api_request(method, path, params=None, body=None, timeout=DEFAULT_TIMEOUT, e
                     return raw
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
-            if e.code in (429, 500, 502, 503, 504) and attempt < 3:
+            # 429 is rejected before processing; a 5xx can arrive after Jira applied the write.
+            if attempt < 3 and (e.code == 429 or (idempotent and e.code in (500, 502, 503, 504))):
                 ra = e.headers.get("Retry-After")
                 time.sleep(float(ra) if (ra and ra.isdigit()) else 2 ** attempt)
                 continue
             if soft:
                 eprint(f"warning: {method} {path} -> HTTP {e.code}")
                 return None
-            _http_error(e)
+            _http_error(e, maybe_applied=not idempotent and e.code >= 500)
         except ssl.SSLCertVerificationError as e:
             if soft:
                 return None
             die(EX_NET, _cert_help(e))
-        except (urllib.error.URLError, TimeoutError) as e:
+        except urllib.error.URLError as e:  # connect/send failed: the request never reached Jira
             last_err = e
             if attempt < 3:
                 time.sleep(2 ** attempt)
@@ -311,9 +321,34 @@ def api_request(method, path, params=None, body=None, timeout=DEFAULT_TIMEOUT, e
                 eprint(f"warning: {method} {path} -> {getattr(e, 'reason', e)}")
                 return None
             die(EX_NET, _net_help(e))
+        except http.client.InvalidURL as e:  # malformed URL (e.g. a space in an issue key): nothing was sent
+            die(EX_USAGE, f"invalid request: {e}")
+        except (OSError, http.client.HTTPException) as e:  # sent, but no complete reply (timeout, reset)
+            last_err = e
+            if idempotent and attempt < 3:
+                time.sleep(2 ** attempt)
+                continue
+            if soft:
+                eprint(f"warning: {method} {path} -> {e!r}")
+                return None
+            if idempotent:
+                die(EX_NET, _net_help(e))
+            die(EX_NET, f"no complete response to {method} {path} ({e!r}); it may already have been "
+                        "applied -- check before re-running")
     if soft:
         return None
     die(EX_NET, _net_help(last_err))
+
+
+def api_get_all(path, key, params=None):
+    """Every page of an offset-paged (startAt/total) list endpoint -> the combined `key` items, in API order."""
+    items = []
+    while True:
+        res = api_request("GET", path, params={**(params or {}), "startAt": len(items)})
+        page = res.get(key, [])
+        items.extend(page)
+        if not page or res.get("isLast") or len(items) >= res.get("total", len(items)):
+            return items
 
 
 # --------------------------------------------------------------------------- #
@@ -431,6 +466,34 @@ def name_of(field):
 
 def short_date(s):
     return (s or "")[:10]
+
+
+def short_time(s):
+    """Jira timestamp -> 'YYYY-MM-DD HH:MM +ZZZZ' (keeps the offset; drops seconds)."""
+    return re.sub(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}):\d{2}(?:\.\d+)?", r"\1 \2 ", s or "")
+
+
+def brief(s, n=120):
+    """One-line field value for `issue history`: long or multi-line text (e.g. a description) -> its size."""
+    s = s or ""
+    return s if len(s) <= n and "\n" not in s else f"({len(s)} chars; --full to show)"
+
+
+def parse_when(s):
+    """ISO 8601 -> aware datetime. Accepts Jira's '+0000' offsets and 'Z'; naive = local time.
+    (Normalized by hand: fromisoformat only takes '+HH:MM' before Python 3.11.)"""
+    t = re.sub(r"Z$", "+00:00", s.strip())
+    t = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", t)
+    try:
+        dt = datetime.fromisoformat(t)
+    except ValueError:
+        die(EX_USAGE, f"could not parse time: {s} (use ISO 8601, e.g. 2026-09-17T09:00 or 2026-09-17T15:00:00+0000)")
+    return dt if dt.tzinfo else dt.astimezone()
+
+
+def jira_time(dt):
+    """Jira's worklog `started` format -- no colon in the offset: 2026-09-17T09:00:00.000-0600."""
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.000%z")
 
 
 def status_category(status):
@@ -695,9 +758,13 @@ def cmd_issue_comment_delete(args):
 
 
 def cmd_issue_comments(args):
+    # Newest --limit from Jira, then shown oldest -> newest.
     res = api_request("GET", f"/rest/api/{API}/issue/{args.key}/comment",
-                      params={"maxResults": args.limit, "orderBy": "created"})
-    comments = res.get("comments", [])
+                      params={"maxResults": args.limit, "orderBy": "-created"})
+    comments = res.get("comments", [])[::-1]
+    total = res.get("total", len(comments))
+    if total > len(comments):
+        eprint(f"(showing the newest {len(comments)} of {total} comments; raise --limit for more)")
     if args.json:
         return jdump(comments)
     if not comments:
@@ -741,6 +808,56 @@ def cmd_issue_links(args):
         print(f"- {obj.get('title') or '(untitled)'}: {obj.get('url','')}")
 
 
+def cmd_issue_history(args):
+    histories = api_get_all(f"/rest/api/{API}/issue/{args.key}/changelog", "values", {"maxResults": 100})
+    want = (args.field or "").lower()  # a field name ("Fix Version") or id ("fixVersions", "customfield_10016")
+    rows = [{"created": h.get("created"), "author": name_of(h.get("author")), "field": it.get("field"),
+             "from": it.get("fromString"), "to": it.get("toString")}
+            for h in histories for it in h.get("items", [])
+            if not want or want in ((it.get("field") or "").lower(), (it.get("fieldId") or "").lower())]
+    if args.json:
+        return jdump(rows)
+    if not rows:
+        if want and histories:  # the issue has history; the filter matched none of it
+            seen = sorted({it["field"] for h in histories for it in h.get("items", []) if it.get("field")})
+            print(f"(no changes to {args.field}; changed fields: {', '.join(seen)})")
+        else:
+            print("(no history)")
+        return
+    for r in rows:
+        frm, to = (r["from"] or "", r["to"] or "") if args.full else (brief(r["from"]), brief(r["to"]))
+        print(f"{short_time(r['created'])}  {r['author']}  {r['field']}: {frm} -> {to}")
+
+
+def cmd_issue_worklog(args):
+    started = parse_when(args.started) if args.started else datetime.now().astimezone()
+    body = {"timeSpent": args.time, "started": jira_time(started)}
+    if args.comment is not None:
+        body["comment"] = text_to_adf(read_maybe_stdin(args.comment))
+    res = api_request("POST", f"/rest/api/{API}/issue/{args.key}/worklog", body=body)
+    if args.json:
+        return jdump(res)
+    print(f"logged {res.get('timeSpent', args.time)} on {args.key} "
+          f"(worklog id {res.get('id')}, started {short_time(res.get('started'))})")
+
+
+def cmd_issue_worklogs(args):
+    # Jira lists worklogs oldest-first (no orderBy), so fetch them all and keep the newest --limit.
+    logs = api_get_all(f"/rest/api/{API}/issue/{args.key}/worklog", "worklogs")
+    if 0 < args.limit < len(logs):
+        eprint(f"(showing the newest {args.limit} of {len(logs)} worklogs; --limit {len(logs)} for all)")
+        logs = logs[-args.limit:]
+    if args.json:
+        return jdump([{"id": w.get("id"), "author": name_of(w.get("author")), "started": w.get("started"),
+                       "timeSpent": w.get("timeSpent"), "timeSpentSeconds": w.get("timeSpentSeconds")}
+                      for w in logs])
+    if not logs:
+        print("(no worklogs)")
+        return
+    for w in logs:
+        print(f"- {name_of(w.get('author'))} [{short_time(w.get('started'))}]: {w.get('timeSpent')}  (id {w.get('id')})")
+
+
 # --------------------------------------------------------------------------- #
 # commands: jira - search (JQL)
 # --------------------------------------------------------------------------- #
@@ -760,7 +877,7 @@ def cmd_search(args):
         body = {"jql": args.jql, "maxResults": min(100, limit - len(collected)), "fields": fields}
         if page_token:
             body["nextPageToken"] = page_token
-        res = api_request("POST", f"/rest/api/{API}/search/jql", body=body)
+        res = api_request("POST", f"/rest/api/{API}/search/jql", body=body, idempotent=True)
         collected.extend(res.get("issues", []))
         page_token = res.get("nextPageToken")
         if res.get("isLast") or not page_token or len(collected) >= limit:
@@ -887,7 +1004,7 @@ def cmd_search_generic(args):
     q = args.query
     jr = api_request("POST", f"/rest/api/{API}/search/jql",
                      body={"jql": f'text ~ "{q}"', "maxResults": args.limit,
-                           "fields": ["summary", "status", "issuetype"]}, soft=True)
+                           "fields": ["summary", "status", "issuetype"]}, soft=True, idempotent=True)
     issues = (jr or {}).get("issues", [])
     cr = api_request("GET", "/wiki/rest/api/search",
                      params={"cql": f'text ~ "{q}"', "limit": args.limit}, soft=True)
@@ -1036,7 +1153,7 @@ def add_jira_commands(jp):
 
     ics = isub.add_parser("comments", help="list comments")
     ics.add_argument("key")
-    ics.add_argument("--limit", type=int, default=20)
+    ics.add_argument("--limit", type=int, default=20, help="show the newest N (default 20)")
     ics.add_argument("--json", action="store_true")
     ics.set_defaults(func=cmd_issue_comments)
 
@@ -1050,6 +1167,28 @@ def add_jira_commands(jp):
     il.add_argument("key")
     il.add_argument("--json", action="store_true")
     il.set_defaults(func=cmd_issue_links)
+
+    ih = isub.add_parser("history", help="list change history (status moves, field edits)")
+    ih.add_argument("key")
+    ih.add_argument("--field", help='only changes to this field, by name or id (e.g. status, "Fix Version", '
+                                    'customfield_10016)')
+    ih.add_argument("--full", action="store_true", help="print long values (e.g. description edits) in full")
+    ih.add_argument("--json", action="store_true")
+    ih.set_defaults(func=cmd_issue_history)
+
+    iw = isub.add_parser("worklog", help="log time spent")
+    iw.add_argument("key")
+    iw.add_argument("time", help="Jira duration, e.g. '1d 4h' or '3h 30m'")
+    iw.add_argument("--started", help="when the work began (ISO 8601; default now; no offset = local time)")
+    iw.add_argument("--comment", help="worklog comment text, or '-' for stdin")
+    iw.add_argument("--json", action="store_true")
+    iw.set_defaults(func=cmd_issue_worklog)
+
+    iws = isub.add_parser("worklogs", help="list logged time")
+    iws.add_argument("key")
+    iws.add_argument("--limit", type=int, default=50, help="show the newest N (default 50)")
+    iws.add_argument("--json", action="store_true")
+    iws.set_defaults(func=cmd_issue_worklogs)
 
 
 def add_confluence_commands(cp):

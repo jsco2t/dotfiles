@@ -19,6 +19,8 @@ Three entry points, all on `PATH` (same tool):
 - Exit codes: `0` ok · `1` usage · `2` auth · `3` not found · `4` API error · `5` network/TLS.
 - If a command fails with a **network error only inside a sandbox**, re-run it with the
   sandbox disabled. TLS/CA is handled automatically otherwise (no setup needed).
+- A write (`worklog`, `comment`, `create`, …) that fails with "may already have been applied" is not retried
+  automatically. Check first (e.g. `jira issue worklogs <KEY>`) before re-running, or it may be recorded twice.
 
 ## Auth (one-time, human)
 
@@ -43,8 +45,11 @@ the file: `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
 | `jira issue edit <KEY>` | Edit fields / labels | `jira issue edit FUZZ-1234 --summary "..." --add-label triage` |
 | `jira issue comment <KEY> <text>` | Add a comment, or edit one with `--id <id>` (`-` = stdin) | `jira issue comment FUZZ-1234 "Done."`  ·  `… "Fixed typo." --id 90210` |
 | `jira issue comment-delete <KEY> <id>` | Delete a comment — **permanent** | `jira issue comment-delete FUZZ-1234 90210` |
-| `jira issue comments <KEY>` | List comments (comment ids shown here) | `jira issue comments FUZZ-1234` |
+| `jira issue comments <KEY>` | List comments — the newest 20 (`--limit N`), shown oldest→newest; comment ids shown here | `jira issue comments FUZZ-1234` |
 | `jira issue transition <KEY> [name]` | Apply/list transitions | `jira issue transition FUZZ-1234 "In Review"` |
+| `jira issue history <KEY>` | Change history, oldest first (`--field` = one field, by name or id; long values shown as sizes, `--full` for text) | `jira issue history FUZZ-1234 --field status` |
+| `jira issue worklog <KEY> <time>` | Log time (Jira duration: `1d 4h`, `3h 30m`); `--started` ISO time, default now | `jira issue worklog FUZZ-1234 "1d 4h" --started 2026-09-17T09:00` |
+| `jira issue worklogs <KEY>` | List logged time — the newest 50 (`--limit N`), shown oldest→newest; worklog ids shown here | `jira issue worklogs FUZZ-1234` |
 | `jira issue links <KEY>` | Remote links (e.g. linked Confluence pages) | `jira issue links FUZZ-1234` |
 | `jira project list` | List visible projects | `jira project list --search fuzz` |
 | `jira project types <KEY>` | Issue types for a project | `jira project types FUZZ` |
@@ -72,11 +77,14 @@ the file: `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
 
 - `--json` — sanitized, schema-controlled output (see [JSON output schema](#json-output-schema)); `--raw` — the full, unfiltered Jira API response.
 - `--comments` — include comments in `search` / `issue get` `--json` (and `--raw`) output.
-- `--limit N` / `--fields a,b,c` — bound result size and fields. `--full` — untruncated Confluence body.
+- `--limit N` / `--fields a,b,c` — bound result size and fields. `issue comments` / `issue worklogs` keep the
+  newest N (shown oldest→newest) and note on stderr when older entries were left out.
+- `--full` — untruncated Confluence body; on `issue history`, long values (e.g. description edits) in full.
 - `--help` — on every group and command.
 - Text inputs (`--description`, comment body) accept a literal string or `-` to read stdin.
 - `--field KEY=VALUE` (repeatable, `issue create`/`edit`) sets any raw Jira field; value is
-  JSON-decoded when possible (e.g. `--field 'priority={"name":"High"}'`).
+  JSON-decoded when possible (e.g. `--field 'priority={"name":"High"}'`). On `issue history`, `--field NAME`
+  is a filter instead: one field, by name or id (`status`, `"Fix Version"`, `customfield_10016`).
 
 ## JSON output schema
 
@@ -94,8 +102,10 @@ the file: `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
 | `comments` | `[{author, created, text}]` — only with `--comments`; ADF flattened, oldest→newest |
 
 `issue get --json` also includes `reporter`, `labels`, and `description` (with `--description`).
+`issue history --json` → `[{created, author, field, from, to}]` (values never shortened); `issue worklogs --json` →
+`[{id, author, started, timeSpent, timeSpentSeconds}]` (timestamps are full Jira ISO strings).
 `--comments` on `search` embeds comments from the search response, which may be a subset on
-very high-comment issues; use `jira issue comments <KEY>` for the complete, ordered list.
+very high-comment issues; `jira issue comments <KEY> --limit N` lists the newest N (default 20), oldest→newest.
 
 ## Troubleshooting
 
@@ -110,6 +120,9 @@ very high-comment issues; use `jira issue comments <KEY>` for the complete, orde
   uses hosted OAuth a CLI cannot reuse, so this tool uses API tokens.
 - Jira writes use REST v3 and wrap plain text into ADF (v3 rejects plain strings for
   description/comment). If a Jira instance rejects an ADF write, the fallback is REST v2.
+- Retries: `api_request` retries 429, 5xx, and network errors for GET/PUT/DELETE, but a POST only on 429 or a
+  connect/send failure — re-sending a POST whose reply was lost would duplicate the write (worklog, comment,
+  issue). Read-only POSTs (JQL search) pass `idempotent=True`.
 - Confluence reads use REST v2 (`body-format=atlas_doc_format`, reusing the ADF renderer;
   falling back to `storage`/XHTML for legacy pages); search uses v1 `/wiki/rest/api/search` (CQL).
 - Confluence writes use REST v2: create/update `/wiki/api/v2/pages` (update fetches the current

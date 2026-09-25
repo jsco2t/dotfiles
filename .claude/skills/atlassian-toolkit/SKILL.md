@@ -1,6 +1,6 @@
 ---
 name: atlassian-toolkit
-description: Interact with Jira or Confluence on ciqinc.atlassian.net — search/read/create/edit issues, JQL, comments, transitions, projects, users, and Confluence pages. Use whenever a task needs Jira tickets or Confluence content.
+description: Interact with Jira or Confluence on ciqinc.atlassian.net — search/read/create/edit issues, JQL, comments, transitions, change history, worklogs (log/list time), projects, users, and Confluence pages. Use whenever a task needs Jira tickets or Confluence content.
 ---
 
 # Atlassian toolkit (Jira + Confluence CLI)
@@ -16,6 +16,8 @@ flags, and auth. Common starting points:
 - `jira search '<JQL>' --limit 20` — search issues
 - `jira issue get <KEY> --description --comments` — one issue
 - `jira issue comment <KEY> "<text>"` — add a comment (`--id <id>` edits an existing one; `jira issue comment-delete <KEY> <id>` removes it)
+- `jira issue history <KEY> --field status` — change history, oldest first (omit `--field` for every field)
+- `jira issue worklog <KEY> "2h" [--started <ISO time>]` — log time, default now (`jira issue worklogs <KEY>` lists the newest entries)
 - `confluence page <id|url>` — fetch a page (`--full` for the whole body)
 - `atlassian search "<text>"` — Jira + Confluence together
 - `atlassian doctor` — diagnose auth/TLS/connectivity

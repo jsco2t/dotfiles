@@ -1,6 +1,6 @@
 # github toolkit (`ghtk`)
 
-A streamlined CLI for GitHub (pull requests, issues, reviews, CI), for humans and skills.
+A streamlined CLI for GitHub (pull requests, issues, reviews, CI, Actions), for humans and skills.
 One self-contained Python script, **stdlib-only**, on `PATH` as `ghtk`. Compact output by
 default to keep token cost low. Run `ghtk <group> <command> --help` for details on any command.
 
@@ -20,8 +20,10 @@ that is the "strange TLS error" this tool removes.)
 - **`<ref>`** for `pr` commands is a PR URL, a number, `#number`, or omitted (auto-discovered
   from the current git branch).
 - Exit codes: `0` ok · `1` usage · `2` auth · `3` not found · `4` API error · `5` network/TLS.
-- **Writes are safe to rehearse:** `pr comment`, `pr reply`, `pr resolve`, and `pr create` all
-  take `--dry-run`, which prints the exact request (method, URL, JSON body) and sends nothing.
+- **Writes are safe to rehearse:** `pr comment`, `pr reply`, `pr resolve`, `pr create`, and
+  `workflow run` all take `--dry-run`, which prints the exact request (method, URL, JSON body)
+  and sends nothing.
+- **Triggering a workflow needs explicit user approval** — see [Workflows](#workflows-github-actions).
 - If a command ever fails with a **network error only inside a sandbox**, re-run it with the
   sandbox disabled — but this should not happen; TLS/CA is handled automatically.
 
@@ -82,6 +84,39 @@ and reports which could not be placed (`dropped_locations`).
 | `ghtk issue get <ref>` | Issue (or PR) body, labels, `--comments` | `ghtk issue get 42 --comments` · `ghtk issue get https://github.com/o/r/issues/42` |
 | `ghtk commit prs <sha>` | PRs that introduced a commit | `ghtk commit prs a1b2c3d` |
 
+## Workflows (GitHub Actions)
+
+> ### ⚠ Approval required — triggering or re-running *any* workflow needs explicit user approval.
+> `ghtk workflow run` fires a real `workflow_dispatch` event — a build, release, or deploy with
+> real side effects. **An agent must never dispatch a workflow on its own initiative.** The
+> required procedure is:
+>
+> 1. **Rehearse** with `--dry-run` (prints the exact request; sends nothing).
+> 2. **Show** the user that request and **get explicit approval.**
+> 3. Only then **re-run without `--dry-run`.**
+>
+> Read-only `workflow list` and `workflow runs` need no approval.
+
+`<workflow>` = the workflow **file name** (e.g. `release.yml`) or its numeric id — a path is
+accepted and reduced to its basename.
+
+| Command | Purpose | Example |
+| --- | --- | --- |
+| `ghtk workflow list` | List the repo's workflows (file name + id) | `ghtk workflow list -R o/r` |
+| `ghtk workflow runs <wf>` | Recent runs (status/conclusion/event/url) | `ghtk workflow runs release.yml --limit 5` |
+| `ghtk workflow run <wf> --ref <ref>` | Trigger a workflow_dispatch (WRITE — **needs approval**) | `ghtk workflow run warewulf-packages.yml --ref v1.3.1 --dry-run` |
+
+- **`--ref` is required** (branch, tag, or SHA). There is deliberately no default, so you never
+  silently dispatch `main` when a tag was meant.
+- **Inputs:** `-f/--field KEY=VALUE` (repeatable) and/or `--input-file <json>` (a `{name: value}`
+  object; `-` = stdin). Values are sent as strings and must match the workflow's declared
+  `workflow_dispatch.inputs`; `--field` wins over the file on a key collision.
+- The dispatch endpoint returns no run id, so after a real trigger the tool makes a **best-effort**
+  lookup of the newest `workflow_dispatch` run and prints its URL; if the run hasn't surfaced yet
+  it prints the workflow's Actions page instead. A failed lookup never fails the trigger — the
+  dispatch already succeeded, and retrying would double-fire the workflow.
+- `workflow runs --limit N` shows the N most recent runs (default 20, capped at 100).
+
 ## Diagnostics
 
 | Command | Purpose |
@@ -103,6 +138,11 @@ and reports which could not be placed (`dropped_locations`).
 - Exit `2` (auth): the token is missing/expired or lacks a scope — check `ghtk auth status`.
 - Exit `4` on a write with "must be part of the diff": the comment's line isn't in the PR diff;
   `pr comment` already retries valid comments individually and reports the dropped ones.
+- `workflow run` **422 "Workflow does not have 'workflow_dispatch' trigger"**: the workflow must
+  declare an `on: workflow_dispatch:` trigger **on the ref you dispatched** (a tag or branch can
+  lag the default branch). **404 "No ref found for: X"**: the `--ref` branch/tag/SHA doesn't
+  exist. **403**: the token can't dispatch on this repo — it needs write access, and GitHub's
+  returned message names exactly what is missing.
 
 ## Maintainer notes
 

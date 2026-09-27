@@ -1027,10 +1027,21 @@ def cmd_close(args: argparse.Namespace) -> int:
     return 0
 
 
+def read_text_arg(path: str, flag: str) -> str:
+    """Contents of a file named on the command line (text too shell-hostile to quote inline)."""
+    try:
+        return Path(path).expanduser().read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise OrchError(f"cannot read {flag}: {exc}")
+
+
 def cmd_note(args: argparse.Namespace) -> int:
     wf = resolve_workflow(args.wf)
-    append_decision(wf, f"orchestrator note{' — ' + args.title if args.title else ''}", args.text)
-    ledger.append(wf, {"kind": "note", "title": args.title, "text": args.text[:2000]})
+    text = read_text_arg(args.file, "--file") if args.file else args.text
+    if not text:
+        raise OrchError("usage: orch note \"text\" | --file <path> [--title ...]")
+    append_decision(wf, f"orchestrator note{' — ' + args.title if args.title else ''}", text)
+    ledger.append(wf, {"kind": "note", "title": args.title, "text": text[:2000]})
     out(f"noted in {wf.decisions}")
     return 0
 
@@ -1047,9 +1058,10 @@ def cmd_brief(args: argparse.Namespace) -> int:
     if len(positional) != 1:
         raise OrchError("usage: orch brief [T###] <stage> --agent <agent> [--loop N | --final | --plan]")
     stage = positional[0]
+    note = read_text_arg(args.note_file, "--note-file") if args.note_file else args.note
     ctx = gates.Context(wf)
     text, report = briefs.build(ctx, stage, args.agent, task_id=task_id, loop=args.loop, topic=args.topic,
-                                note=args.note, mode_hint=args.mode)
+                                note=note, mode_hint=args.mode)
     safe_render(wf)
     out(text)
     return 0
@@ -1299,7 +1311,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("close", help="DONE -> CLOSED (needs the human's /task-orchestrator close)").set_defaults(func=cmd_close)
 
     p = sub.add_parser("note", help="append a clarification to decisions.md")
-    p.add_argument("text")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("text", nargs="?")
+    source.add_argument("--file", help="read the note from this file (safe for backticks and $)")
     p.add_argument("--title")
     p.set_defaults(func=cmd_note)
 
@@ -1311,7 +1325,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plan", action="store_true")
     p.add_argument("--topic", help="research topic (research briefs)")
     p.add_argument("--mode", help="mode hint (e.g. 'plan' or 'code' for architecture-reviewer)")
-    p.add_argument("--note", help="extra context for this dispatch")
+    notes = p.add_mutually_exclusive_group()
+    notes.add_argument("--note", help="extra context for this dispatch")
+    notes.add_argument("--note-file", help="read the extra context from this file (safe for backticks and $)")
     p.set_defaults(func=cmd_brief)
 
     p = sub.add_parser("ledger", help="show ledger entries")

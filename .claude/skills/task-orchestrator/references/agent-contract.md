@@ -22,7 +22,10 @@ If the brief is missing something you need, that is a `needs_input`, not a guess
 
 ## 2. The result block
 
-Your **final message** must end with one fenced block, every placeholder replaced:
+Finish with one fenced block, every placeholder replaced. If you deliver your report
+through the **SubagentHandback** tool, end that hand-back message with the block; either
+way, also end your **final text message** with it. A closing note after the hand-back
+without the block is how results get lost.
 
 ````
 ```orch-result
@@ -41,7 +44,8 @@ Your **final message** must end with one fenced block, every placeholder replace
 ```
 ````
 
-The SubagentStop hook parses it from your final message and appends it to the ledger with
+The SubagentStop hook parses it from your final message — or, if that has none, from the
+latest SubagentHandback message you sent since your previous stop — and appends it to the ledger with
 your harness-supplied agent type. **An invalid or missing block means your work is not
 recorded** and you will be resumed to fix it. Rules:
 

@@ -165,7 +165,7 @@ brief carries them.
 | `orch bind <dir>` / `orch unbind` / `orch where` / `orch list` | orchestrator | session binding |
 | `orch status [--task T] [--fast] [--json]` | anyone | next action / checklist |
 | `orch validate [--for-approval]` / `orch plan-hash` / `orch render` | anyone / orchestrator | plan package |
-| `orch brief [T] <stage> --agent A [--loop N\|--final] [--topic] [--mode] [--note]` | orchestrator | dispatch brief |
+| `orch brief [T] <stage> --agent A [--loop N\|--final] [--topic] [--mode] [--note \| --note-file]` | orchestrator | dispatch brief |
 | `orch submit` / `orch approve` / `orch revise` | orchestrator | planning → approval → execution |
 | `orch loop open N` / `orch loop close N` | orchestrator | loop gates |
 | `orch task start\|round\|accept\|fail T` | orchestrator | task transitions |
@@ -178,7 +178,7 @@ brief carries them.
 | `orch needs-human --kind K --summary S [--task T] [--report P]` | orchestrator | stop for the human |
 | `orch resolve --action answer\|continue\|waive\|retry\|confirm [--grant N]` | orchestrator | apply the human's decision |
 | `orch deviation --summary S [--task T]` | orchestrator | plan cannot be followed |
-| `orch note "text" [--title]` | orchestrator | append a clarification to decisions.md |
+| `orch note "text" \| --file <path> [--title]` | orchestrator | append a clarification to decisions.md (`--file` for text with backticks or `$`) |
 | `orch halt` / `orch resume` / `orch close` | orchestrator | human-driven lifecycle |
 | `orch ledger [--task T] [--kind K] [--tail N] [--json]` | anyone | inspect evidence |
 | `orch doctor` / `orch selftest [--check]` | orchestrator | installation checks |

@@ -173,6 +173,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         "updated_at": utcnow(),
         "phase": "PLANNING",
         "resume_phase": None,
+        "halted_from": None,
         "iteration": 1,
         "plan_revision": 1,
         "submitted_plan_sha256": None,
@@ -994,9 +995,21 @@ def cmd_resume(args: argparse.Namespace) -> int:
         token = human_token(ctx.entries, "resume", state.get("halted_at"))
         if token is None:
             raise OrchError("resuming a halted workflow is the human's call: they type `/task-orchestrator resume`")
+        origin = state.get("halted_from") or {}
+        target = origin.get("phase")
+        if not target:
+            # Halted before halted_from existed: only halts from EXECUTING/FINAL
+            # recorded resume_phase; otherwise it was a stop phase we can't name.
+            target = state.get("resume_phase") or (None if state.get("approved_at") else "PLANNING")
+            if not target:
+                raise OrchError("this workflow was halted without recording the phase it was in, and the plan is "
+                                "approved, so it cannot be inferred; set `phase` in .orch/state.json by hand")
+            state["resume_phase"] = None
         consume(wf, token, "resume")
-        state["phase"] = state.get("resume_phase") or "EXECUTING"
-        state["resume_phase"] = None
+        state["phase"] = target
+        state["block_reason"] = origin.get("block_reason")
+        state["phase_since"] = utcnow()
+        state["halted_from"] = None
         state["halt_requested"] = False
         wf.save_state(state)
     transition(wf, "workflow", state["phase"], reason="resumed by the human")

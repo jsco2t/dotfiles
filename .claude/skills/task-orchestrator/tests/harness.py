@@ -19,6 +19,7 @@ sys.path.insert(0, str(SCRIPTS))
 sys.dont_write_bytecode = True
 
 from orchestrator import hooks  # noqa: E402
+from orchestrator.common import utcnow  # noqa: E402
 
 TEMPLATE_RE = re.compile(r"```orch-result\n(.*?)\n```", re.S)
 PY = sys.executable
@@ -199,6 +200,9 @@ class Harness:
         write_report: bool = True,
         work: Optional[Callable[[], None]] = None,
         raw_message: Optional[str] = None,
+        handback: Optional[str] = None,
+        handback_error: bool = False,
+        agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Generate the brief, do the 'work', fill the template, hand back via SubagentStop."""
         text = self.orch("brief", *brief_args, "--agent", agent)
@@ -226,16 +230,49 @@ class Harness:
         if write_report:
             report.parent.mkdir(parents=True, exist_ok=True)
             report.write_text(f"# {agent} report\n\nverdict {fields.get('verdict')}\n")
-        message = raw_message if raw_message is not None else (
-            "Done.\n\n```orch-result\n" + json.dumps(fields, indent=2) + "\n```")
-        self.agent_counter += 1
-        self.hook({
+        block = "```orch-result\n" + json.dumps(fields, indent=2) + "\n```"
+        message = raw_message if raw_message is not None else "Done.\n\n" + block
+        if agent_id is None:
+            self.agent_counter += 1
+            agent_id = f"a{self.agent_counter:04d}"
+        payload = {
             "hook_event_name": "SubagentStop",
             "agent_type": agent,
-            "agent_id": f"a{self.agent_counter:04d}",
+            "agent_id": agent_id,
             "last_assistant_message": message,
-        })
+        }
+        if handback is not None:
+            self.transcript(agent_id, handback.replace("{block}", block), error=handback_error)
+            payload["agent_transcript_path"] = str(self.transcript_path(agent_id))
+        self.hook(payload)
         return self.ledger()[-1]
+
+    def transcript_path(self, agent_id: str) -> Path:
+        return self.tmp / "transcripts" / self.session / "subagents" / f"agent-{agent_id}.jsonl"
+
+    def transcript(self, agent_id: str, handback: Optional[str], error: bool = False) -> None:
+        """Append one turn to the agent's transcript in Claude Code's record shape:
+        an optional SubagentHandback call and its tool_result, then a closing text."""
+        path = self.transcript_path(agent_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        time.sleep(0.01)
+        stamp = utcnow()
+        records: List[Dict[str, Any]] = []
+        if handback is not None:
+            use_id = f"toolu_{time.time_ns()}"
+            records.append({"type": "assistant", "timestamp": stamp, "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": use_id, "name": "SubagentHandback", "input": {"message": handback}}]}})
+            result = {"type": "tool_result", "tool_use_id": use_id,
+                      "content": [{"type": "text", "text": '{"success":true}'}]}
+            if error:
+                result["is_error"] = True
+            records.append({"type": "user", "timestamp": stamp, "message": {"role": "user", "content": [result]}})
+        records.append({"type": "assistant", "timestamp": stamp, "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "I've sent my report to the orchestrator."}]}})
+        with open(path, "a", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record) + "\n")
+        time.sleep(0.01)
 
     # -------------------------------------------------------- scenario steps
     def init(self) -> None:

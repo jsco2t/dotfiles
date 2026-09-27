@@ -305,6 +305,77 @@ class ResultValidationTest(unittest.TestCase):
         self.assertTrue(entry.get("report_written_by_hook"))
         self.assertTrue(Path(entry["result"]["report"]).is_file())
 
+    def test_result_block_only_in_handback_is_recorded(self) -> None:
+        # The agent hands back through SubagentHandback, then writes a closing
+        # note without the block (what real agents do).
+        entry = self.h.agent(["T001", "readiness"], "task-verifier", write_report=False,
+                             raw_message="I've sent my report to the orchestrator, status complete.",
+                             handback="Full report.\n\n{block}")
+        self.assertTrue(entry["valid"], entry["errors"])
+        self.assertEqual(entry["result_source"], "handback")
+        self.assertTrue(entry["handback_tool_use_id"].startswith("toolu_"))
+        self.assertIn("Full report.", Path(entry["result"]["report"]).read_text())
+
+    def test_block_in_final_message_wins_over_handback(self) -> None:
+        entry = self.h.agent(["T001", "readiness"], "task-verifier", handback="No block here.")
+        self.assertTrue(entry["valid"])
+        self.assertEqual(entry["result_source"], "final_message")
+
+    def test_resumed_turn_cannot_reuse_an_earlier_handback(self) -> None:
+        h = self.h
+        first = h.agent(["T001", "readiness"], "task-verifier", raw_message="Sent.", handback="{block}")
+        self.assertTrue(first["valid"])
+        agent_id = first["agent_id"]
+        # Resumed with SendMessage; this turn has no hand-back and no block.
+        h.transcript(agent_id, None)
+        h.hook({"hook_event_name": "SubagentStop", "agent_type": "task-verifier", "agent_id": agent_id,
+                "last_assistant_message": "Done again.",
+                "agent_transcript_path": str(h.transcript_path(agent_id))})
+        second = h.ledger()[-1]
+        self.assertFalse(second["valid"])
+        self.assertIn("SubagentHandback", second["errors"][0])
+
+    def test_failed_handback_is_not_credited(self) -> None:
+        entry = self.h.agent(["T001", "readiness"], "task-verifier", raw_message="Sent.",
+                             handback="{block}", handback_error=True)
+        self.assertFalse(entry["valid"])
+        self.assertEqual(entry["result_source"], "final_message")
+
+    def test_note_file_reaches_the_brief_verbatim(self) -> None:
+        h = self.h
+        note = "Compare with `git merge-tree --write-tree a b` and $(echo not-run) — keep $HOME literal."
+        path = h.tmp / "note.md"
+        path.write_text(note + "\n")
+        text = h.orch("brief", "T001", "readiness", "--agent", "task-verifier", "--note-file", str(path))
+        self.assertIn(note, text)
+        h.orch("brief", "T001", "readiness", "--agent", "task-verifier", "--note", "x",
+               "--note-file", str(path), expect=2)
+
+    def test_orch_note_file_is_recorded_verbatim(self) -> None:
+        h = self.h
+        note = "Q1 answer: run `git merge-tree --write-tree a b`; $(echo not-run) stays literal."
+        path = h.tmp / "decision.md"
+        path.write_text(note + "\n")
+        h.orch("note", "--file", str(path), "--title", "Q1")
+        self.assertIn(note, (h.wf / "decisions.md").read_text())
+        self.assertEqual(h.ledger()[-1]["text"], note)
+        h.orch("note", "x", "--file", str(path), expect=2)
+        h.orch("note", expect=2)
+
+    def test_unreadable_transcript_falls_back_to_invalid(self) -> None:
+        h = self.h
+        for path in (str(h.tmp / "missing.jsonl"), str(h.tmp)):
+            h.hook({"hook_event_name": "SubagentStop", "agent_type": "task-verifier", "agent_id": "a8888",
+                    "last_assistant_message": "Sent.", "agent_transcript_path": path})
+            entry = h.ledger()[-1]
+            self.assertFalse(entry["valid"])
+            self.assertIn("orch-result", entry["errors"][0])
+
+    def test_malformed_block_error_is_kept(self) -> None:
+        entry = self.h.agent(["T001", "readiness"], "task-verifier",
+                             raw_message="```orch-result\n{not json\n```")
+        self.assertIn("not valid JSON", entry["errors"][0])
+
     def test_non_roster_agents_are_ignored(self) -> None:
         before = len(self.h.ledger())
         self.h.hook({"hook_event_name": "SubagentStop", "agent_type": "Explore", "agent_id": "x",

@@ -50,7 +50,7 @@ What each does:
 | UserPromptExpansion | Records user-typed `/task-orchestrator` slash commands from `command_name` + `command_args` (deduplicated against UserPromptSubmit). |
 | PreToolUse | Refuses: any reference to `.orch/`; edits to generated files, `decisions.md`, frozen plan documents after approval, other agents' reports; workspace edits by the orchestrator or read-only roles; author edits outside declared workspaces; non-roster agents, hand-written (non-`orch brief`) dispatch prompts, and the Workflow tool from the orchestrator; orchestrator-only `orch` commands from subagents (in either the `orch.py …` or the `$ORCH …` form). |
 | SubagentStart | Injects the roster contract into roster agents. |
-| SubagentStop | Parses the roster agent's `orch-result` block, validates it, and appends it to the ledger with the harness-supplied agent type (writes the report from the final message if the agent forgot to). |
+| SubagentStop | Parses the roster agent's `orch-result` block from `last_assistant_message`, or — when that has none — from the agent's latest SubagentHandback `input.message` since its previous stop (read from `agent_transcript_path`; `result_source` in the ledger says which). Validates it and appends it to the ledger with the harness-supplied agent type (writes the report from that message if the agent forgot to). |
 | Stop | Main session only. Plan-hash, task-set, and acceptance integrity checks; wait-aware continuation while background agents run (capped when nothing progresses); a continuation budget; forces the loop to keep working until a human boundary, quoting the next action and the quality mandate. |
 
 Verified payload facts behind these (Claude Code 2.1.282 — observed live, or read from the
@@ -62,7 +62,11 @@ UserPromptSubmit carries `prompt` and `source`; UserPromptExpansion carries
 ("in-flight background work … empty array when nothing is in flight"). The Stop hook keeps
 the first 25 real payload shapes in `$TASK_ORCH_HOME/stop-payload-samples.jsonl`. In the
 transcript, a hand-back is a `queue-operation` / `queued_command` record and a SendMessage
-resume is a `toolUseResult` with `resumedAgentId`.
+resume is a `toolUseResult` with `resumedAgentId`. In a subagent's own transcript
+(`agent_transcript_path`, observed on 2.1.283), a SubagentHandback call is an `assistant`
+record with a `tool_use` block named `SubagentHandback` whose `input.message` is the
+delivered report; agents often follow it with a short closing text that lacks the result
+block, so `last_assistant_message` alone is not enough.
 
 ## Verify
 

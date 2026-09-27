@@ -120,17 +120,25 @@ remove them) — see [references/plan-package.md](references/plan-package.md#tas
 
 ## How to dispatch any agent
 
-1. `orch brief [T###] <stage> --agent <agent> [--loop N | --final] [--topic ...] [--mode ...] [--note ...]`
+1. `orch brief [T###] <stage> --agent <agent> [--loop N | --final] [--topic ...] [--mode ...] [--note-file ...]`
    prints the full brief and saves it beside the reports. Never hand-write a brief: the
    generator pins identity values, the snapshot, the files to read, and the report path.
 2. Call the Agent tool with `subagent_type: <agent>` and the brief text as the prompt,
    **verbatim** — the PreToolUse hook refuses a dispatch whose prompt does not contain the
-   saved brief for that agent. Put anything extra in `--note`.
+   saved brief for that agent. Put anything extra in `--note-file <path>`: a scratch file
+   outside the workflow directory, written in Bash with a quoted heredoc
+   (`cat > <path> <<'EOF'`); the Write tool is refused to the orchestrator there. Never
+   pass shell-quoted note text containing backticks or `$(...)`: in `--note "..."` the
+   shell runs them and splices in their output. The same goes for `orch note`; use
+   `orch note --file <path>`.
 3. If you have nothing else to do, end your turn and wait; the Stop hook is wait-aware and
    each hand-back re-invokes you. Never keep an agent in flight to avoid progress.
 4. On hand-back, the SubagentStop hook has already recorded the agent's result block in the
-   ledger. Run `orch status`. If `orch ledger --tail 3` shows the result **invalid**, resume
-   **the same agent** with SendMessage (its agent id) quoting the errors.
+   ledger (from its final message, or from its SubagentHandback message when the final text
+   lacks the block). Run `orch status`. If `orch ledger --tail 3` shows the result **invalid**,
+   resume **the same agent** with SendMessage (its agent id) quoting the errors, and ask it to
+   re-send its hand-back (SubagentHandback, if it has that tool) ending with the corrected block
+   and to end its final text message with the same block.
 5. Keep each author's agent id. Fix rounds and follow-ups go to the **same** author via
    SendMessage so it keeps its context; only start a fresh author when the PM or a failed
    attempt says the author's approach was wrong.
@@ -188,7 +196,7 @@ the orchestrator routes. This is deliberate: one coordinator, no conflicting dec
      `## Architectural review`.
    - `ux-reviewer --mode plan` when the work designs a user-facing surface.
    Send findings back to the **same** planning-author (SendMessage, with
-   `orch brief plan --agent planning-author --note "Address the findings in <reports>"`),
+   `orch brief plan --agent planning-author --note-file <file naming the reports>`),
    then re-review — any plan edit makes earlier plan reviews stale.
 9. **PM plan audit:** `orch brief pm-plan --agent project-manager`. Fix and re-audit until it
    passes. `orch validate` must be clean.

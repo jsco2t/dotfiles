@@ -477,8 +477,9 @@ def build(
         "",
         "## Finish",
         "",
-        f"Write your full report to `{report}`. End your final message with this block, every placeholder "
-        "replaced (booleans as JSON true/false, counts as integers):",
+        f"Write your full report to `{report}`. Then finish with this block, every placeholder replaced "
+        "(booleans as JSON true/false, counts as integers). If you hand back with SubagentHandback, end "
+        "that message with the block; either way, also end your final text message with it:",
         "",
         _template(fields),
         "",

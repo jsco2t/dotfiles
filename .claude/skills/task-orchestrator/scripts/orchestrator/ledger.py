@@ -132,10 +132,15 @@ def latest(items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------- result blocks
 
 
+MISSING_BLOCK = "the message has no ```orch-result fenced block"
+NO_BLOCK_ERROR = ("no ```orch-result fenced block in the final message or in a SubagentHandback "
+                  "message sent since the last stop")
+
+
 def parse_result_block(text: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     matches = RESULT_BLOCK_RE.findall(text or "")
     if not matches:
-        return None, "the final message has no ```orch-result fenced block"
+        return None, MISSING_BLOCK
     raw = matches[-1]
     try:
         data = json.loads(raw)

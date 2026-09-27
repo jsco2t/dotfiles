@@ -182,6 +182,64 @@ class StopHookTest(unittest.TestCase):
         self.h.orch("resume")
         self.assertEqual(self.h.state()["phase"], "EXECUTING")
 
+    def edit_state(self, **fields) -> None:
+        state_path = self.h.wf / ".orch" / "state.json"
+        state = json.loads(state_path.read_text())
+        state.update(fields)
+        state_path.write_text(json.dumps(state))
+
+    def halt_and_resume(self, h: Harness) -> None:
+        (h.wf / "HALT").touch()
+        h.hook({"hook_event_name": "Stop", "background_tasks": []})
+        self.assertEqual(h.state()["phase"], "HALTED")
+        h.human("/task-orchestrator resume")
+        h.orch("resume")
+
+    def test_halt_during_planning_resumes_to_planning(self) -> None:
+        h = Harness()
+        self.addCleanup(h.close)
+        h.init()
+        self.halt_and_resume(h)
+        state = h.state()
+        self.assertEqual(state["phase"], "PLANNING")
+        self.assertIsNone(state["block_reason"])
+
+    def test_halt_during_needs_human_keeps_the_pending_decision(self) -> None:
+        need = {"kind": "final_review_budget", "summary": "x", "raised_at": "2026-01-01T00:00:00.000Z"}
+        self.edit_state(phase="NEEDS_HUMAN", resume_phase="FINAL", needs_human=need)
+        self.halt_and_resume(self.h)
+        state = self.h.state()
+        self.assertEqual(state["phase"], "NEEDS_HUMAN")
+        self.assertEqual(state["resume_phase"], "FINAL")
+        self.assertEqual(state["needs_human"], need)
+
+    def test_halt_during_plan_change_required_restores_its_reason(self) -> None:
+        self.edit_state(phase="PLAN_CHANGE_REQUIRED", resume_phase="EXECUTING", block_reason="scope drift")
+        self.halt_and_resume(self.h)
+        state = self.h.state()
+        self.assertEqual((state["phase"], state["resume_phase"]), ("PLAN_CHANGE_REQUIRED", "EXECUTING"))
+        self.assertEqual(state["block_reason"], "scope drift")
+
+    def test_repeated_halt_does_not_forget_where_it_came_from(self) -> None:
+        (self.h.wf / "HALT").touch()
+        self.stop(background_tasks=[])
+        (self.h.wf / "HALT").touch()
+        self.stop(background_tasks=[])
+        self.h.human("/task-orchestrator resume")
+        self.h.orch("resume")
+        self.assertEqual(self.h.state()["phase"], "EXECUTING")
+
+    def test_legacy_halt_without_a_record(self) -> None:
+        # Halted by an older version, from a stop phase: nothing says where to go back to.
+        self.edit_state(phase="HALTED", halted_from=None, resume_phase=None,
+                        halted_at="2026-01-01T00:00:00.000Z")
+        self.h.human("/task-orchestrator resume")
+        self.assertIn("cannot be inferred", self.h.orch("resume", expect=2))
+        self.assertEqual(self.h.state()["phase"], "HALTED")
+        self.edit_state(approved_at=None)
+        self.h.orch("resume")
+        self.assertEqual(self.h.state()["phase"], "PLANNING")
+
     def test_subagent_stop_payloads_are_ignored(self) -> None:
         self.assertIsNone(self.stop(agent_id="abc", background_tasks=[]))
 

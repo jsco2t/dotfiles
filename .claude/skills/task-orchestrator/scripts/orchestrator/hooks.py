@@ -557,7 +557,13 @@ def handle_stop(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     def to_phase(phase: str, reason: str, kind: Optional[str] = None):
         def mutate(s: Dict[str, Any]) -> None:
-            if s.get("phase") not in STOP_PHASES:
+            if phase == "HALTED":
+                # A halt can land in any phase, including stop phases and
+                # NEEDS_HUMAN / PLAN_CHANGE_REQUIRED, whose own resume_phase must
+                # survive it. Record the exact place to return to separately.
+                if s.get("phase") != "HALTED":
+                    s["halted_from"] = {"phase": s.get("phase"), "block_reason": s.get("block_reason")}
+            elif s.get("phase") not in STOP_PHASES:
                 s["resume_phase"] = s.get("phase")
             s["phase"] = phase
             s["block_reason"] = reason

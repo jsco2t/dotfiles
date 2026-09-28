@@ -262,7 +262,7 @@ class StopHookTest(unittest.TestCase):
 class HumanPromptTest(unittest.TestCase):
     def setUp(self) -> None:
         self.h = Harness()
-        self.h.init()
+        self.h.init(confirm_scope=False)
 
     def tearDown(self) -> None:
         self.h.close()
@@ -357,7 +357,7 @@ class ScanTest(unittest.TestCase):
         result = scanmod.scan(diff, expected_paths=["pkg/"])
         cats = result["by_category"]
         for category in ("test_removed", "test_skip_added", "assertions_reduced", "deferral_marker_added",
-                         "lint_suppression_added", "gate_config_changed", "outside_expected_paths"):
+                         "lint_suppression_added", "gate_config_changed", "out_of_plan_undeclared"):
             self.assertIn(category, cats, category)
         self.assertEqual(len(result["digest"]), 16)
 

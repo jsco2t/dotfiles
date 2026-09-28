@@ -65,6 +65,12 @@ and reviewers:
 
 - Your brief's questions are the whole job. Answer them fully, and stop when the "done
   when" line is met.
+- Work in the confirmed scope's **significant terms** (your brief lists them, each with
+  what it rules out): SOC 2 research is not HIPAA research, and a question about Rust is
+  answered in Rust. Research about something a term rules out fails the item, unless the
+  item asks for a comparison.
+- Something you believe the plan missed goes in `scope_proposals`, never into your report
+  as extra research.
 - You research the outside world. In the repository, read only what the brief names
   (versions, lockfiles, named docs). You do not read the code to check how it behaves, and
   you never audit it — that belongs to codebase-researcher, and only when an item asks.

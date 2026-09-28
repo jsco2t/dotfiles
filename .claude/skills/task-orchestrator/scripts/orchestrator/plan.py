@@ -14,7 +14,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .common import TASK_FILE_RE, Workflow, read_json
 from .roster import CODE_LIKE_TYPES, PROSE_TYPES, REVIEWERS, TASK_TYPES, TEST_FORWARD_MODES
@@ -573,6 +573,37 @@ def validate(
     loops = pkg.loops()
     if loops and loops != list(range(1, len(loops) + 1)):
         err.append(f"loops must be numbered contiguously from 1 (found {loops})")
+
+    # scope trace: once scope.md exists, every requirement serves something the human confirmed,
+    # every deliverable is served, and every task that writes declares its footprint.
+    if wf.scope.is_file():
+        from . import ledger
+        from . import scope as scopemod
+        from .common import ROOT_PATTERNS
+        from .roster import AUTHORS
+
+        citable = scopemod.citable(wf, ledger.read(wf))
+        served: Set[str] = set()
+        for req, text in sorted(pkg.plan.requirements.items()):
+            ids = scopemod.parse_serves(text)
+            if not ids:
+                err.append(f"requirement {req} has no `Serves: D#` — every requirement serves a deliverable "
+                           "(or significant term / accepted proposal) of the confirmed scope")
+            for unknown in scopemod.unknown_ids(ids, set(citable)):
+                err.append(f"requirement {req} serves {unknown}, which the confirmed scope does not have")
+            served.update(ids)
+        scope_doc = scopemod.parse(wf) or {"deliverables": {}}
+        for deliverable in sorted(scope_doc["deliverables"]):
+            if deliverable not in served:
+                err.append(f"deliverable {deliverable} is served by no requirement")
+        for tid, spec in sorted(pkg.tasks.items()):
+            writes = bool(set(spec.authors) & (AUTHORS | {"planning-author"}))
+            if writes and not spec.expected_paths:
+                err.append(f"{tid}: declare `expected_paths` — the files, directories, or globs this task will "
+                           "change (include index files, lockfiles, generated files)")
+            for rel in spec.expected_paths:
+                if rel.strip() in ROOT_PATTERNS:
+                    err.append(f"{tid}: expected_paths entry {rel!r} is the whole workspace; name what changes")
 
     # requirement coverage: covered by a task or explicitly listed out of scope
     covered = {r for t in pkg.tasks.values() for r in t.meta.get("requirements") or []}

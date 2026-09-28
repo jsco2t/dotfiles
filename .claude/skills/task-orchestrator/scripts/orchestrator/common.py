@@ -32,8 +32,11 @@ QUALITY_MANDATE = (
     "QUALITY MANDATE: This process does not look for ways to make the work "
     "cheaper, faster, or smaller. It produces very high quality results that "
     "match exactly what the user asked for. DO NOT SKIP STEPS. DO NOT DEFER "
-    "WORK. DO NOT weaken a goal, a test, or a criterion to get past a gate. If "
-    "you are not sure how to proceed, stop and ask a human."
+    "WORK. DO NOT weaken a goal, a test, or a criterion to get past a gate. "
+    "Equally, DO NOT DO MORE than was asked: no unrequested audits, fixes, "
+    "rewrites, or analysis. If you believe the plan missed something the human "
+    "needs, raise a scope proposal — never do it yourself. If you are not sure "
+    "how to proceed, stop and ask a human."
 )
 
 # Workflow phases. STOP_PHASES are the phases in which the main session may end
@@ -277,7 +280,7 @@ def find_workflow(target: str) -> Optional[Path]:
 # ---------------------------------------------------------------- layout
 
 
-FROZEN_TOP_FILES = ("request.md", "plan.md", "architecture.md", "gate.json")
+FROZEN_TOP_FILES = ("request.md", "scope.md", "plan.md", "architecture.md", "gate.json")
 GENERATED_FILES = ("index.md", "status.md", "tasks/index.md", "research/index.md")
 REPORT_DIRS = ("runs", "research", "reviews", "loops", "final")
 TASK_FILE_RE = re.compile(r"^(T\d{3,})-[a-z0-9][a-z0-9-]*\.md$")
@@ -295,6 +298,26 @@ def interim_path(report: Path) -> Path:
 def report_for_interim(interim: Path) -> Path:
     interim = Path(interim)
     return interim.parent.parent / interim.name
+
+
+ROOT_PATTERNS = frozenset({"", ".", "./", "/", "*", "**", "**/*", "*/**"})
+
+
+def path_matches(path: str, pattern: str) -> bool:
+    """A workspace-relative path against an `expected_paths` / `out_of_plan` entry: a plain
+    entry is a file or directory prefix; an entry with * ? [ is a glob (`**/` may match nothing)."""
+    import fnmatch
+
+    path = path.strip().strip("/")
+    raw = pattern.strip()
+    if raw in ROOT_PATTERNS:
+        return True
+    pat = (raw[2:] if raw.startswith("./") else raw).strip("/")
+    if any(ch in pat for ch in "*?["):
+        candidates = {pat, pat.replace("**/", ""), pat.replace("/**", "")}
+        return any(fnmatch.fnmatchcase(path, c) or fnmatch.fnmatchcase(path, c.rstrip("/") + "/*")
+                   for c in candidates if c)
+    return path == pat or path.startswith(pat + "/")
 
 
 class Workflow:
@@ -333,6 +356,11 @@ class Workflow:
     @property
     def request(self) -> Path:
         return self.root / "request.md"
+
+    @property
+    def scope(self) -> Path:
+        """The scope the human confirmed before research: deliverables, significant terms, non-goals."""
+        return self.root / "scope.md"
 
     @property
     def plan(self) -> Path:

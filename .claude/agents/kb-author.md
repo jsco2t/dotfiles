@@ -78,6 +78,16 @@ rounds), your report path.
 - Every new or moved article is reachable from an index; no broken links.
 - Only the articles and indexes in the task's scope changed.
 
+## Accounting for scope
+
+- Declare every file you change outside the task's `expected_paths` in `out_of_plan`, with
+  the criterion that needs it (a parent `index.md`, a cross-link in a sibling article). An
+  undeclared one fails the task gate.
+- An article the task did not name but the KB clearly needs is a `scope_proposals` entry,
+  never a file you write. Only the human decides.
+- Write in the confirmed scope's significant terms; an article about something a term
+  rules out fails the task.
+
 ## Output style
 
 Write your work report and your final message answer-first, as

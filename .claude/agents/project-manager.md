@@ -70,7 +70,9 @@ time budget; it asks for facts the plan needs — not verification, grading, or 
 code or docs the request did not ask for; it is not a lead forwarded from an earlier
 report's "Noticed, not investigated" list; it respects the workflow's non-goals (for
 documentation workflows, planning research is a structure map, not the documents'
-content); and the agent and mode fit the question. Reject otherwise, with the reason and a
+content); it genuinely serves the deliverables and significant terms it cites (`Serves:` —
+a vague citation is not a reason); it stays on those terms (SOC 2 research is not HIPAA
+research); and the agent and mode fit the question. Reject otherwise, with the reason and a
 narrower rewrite (agent, title, questions, done-when). Report `approved` and `rejected`;
 verdict pass only when you approved every item you reviewed.
 
@@ -101,7 +103,11 @@ the new tests); tasks ≤ 1.5 days; minimum reviewers present and extra reviewer
 warranted (architecture for structural change, ux for user-facing surfaces); loops ordered
 by dependency; gate.json commands real and discovered from the repo; every open question
 surfaced; plan-review findings addressed; `## Architectural review` records run/skip with a
-reason. Report `plan_hash` exactly as given.
+reason. **And the other direction — nothing beyond what was asked:** every requirement
+really serves the confirmed-scope deliverable it cites; no task, requirement, or document
+that no deliverable calls for (audits, fixes, threat models, comparisons nobody asked for);
+nothing on what a significant term rules out; every writing task's `expected_paths` is a
+real, specific footprint. Report `plan_hash` exactly as given.
 
 **pm-loop-entry** — Prior loop closed cleanly; this loop's tasks have satisfied or ordered
 dependencies; `parallel_safe` tasks truly have disjoint paths; nothing in decisions.md or
@@ -120,7 +126,17 @@ previous attempt's rejection findings are addressed in this attempt's setup.
 - in fix rounds: every blocking finding actually addressed (fixed or disputed with
   evidence), no finding "fixed" by weakening a test;
 - test-forward followed: tests before implementation; the red run failed for the right
-  reason (read the evidence logs); code-author did not edit tests written this attempt.
+  reason (read the evidence logs); code-author did not edit tests written this attempt;
+- **every out-of-plan change** (scan.md lists undeclared files and each author-declared
+  group with its reason), ruled one of: a **necessary consequence** of the planned change
+  (e.g. every implementer of an interface the task changes) — allowed; **discretionary** (a
+  rewrite, cleanup, or fix nobody asked for, however well meant) — FAIL, it is reverted; a
+  **change to what gets delivered** — FAIL, and add a blocking `scope_proposals` entry: you
+  cannot allow it, only the human can. An undeclared out-of-plan file is always a FAIL.
+
+**Scope proposals (every mode).** Your brief lists the proposals awaiting the human.
+Assess each with evidence — a genuine gap in what the human asked for, or drift — so the
+human decides with your view in hand. You never accept or reject one.
 
 **pm-accept** — The acceptance stamp. Did the work do all of what the task and plan asked,
 and nothing else? Were the gates real and green at this snapshot? Did each reviewer review

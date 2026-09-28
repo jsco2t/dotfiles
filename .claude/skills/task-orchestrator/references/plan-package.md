@@ -44,7 +44,7 @@ section must exist and be non-empty **(validated)**.
 | Section | Contents |
 | --- | --- |
 | `## Objective` | The complete outcome, in the user's terms. |
-| `## Requirements` | Every requirement as `- R1: <requirement>` — derived from the request (and tickets), one line each. This is the traceability anchor. **(validated: ≥1)** |
+| `## Requirements` | Every requirement as `- R1: <requirement> — Serves: D1` — derived from the request (and tickets), one line each, citing what it serves in the confirmed `scope.md`: deliverables `D#`, significant terms `S#`, or accepted scope proposals `P#-#`. This is the traceability anchor. **(validated: ≥1; every `Serves:` id exists; every deliverable is served)** Nothing may be planned that no deliverable asks for. |
 | `## Current state` | How things work today, **every claim with file:line (or URL/ticket) evidence** from research. "Probably in the validation logic" is not acceptable. |
 | `## Approach` | The strategy, grounded in the evidence. Alternatives considered and why rejected. |
 | `## Architectural decisions` | Decisions every task must respect (or a pointer to `architecture.md`). |
@@ -199,7 +199,7 @@ Invariants, edge cases, traps.
 | `validation.red_green` | Required for red-green / characterization: the exact test commands the CLI runs for red/baseline/green evidence. Target the new tests specifically — a command that selects no tests proves nothing. |
 | `validation.task` | Required for code/test tasks: the task-specific checks. |
 | `estimated_days` | 0 < days ≤ 1.5. |
-| `expected_paths` | Workspace-relative prefixes the task is expected to change. Changes outside them are flagged by the integrity scan for PM adjudication. Required for `parallel_safe`. |
+| `expected_paths` | The task's planned footprint: workspace-relative files, directories, or globs (`pkg/**/*.go`) it will change — include the index files, lockfiles, and generated files it touches. **Required for every task that writes** (never the workspace root). A changed file outside them must be declared by its author in `out_of_plan` with its reason, or the task gate fails; the PM rules each declared group a necessary consequence (allowed), discretionary (reverted), or a scope change (the human decides). |
 | `parallel_safe` | Only for document-type tasks with disjoint `expected_paths`; lets them run concurrently in one loop. |
 | `external_writes` | Only for `integration` tasks that write to Jira/Confluence/GitHub; forces dry-run → human confirmation → execute. |
 

@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from orchestrator import activity, briefs, gates, ledger, ops, render  # noqa: E402
 from orchestrator import plan as planmod  # noqa: E402
 from orchestrator import research as researchmod  # noqa: E402
+from orchestrator import scope as scopemod  # noqa: E402
 from orchestrator import snapshot as snapmod  # noqa: E402
 from orchestrator.common import (  # noqa: E402
     ORCH_CLI,
@@ -322,6 +323,14 @@ def cmd_status(args: argparse.Namespace) -> int:
         for status, _ in researchmod.statuses(ctx.entries, state).values():
             counts[status] = counts.get(status, 0) + 1
         out("research items " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) + " (`orch research list`)")
+    if not researchmod.is_legacy(state):
+        out(f"scope {scopemod.confirmed(wf, state)[1]} (`orch scope show`)")
+        win = researchmod.window(state)
+        if win["started"] and state.get("phase") == "PLANNING":
+            out(f"research window {win['elapsed']} of {win['limit']} minutes used")
+    pending = scopemod.undecided(ctx.entries)
+    if pending:
+        out(f"scope proposals awaiting the human: {', '.join(p['id'] for p in pending)} (`orch proposal list`)")
     for line in agent_lines(wf, state, ctx.entries):
         out(line)
     out("NEXT: " + gates.next_action(ctx))
@@ -433,6 +442,14 @@ def cmd_agent(args: argparse.Namespace) -> int:
             ledger.append(wf, {"kind": "agent_continue", "agent_id": aid, "reason": "pause"})
             out(_continue_message(wf, interim, "pause", None, None, None))
             return 0
+        if reason == "window":
+            if researchmod.window(state)["expired"]:
+                raise OrchError("the research window is still used up; the human extends it "
+                                "(`orch needs-human --kind research_window ...`) or the item is dropped")
+            ledger.append(wf, {"kind": "agent_continue", "agent_id": aid, "reason": "window"})
+            out(_continue_message(wf, interim, "pause", None, None, None).replace(
+                "the human resumed the workflow", "the human extended the research window"))
+            return 0
         review = gates.pm_interim_review(ctx, interim)
         if review is None or (review.get("result") or {}).get("status") != "complete":
             raise OrchError(f"the PM has not reviewed agent {aid}'s interim report: "
@@ -502,18 +519,24 @@ def cmd_research(args: argparse.Namespace) -> int:
             ledger.append(wf, {"kind": "research_item", "action": "drop", "item": args.item_id, "reason": args.reason})
             out(f"{args.item_id} dropped.")
             return 0
+        ok, detail = scopemod.confirmed(wf, state)
+        if not ok:
+            raise OrchError(f"research follows the confirmed scope ({detail}): draft scope.md, `orch scope submit`, "
+                            "and get the human's `/task-orchestrator scope ok` first")
         questions = researchmod.parse_questions(read_text_arg(args.questions_file, "--questions-file"))
         context = read_text_arg(args.context_file, "--context-file") if args.context_file else ""
         mode = args.mode or researchmod.default_mode(args.agent, state.get("kind") or LEGACY_KIND)
+        serves = [s.strip().upper() for s in (args.serves or "").split(",") if s.strip()]
         errors = researchmod.validate_new(args.agent, args.title, questions, args.done_when, context,
-                                          args.mode if args.mode else None)
+                                          args.mode if args.mode else None, serves=serves,
+                                          citable=scopemod.citable(wf, ledger.read(wf)))
         if errors:
             raise OrchError("research item refused:\n  - " + "\n  - ".join(errors))
         iid = researchmod.next_id(state)
         entry = ledger.append(wf, {"kind": "research_item", "action": "add", "item": iid, "agent": args.agent})
         records[iid] = {"id": iid, "agent": args.agent, "title": args.title.strip(), "mode": mode,
                         "questions": questions, "done_when": args.done_when.strip(), "context": context,
-                        "added_at": utcnow(), "added_seq": entry["seq"], "status": "OPEN"}
+                        "serves": serves, "added_at": utcnow(), "added_seq": entry["seq"], "status": "OPEN"}
         state["research_items"] = records
         wf.save_state(state)
     safe_render(wf)
@@ -597,6 +620,11 @@ def cmd_approve(args: argparse.Namespace) -> int:
         pm = ctx.latest_result("pm-plan")
         if not (pm and gates._passed(pm) and (pm.get("result") or {}).get("plan_hash") == current):
             raise OrchError("no passing PM plan audit for this exact plan")
+        pending = scopemod.undecided(ctx.entries)
+        if pending:
+            raise OrchError("scope proposals await the human's decision — present each, and they answer "
+                            "`/task-orchestrator proposal accept|reject <id> <notes>`:\n  "
+                            + "\n  ".join(scopemod.describe(p) for p in pending))
         token = human_token(ctx.entries, "approve", state.get("submitted_at"))
         if token is None:
             raise OrchError("no human approval recorded. Approval must come from the human typing "
@@ -660,6 +688,24 @@ def cmd_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_revision(state: Dict[str, Any], feedback: str) -> None:
+    """Move the workflow back to PLANNING for a plan revision (the caller holds the human's decision)."""
+    if state["phase"] == "DONE":
+        state.setdefault("revision_history", []).append(
+            {"iteration": state.get("iteration", 1), "completed_at": state.get("completed_at"), "reason": feedback})
+        state["iteration"] = int(state.get("iteration", 1)) + 1
+        state["completed_at"] = None
+        state["final"] = {"status": "PENDING", "round": 0,
+                          "budget": (state.get("budgets") or DEFAULT_BUDGETS)["final_review_passes"]}
+    for info in (state.get("tasks") or {}).values():
+        if info.get("status") == "IN_PROGRESS":
+            info["status"] = "PENDING"
+    state["plan_revision"] = int(state.get("plan_revision", 1)) + 1
+    researchmod.reset_window(state)
+    state.update(phase="PLANNING", needs_human=None, submitted_plan_sha256=None, block_reason=None,
+                 resume_phase=None, phase_since=utcnow())
+
+
 def cmd_revise(args: argparse.Namespace) -> int:
     wf = resolve_workflow(args.wf)
     with state_lock(wf):
@@ -677,26 +723,137 @@ def cmd_revise(args: argparse.Namespace) -> int:
             raise OrchError("no human revision request recorded; the human types `/task-orchestrator revise <feedback>`")
         consume(wf, token, "revise")
         feedback = " ".join(token.get("args") or []) or "(no feedback text)"
-        if state["phase"] == "DONE":
-            state.setdefault("revision_history", []).append(
-                {"iteration": state.get("iteration", 1), "completed_at": state.get("completed_at"),
-                 "reason": feedback})
-            state["iteration"] = int(state.get("iteration", 1)) + 1
-            state["completed_at"] = None
-            state["final"] = {"status": "PENDING", "round": 0,
-                              "budget": (state.get("budgets") or DEFAULT_BUDGETS)["final_review_passes"]}
-        for info in (state.get("tasks") or {}).values():
-            if info.get("status") == "IN_PROGRESS":
-                info["status"] = "PENDING"
-        state["plan_revision"] = int(state.get("plan_revision", 1)) + 1
-        state.update(phase="PLANNING", needs_human=None, submitted_plan_sha256=None, block_reason=None,
-                     resume_phase=None, phase_since=utcnow())
+        _open_revision(state, feedback)
         wf.save_state(state)
     append_decision(wf, f"human revision request (plan revision {state['plan_revision']})", token.get("raw") or feedback)
     transition(wf, "workflow", "PLANNING", plan_revision=state["plan_revision"], human_seq=token["seq"])
     safe_render(wf)
     out(f"Revision {state['plan_revision']} opened. Resume planning-author with the feedback (recorded in decisions.md), "
         "re-run the plan reviews and PM audit, then `orch submit`.")
+    return 0
+
+
+# ================================================================ scope and scope proposals
+
+
+def cmd_scope(args: argparse.Namespace) -> int:
+    wf = resolve_workflow(args.wf)
+    if args.scope_cmd == "show":
+        doc = scopemod.parse(wf)
+        if doc is None:
+            out("No scope.md yet.")
+            return 0
+        _, detail = scopemod.confirmed(wf, wf.load_state())
+        out(f"scope.md — {detail}")
+        for label, table in (("deliverables", doc["deliverables"]), ("significant terms", doc["terms"])):
+            out(f"{label}:")
+            for key, value in table.items():
+                out(f"  {key}: {value}")
+        out("non-goals: " + ("; ".join(doc["non_goals"]) or "none listed"))
+        for q in doc["questions"]:
+            out(f"  {q['id']} {'answered' if q['answered'] else 'OPEN'}: {q['text']}")
+        for problem in scopemod.problems(doc, for_confirm=True):
+            out(f"problem: {problem}")
+        return 0
+    with state_lock(wf):
+        ctx = gates.Context(wf, fast=True)
+        state = ctx.state
+        require_phase(state, "PLANNING")
+        if researchmod.is_legacy(state):
+            raise OrchError("upgrade the workflow first (`/task-orchestrator upgrade <kind>`)")
+        doc = scopemod.parse(wf)
+        if args.scope_cmd == "submit":
+            errors = scopemod.problems(doc)
+            if errors or doc is None:
+                raise OrchError("scope.md is not ready:\n  - " + "\n  - ".join(errors))
+            state.update(scope_submitted_sha256=doc["sha256"], scope_submitted_at=utcnow())
+            wf.save_state(state)
+            transition(wf, "scope", "SUBMITTED", sha256=doc["sha256"][:16])
+            open_q = [q for q in doc["questions"] if not q["answered"]]
+            out(f"Scope submitted: {len(doc['deliverables'])} deliverable(s), {len(doc['terms'])} significant "
+                f"term(s), {len(doc['non_goals'])} non-goal(s), {len(open_q)} open question(s).")
+            out(f"Present {wf.scope} to the human — the deliverables, the significant terms with what each rules "
+                "out, the non-goals, and every open question — and end the turn. They answer the questions (record "
+                "each as `- [x] Qn: ... — Answer: ...`, then `orch scope submit` again) or correct the scope, and "
+                "confirm it by typing `/task-orchestrator scope ok`.")
+            return 0
+        if doc is None:
+            raise OrchError("there is no scope.md to confirm")
+        if state.get("scope_submitted_sha256") != doc["sha256"]:
+            raise OrchError("scope.md changed since it was last submitted: `orch scope submit` and present it again")
+        errors = scopemod.problems(doc, for_confirm=True)
+        if errors:
+            raise OrchError("the scope cannot be confirmed yet:\n  - " + "\n  - ".join(errors))
+        token = human_token(ctx.entries, "scope", state.get("scope_submitted_at"), action="ok")
+        if token is None:
+            raise OrchError("the human confirms the scope by typing `/task-orchestrator scope ok` after it was "
+                            "submitted — never infer it")
+        consume(wf, token, "scope")
+        entry = transition(wf, "scope", "CONFIRMED", human_seq=token["seq"])
+        state.update(scope_sha256=doc["sha256"], scope_confirmed_at=utcnow(), scope_seq=entry["seq"])
+        wf.save_state(state)
+    summary = "; ".join(f"{k}: {v}" for k, v in {**doc["deliverables"], **doc["terms"]}.items())
+    append_decision(wf, "human decision: scope confirmed", f"{token.get('raw') or 'scope ok'}\n\nConfirmed: {summary}")
+    safe_render(wf)
+    out("Scope confirmed. Research items and plan requirements now cite it (`--serves D#,S#`; `Serves: D#`).")
+    out("NEXT: " + gates.next_action(gates.Context(wf, fast=True)))
+    return 0
+
+
+def cmd_proposal(args: argparse.Namespace) -> int:
+    wf = resolve_workflow(args.wf)
+    if args.proposal_cmd == "list":
+        rows = scopemod.proposals(ledger.read(wf))
+        shown = rows if args.all else [p for p in rows if p["decision"] is None]
+        if not shown:
+            out("No scope proposals await a decision." if not args.all else "No scope proposals.")
+        for p in shown:
+            out(scopemod.describe(p) + (f" — DECIDED: {p['decision']}" if p["decision"] else ""))
+        return 0
+    pid = args.proposal_id.upper()
+    with state_lock(wf):
+        ctx = gates.Context(wf, fast=True)
+        state = ctx.state
+        prop = next((p for p in scopemod.proposals(ctx.entries) if p["id"] == pid), None)
+        if prop is None:
+            raise OrchError(f"no scope proposal {pid} (see `orch proposal list`)")
+        if prop["decision"]:
+            raise OrchError(f"{pid} was already decided: {prop['decision']}")
+
+        def matches(entry: Dict[str, Any]) -> bool:
+            words = [str(a) for a in entry.get("args") or []]
+            return len(words) >= 2 and words[0].lower() in ("accept", "reject") and words[1].upper() == pid
+        token = ledger.find_human_token(ctx.entries, "proposal", after_ts=prop.get("ts"), predicate=matches)
+        if token is None:
+            raise OrchError(f"only the human decides a scope proposal: `/task-orchestrator proposal accept|reject "
+                            f"{pid} <notes>`")
+        decision = str(token["args"][0]).lower()
+        consume(wf, token, "proposal")
+        ledger.append(wf, {"kind": "proposal_decision", "proposal": pid, "decision": decision,
+                           "human_seq": token["seq"]})
+        revision = decision == "accept" and (
+            bool(state.get("approved_at")) or state.get("phase") == "AWAITING_APPROVAL")
+        if revision:
+            _open_revision(state, f"accepted scope proposal {pid}: {prop['what']}")
+        elif (state.get("phase") == "NEEDS_HUMAN" and (state.get("needs_human") or {}).get("kind") == "scope_change"
+              and not scopemod.undecided(ledger.read(wf), blocking_only=True)):
+            researchmod.close_pause(state)
+            state["phase"] = state.get("resume_phase") or "EXECUTING"
+            state.update(resume_phase=None, needs_human=None)
+        wf.save_state(state)
+    append_decision(wf, f"human decision: scope proposal {pid} {decision}ed",
+                    f"{scopemod.describe(prop)}\n\nThe human's words: {token.get('raw') or decision}")
+    transition(wf, "proposal", decision.upper(), proposal=pid, human_seq=token["seq"])
+    safe_render(wf)
+    if revision:
+        out(f"{pid} accepted — the approved plan must change, so plan revision {state['plan_revision']} is open. "
+            "Resume planning-author with the proposal and the human's words (both in decisions.md), redo the "
+            "reviews and the PM audit, then `orch submit`.")
+    elif decision == "accept":
+        out(f"{pid} accepted — it is in scope now (cite it as `{pid}`); the plan must account for it.")
+    else:
+        out(f"{pid} rejected — recorded. If an agent was blocked on it, resume that agent with the human's words.")
+    out("NEXT: " + gates.next_action(gates.Context(wf, fast=True)))
     return 0
 
 
@@ -1131,6 +1288,13 @@ def cmd_needs_human(args: argparse.Namespace) -> int:
                 raise OrchError("time_budget needs --agent <agent_id> with an open interim report (see `orch agents`)")
             review = gates.pm_interim_review(ctx, interim)
             args.report = args.report or (review or interim).get("result", {}).get("report")
+        proposal_ids: List[str] = []
+        if kind == "scope_change":
+            pending = scopemod.undecided(ctx.entries, blocking_only=True) or scopemod.undecided(ctx.entries)
+            if not pending:
+                raise OrchError("no scope proposal awaits the human (`orch proposal list`)")
+            proposal_ids = [p["id"] for p in pending]
+            args.report = args.report or pending[0].get("report")
         if state["phase"] != "NEEDS_HUMAN":
             state["resume_phase"] = state["phase"]
         state["phase"] = "NEEDS_HUMAN"
@@ -1138,6 +1302,8 @@ def cmd_needs_human(args: argparse.Namespace) -> int:
                                 "raised_at": utcnow()}
         if args.agent:
             state["needs_human"]["agent"] = args.agent
+        if proposal_ids:
+            state["needs_human"]["proposals"] = proposal_ids
         wf.save_state(state)
     transition(wf, "workflow", "NEEDS_HUMAN", reason=kind, task=tid)
     safe_render(wf)
@@ -1187,6 +1353,10 @@ def cmd_resolve(args: argparse.Namespace) -> int:
                 state["stop_continuations"] = 0
             elif kind == "time_budget":
                 pass  # the resolution entry itself is the extra allowance `orch agent continue` counts
+            elif kind == "research_window":
+                budgets = state.setdefault("budgets", {})
+                budgets["research_window_minutes"] = int(
+                    budgets.get("research_window_minutes") or DEFAULT_BUDGETS["research_window_minutes"]) + (grant or 30)
             elif info is not None:
                 info["review_budget"] = int(info.get("review_budget") or 3) + (grant or 3)
         elif action == "waive":
@@ -1211,6 +1381,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
                     if int(info.get("attempt") or 0) >= int(info.get("attempt_budget") or 0):
                         info["attempt_budget"] = int(info.get("attempt") or 0) + 1
         resolution["grant"] = grant
+        researchmod.close_pause(state)  # time waiting on the human never counts against the research window
         state["phase"] = state.get("resume_phase") or "EXECUTING"
         state["resume_phase"] = None
         state["needs_human"] = None
@@ -1275,6 +1446,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
                                 "approved, so it cannot be inferred; set `phase` in .orch/state.json by hand")
             state["resume_phase"] = None
         consume(wf, token, "resume")
+        researchmod.close_pause(state)  # time spent halted never counts against the research window
         state["phase"] = target
         state["block_reason"] = origin.get("block_reason")
         state["phase_since"] = utcnow()
@@ -1383,6 +1555,15 @@ def cmd_brief(args: argparse.Namespace) -> int:
     ctx = gates.Context(wf)
     text, report = briefs.build(ctx, stage, args.agent, task_id=task_id, loop=args.loop, topic=args.topic,
                                 note=note, mode_hint=args.mode, item=args.item, of_agent=args.of)
+    if stage == "research" and args.item:
+        ledger.append(wf, {"kind": "research_brief", "item": args.item.upper(), "agent": args.agent})
+    if stage == "research" and not ctx.state.get("research_window_started_at"):
+        with state_lock(wf):  # the research window opens with the first research dispatch
+            state = wf.load_state()
+            if not state.get("research_window_started_at"):
+                state["research_window_started_at"] = utcnow()
+            wf.save_state(state)
+        transition(wf, "research-window", "OPEN")
     safe_render(wf)
     out(text)
     return 0
@@ -1533,7 +1714,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         out(f"hook {event}: {'registered' if ok else 'NOT REGISTERED'}")
         problems += 0 if ok else 1
     beat = read_json(orch_home() / "heartbeat.json", default={}) or {}
-    for event in HOOK_EVENTS + ("Budget",):
+    for event in HOOK_EVENTS + ("Budget", "SubagentStart-helper"):
         out(f"last {event}: {beat.get(event, 'never (while bound)')}")
     if shutil.which("git") is None:
         problems += 1
@@ -1733,6 +1914,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("halt", help="request a halt at the next turn boundary").set_defaults(func=cmd_halt)
     sub.add_parser("resume", help="un-halt (needs the human's /task-orchestrator resume)").set_defaults(func=cmd_resume)
+    p = sub.add_parser("scope", help="the scope the human confirms before research: submit | confirm | show")
+    p.add_argument("scope_cmd", choices=("submit", "confirm", "show"))
+    p.set_defaults(func=cmd_scope)
+    p = sub.add_parser("proposal", help="scope proposals: list | decide <id> (needs the human's "
+                                        "/task-orchestrator proposal accept|reject <id>)")
+    psub = p.add_subparsers(dest="proposal_cmd", required=True)
+    pp = psub.add_parser("list")
+    pp.add_argument("--all", action="store_true", help="include decided proposals")
+    pp = psub.add_parser("decide")
+    pp.add_argument("proposal_id")
+    p.set_defaults(func=cmd_proposal)
     p = sub.add_parser("upgrade", help="bring a workflow from before kinds/research items under the current rules "
                                        "(needs the human's /task-orchestrator upgrade <kind>)")
     p.add_argument("--kind", required=True, choices=KINDS)
@@ -1770,6 +1962,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="one question per `- ` bullet or numbered line (at most 3)")
     rp.add_argument("--done-when", required=True, help="what answer the planner needs, so the agent knows when to stop")
     rp.add_argument("--context-file", help="pins, paths, constraints (at most 150 words; no extra asks)")
+    rp.add_argument("--serves", required=True,
+                    help="comma-separated ids from the confirmed scope this item serves: D# deliverables, S# "
+                         "significant terms, accepted proposals P#-#")
     rp.add_argument("--mode", choices=("map", "investigate"),
                     help="codebase-researcher only; default map for docs/kb/tutorial/education workflows")
     rp = rsub.add_parser("list", help="research items and their status")

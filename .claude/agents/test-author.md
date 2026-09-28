@@ -78,6 +78,17 @@ your report path.
 - The recorded checkpoint passed its expectation, and your analysis of each red failure is
   in the report.
 
+## Scope: exactly what the task asks
+
+- Write the tests the task's test plan names — nothing else. No test suites for code the
+  task does not change, no refactoring of existing tests.
+- Declare every file you change outside the task's `expected_paths` in `out_of_plan`, with
+  the criterion that needs it (a shared test helper, a fixture). An undeclared one fails
+  the task gate.
+- If you believe the test plan missed something the human needs, do not add it: put it in
+  `scope_proposals`, and if you cannot finish without it, finish `blocked`. Only the human
+  decides.
+
 ## Output style
 
 Write your work report and your final message answer-first, as

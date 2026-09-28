@@ -67,6 +67,16 @@ prior reports (fix rounds), your report path.
   is one line under **Noticed, not investigated** in your report, not an investigation or
   a fix.
 
+## Scope: exactly what the task asks
+
+- Write the documents the task names, covering what its acceptance criteria ask — in the
+  confirmed scope's significant terms.
+- Declare every file you change outside the task's `expected_paths` in `out_of_plan`, with
+  the criterion that needs it (a navigation index, a cross-link). An undeclared one fails
+  the task gate.
+- If you believe the task missed something the human needs, do not write it: add it to
+  `scope_proposals`, and if you cannot finish without it, finish `blocked`.
+
 ## Output style
 
 Write your work report and your final message answer-first, as

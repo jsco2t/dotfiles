@@ -192,7 +192,13 @@ DEFAULT_BUDGETS: Dict[str, Any] = {
     "review_passes": 3,        # verification/review passes per attempt before a human decides
     "final_review_passes": 3,  # whole-package review passes before a human decides
     "time_grants": 2,          # PM-approved time extensions per agent before a human decides
+    "research_window_minutes": 90,  # wall-clock minutes for all planning research, from its first dispatch
 }
+
+# Planning research agents that may run at once (the hook refuses the next dispatch).
+MAX_PARALLEL_RESEARCH = 7
+# Orchestrator notes on a brief: context, never extra asks.
+MAX_NOTE_WORDS = 150
 
 # Active minutes an agent may run per dispatch before the budget hook stops it and
 # it writes an interim report for the PM. Agents not listed are logged, not limited.
@@ -215,6 +221,9 @@ RESOLVE_ACTIONS: Dict[str, Tuple[str, ...]] = {
     "continuation_budget": ("continue",),
     "integrity": ("answer",),
     "time_budget": ("continue", "answer"),
+    "research_window": ("continue", "answer"),
+    # scope_change is decided with `/task-orchestrator proposal accept|reject P…` (orch proposal decide).
+    "scope_change": (),
 }
 
 # ---------------------------------------------------------------- workflow kinds

@@ -136,7 +136,11 @@ CATEGORY_HELP = {
     "assertions_reduced": "a test file lost more assertions than it gained",
     "gate_config_changed": "build/lint/test/CI configuration changed (could weaken the gate)",
     "fixture_changed": "golden files / fixtures / snapshots changed (can hide regressions)",
-    "outside_expected_paths": "a file outside the task's expected paths changed (possible unplanned work)",
+    "out_of_plan_undeclared": ("a file outside the task's expected paths changed and no author declared it "
+                               "(fails the task gate: declare it with its reason, or revert it)"),
+    "out_of_plan_declared": ("a file outside the task's expected paths changed, declared by the author with a "
+                             "reason — the PM rules: necessary consequence, discretionary (revert), or a scope "
+                             "change (the human decides)"),
     "tests_changed_after_checkpoint": "tests changed after the red/baseline checkpoint (possible weakening)",
 }
 
@@ -181,14 +185,10 @@ def parse_unified(diff_text: str) -> List[Dict[str, Any]]:
     return files
 
 
-def _prefix_ok(path: str, prefixes: Sequence[str]) -> bool:
-    for pre in prefixes:
-        pre = pre.strip("/")
-        if not pre or pre == ".":
-            return True
-        if path == pre or path.startswith(pre + "/"):
-            return True
-    return False
+def _in_any(path: str, patterns: Sequence[str]) -> bool:
+    from .common import path_matches
+
+    return any(path_matches(path, pattern) for pattern in patterns)
 
 
 def _strip(path: str, prefix: str) -> str:
@@ -202,7 +202,9 @@ def scan(
     expected_paths: Sequence[str] = (),
     prefix: str = "",
     tests_changed_after_checkpoint: Iterable[str] = (),
+    declared: Sequence[str] = (),
 ) -> Dict[str, Any]:
+    """`declared`: the out-of-plan patterns the task's authors declared (with reasons) this attempt."""
     hits: List[Dict[str, Any]] = []
 
     def hit(category: str, path: str, text: str = "") -> None:
@@ -229,8 +231,8 @@ def scan(
             hit("gate_config_changed", path)
         if any(r.search(path) for r in FIXTURE_RES):
             hit("fixture_changed", path)
-        if expected_paths and not _prefix_ok(path, expected_paths):
-            hit("outside_expected_paths", path)
+        if expected_paths and not _in_any(path, expected_paths):
+            hit("out_of_plan_declared" if _in_any(path, declared) else "out_of_plan_undeclared", path)
     for path in tests_changed_after_checkpoint:
         hit("tests_changed_after_checkpoint", path)
 

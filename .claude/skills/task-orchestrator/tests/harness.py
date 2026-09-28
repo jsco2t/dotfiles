@@ -39,7 +39,7 @@ PLAN_MD = """# Plan — add multiplication
 Give calc a multiplication function.
 
 ## Requirements
-- R1: calc provides mul(a, b) returning the product.
+- R1: calc provides mul(a, b) returning the product. — Serves: D1
 
 ## Current state
 `calc.py:1` defines only `add`.
@@ -76,6 +76,22 @@ Division.
 
 ## Open questions
 - [x] Q1: Integers only? — Resolution: any numbers.
+"""
+
+
+SCOPE_MD = """# Scope — add multiplication
+
+## Deliverables
+- D1: calc gains a `mul(a, b)` function that returns the product, with a test.
+
+## Significant terms
+- S1: calc — the flat Python module `calc.py` in this repository. Not: a new package, a CLI, or other modules.
+
+## Non-goals
+- No division, no refactoring of `add`.
+
+## Questions
+- [x] Q1: Integers only? — Answer: any numbers.
 """
 
 
@@ -296,22 +312,32 @@ class Harness:
         time.sleep(0.01)
 
     # -------------------------------------------------------- scenario steps
-    def init(self, kind: str = "code") -> None:
+    def init(self, kind: str = "code", confirm_scope: bool = True) -> None:
         req = self.tmp / "request.txt"
         req.write_text("Please add multiplication to calc.\n")
         out = self.orch("init", str(self.tmp / "plans"), "--title", "Add mul", "--workspace", f"code={self.ws}",
                         "--request-file", str(req), "--kind", kind)
         self.wf = Path(out.splitlines()[0])
+        if confirm_scope:
+            self.confirm_scope()
+
+    def confirm_scope(self, text: str = SCOPE_MD) -> None:
+        """The orchestrator drafts scope.md and submits it; the human types `scope ok`; it is confirmed."""
+        assert self.wf is not None
+        (self.wf / "scope.md").write_text(text)
+        self.orch("scope", "submit")
+        self.human("/task-orchestrator scope ok")
+        self.orch("scope", "confirm")
 
     def add_research_item(self, agent: str = "codebase-researcher", title: str = "calc module map",
                           questions: Tuple[str, ...] = ("Where is calc defined, and what does it export?",),
-                          done_when: str = "The planner knows which file gains mul.",
+                          done_when: str = "The planner knows which file gains mul.", serves: str = "D1",
                           extra: Tuple[str, ...] = (), expect: Optional[int] = 0) -> str:
         """Register a research item; returns its id (or the CLI output when a refusal is expected)."""
         qfile = self.tmp / f"questions-{time.time_ns()}.md"
         qfile.write_text("".join(f"- {q}\n" for q in questions))
         out = self.orch("research", "add", "--agent", agent, "--title", title, "--questions-file", str(qfile),
-                        "--done-when", done_when, *extra, expect=expect)
+                        "--done-when", done_when, "--serves", serves, *extra, expect=expect)
         return out.split()[0] if expect == 0 else out
 
     def approve_research(self, *items: str) -> Dict[str, Any]:

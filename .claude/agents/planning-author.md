@@ -48,9 +48,13 @@ Read the package specification first — it is the contract `orch validate` enfo
 
 ## Method — plan stage
 
-1. **Requirements.** Derive every requirement from the request and tickets as `R#` lines.
-   Nothing the user asked for may be missing or diluted; anything deliberately excluded goes
-   under `## Out of scope` by id, where the human will see it.
+1. **Requirements.** Derive every requirement from the request and tickets as `R#` lines,
+   each citing what it serves in the confirmed `scope.md`: `- R1: <requirement> — Serves: D1`
+   (deliverables `D#`, significant terms `S#`, accepted scope proposals `P#-#`). Nothing the
+   user asked for may be missing or diluted, and nothing may be planned that no deliverable
+   asks for — no audits, fixes, threat models, or comparisons the scope does not call for.
+   Anything deliberately excluded goes under `## Out of scope` by id, where the human will
+   see it.
 2. **Current state.** From the research, with `path:line` / URL / ticket evidence for every
    claim. Where research is thin, do not guess — add an open question (or say which research
    is missing in your report).
@@ -67,7 +71,11 @@ Read the package specification first — it is the contract `orch validate` enfo
    `expected_paths`. **Software is test-forward:** code tasks are `red-green` with a
    specific `## Test plan` and `validation.red_green` commands that select exactly the new
    tests; refactors are `characterization`; bug fixes include the reproducing regression
-   test. Order work into loops by dependency. **Documentation workflows** (docs, kb,
+   test. Every task that writes declares `expected_paths` — the files, directories, or globs
+   it will change, including the index files, lockfiles, and generated files it touches
+   (a mechanical ripple is a glob: `pkg/**/*.go`). Changes outside it must be declared by the
+   author and ruled on by the PM, so a precise footprint saves everyone a stop.
+   Order work into loops by dependency. **Documentation workflows** (docs, kb,
    tutorial, education): planning research gave you a structure map, not the content —
    each document task names its area, the questions its document must answer, and the
    sources to use, so its author's own research stays bounded to that task.
@@ -75,7 +83,8 @@ Read the package specification first — it is the contract `orch validate` enfo
    that the user should decide: `- [ ] Q#: …`. Resolved ones: `- [x] Q#: … — Resolution: …`.
    Research reports' **Noticed, not investigated** items are observations for the human:
    list the ones worth their attention in your report, and never turn one into a task the
-   request did not ask for.
+   request did not ask for. Something you believe the scope missed is a `scope_proposals`
+   entry on your result — only the human decides it.
 7. Run `python3 "$HOME/.claude/skills/task-orchestrator/scripts/orch.py" validate` and fix
    **every** error before finishing.
 

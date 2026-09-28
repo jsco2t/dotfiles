@@ -57,6 +57,8 @@ recorded** and you will be resumed to fix it. Rules:
 | `item` | research: the research item id from the brief. |
 | `approved`, `rejected` | pm-research-plan: the item ids you approved; `{"id", "reason"}` for each you rejected. |
 | `interim_agent`, `decision`, `grant_minutes` | pm-interim: the agent id under review; `continue`, `redirect`, or `split`; the extra active minutes (1–60). |
+| `scope_proposals` | Every stage (usually `[]`): something you believe the plan missed that the human needs — `{"what", "why", "blocking"}`. Never do it yourself; the human decides (§9). |
+| `out_of_plan` | Author work / fix: every file you changed outside the task's `expected_paths` — `{"paths": "<file, directory, or glob>", "reason": "<the criterion or finding that needs it>"}`. An undeclared one fails the task gate. |
 | `criteria` | verification / final-verification: one entry per acceptance criterion id — `{"id": "AC1", "met": true, "evidence": "<concrete>"}`. `met` is a JSON boolean; evidence is never empty for a met criterion. |
 | `findings` | review / final-review: integer counts. `blocking` = findings with confidence ≥ 85 that must be fixed; `recorded` = non-blocking findings; `disputes_ruled` = author disputes you ruled on. |
 | `scan_digest` | pm-accept: the digest of the scan you adjudicated (from the brief). |
@@ -165,6 +167,25 @@ report (what you saw, `file:line` or source) and move on. Re-verifying it, gradi
 tracing its cause, or proposing a fix is investigation: do it only when your brief's own
 questions ask for it. The orchestrator surfaces these lines to the human; it never turns
 them into new work on its own.
+
+**The confirmed scope.** Every brief carries the scope the human confirmed (`scope.md`):
+the deliverables, the **significant terms** — each with what it rules out — and the
+non-goals. Work in those terms: research about SOC 2 is not research about HIPAA, and an
+answer asked in Rust is not an answer in Python. Work about something a term rules out
+fails the brief, unless the brief itself asks for a comparison.
+
+**Exactly what was asked — not less, and not more.** If you believe the plan missed
+something the human needs, do not do it: add it to `scope_proposals` — what, why (your
+evidence), and whether you can finish your brief without it. If you cannot, also finish
+with `status: blocked`. The PM assesses a proposal; only the human decides it. When you hit
+anything the plan does not cover, stop and say so answer-first: what you hit, what needs
+deciding, the options.
+
+**Authors: account for every file.** Declare each file you change outside the task's
+`expected_paths` in `out_of_plan`, with the criterion or finding that needs it — one entry
+can cover a mechanical ripple (every implementer of a changed interface). The PM rules each
+a necessary consequence (allowed), discretionary (reverted), or a change to what gets
+delivered (the human decides). An undeclared one fails the task gate.
 
 ## 10. Time budgets, pausing, and interim reports
 

@@ -74,6 +74,12 @@ Your brief names the mode.
 
 - Your brief's questions are the whole job. Answer them fully, and stop when the "done
   when" line is met.
+- Work in the confirmed scope's **significant terms** (your brief lists them, each with
+  what it rules out). Research about something a term rules out fails the item, unless
+  the item asks for a comparison. Your item's `Serves:` line says which deliverables and
+  terms you are answering for.
+- Something you believe the plan missed goes in `scope_proposals`, never into your report
+  as extra research.
 - **Record, don't investigate.** Docs that disagree with the code, code that looks wrong,
   a risk, a gap: one line under **Noticed, not investigated**, then move on. Re-verifying
   it, grading it, tracing its cause, or proposing a fix is out of scope unless a question

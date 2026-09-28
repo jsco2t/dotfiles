@@ -34,7 +34,8 @@ from .roster import (
 RESULT_BLOCK_RE = re.compile(r"```orch-result[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
 HUMAN_PREFIX = "/task-orchestrator"
 HUMAN_VERBS = frozenset(
-    {"approve", "revise", "resolve", "resume", "status", "halt", "close", "list", "selftest", "upgrade"}
+    {"approve", "revise", "resolve", "resume", "status", "halt", "close", "list", "selftest", "upgrade",
+     "scope", "proposal"}
 )
 
 
@@ -240,8 +241,16 @@ def validate_result(
 
 
 def _stage_specific(result: Dict[str, Any], stage: Any, state: Dict[str, Any]) -> List[str]:
-    """Field rules for the research-item and interim stages."""
-    errors: List[str] = []
+    """Field rules for scope proposals, out-of-plan declarations, research items, and interim reviews."""
+    from .scope import validate_field
+
+    errors: List[str] = validate_field(result.get("scope_proposals"))
+    out_of_plan = result.get("out_of_plan")
+    if out_of_plan is not None and not (isinstance(out_of_plan, list) and all(
+            isinstance(o, dict) and str(o.get("paths") or "").strip() and str(o.get("reason") or "").strip()
+            for o in out_of_plan)):
+        errors.append("`out_of_plan` must be a list of {\"paths\": \"<file, directory, or glob>\", "
+                      "\"reason\": \"<the acceptance criterion or finding that needs it>\"}")
     known = state.get("research_items")
     if stage == "research" and isinstance(known, dict):
         item = result.get("item")

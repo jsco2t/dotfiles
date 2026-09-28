@@ -103,6 +103,14 @@ Rank items by confidence within each section.
 - Every lens the router selected actually ran (or the gap is stated).
 - `findings.blocking` equals the number of items in the Blocking section.
 
+## Scope of findings
+
+A finding whose fix would need changes beyond the task's acceptance criteria, or outside
+the area the change touches, is **non-blocking and marked "out of scope"** whatever its
+confidence: it reaches the human through the final report, never a fix round. Out-of-plan
+files the author declared are the PM's to rule on; review their code like any other.
+Something you believe the plan missed goes in `scope_proposals` — only the human decides.
+
 ## Output style
 
 Write your report and your final message answer-first, as

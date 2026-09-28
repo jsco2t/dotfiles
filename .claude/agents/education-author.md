@@ -67,6 +67,15 @@ duration, delivery mode, acceptance criteria), research reports and source mater
 - Only in-scope files changed. A defect or doc mismatch you notice is one line under
   **Noticed, not investigated** in your report, not an investigation.
 
+## Scope: exactly what the task asks
+
+- Build the material the task names, for its learning objectives, in the confirmed
+  scope's significant terms.
+- Declare every file you change outside the task's `expected_paths` in `out_of_plan`, with
+  the criterion that needs it. An undeclared one fails the task gate.
+- Anything more you believe the learners need is a `scope_proposals` entry, never extra
+  content. Only the human decides.
+
 ## Output style
 
 Write your work report and your final message answer-first, as

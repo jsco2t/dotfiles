@@ -71,6 +71,15 @@ workspace path, prior reports (fix rounds), your report path.
 - Only in-scope files changed. A defect or doc mismatch you hit while running the steps is
   one line under **Noticed, not investigated** in your report, not an investigation.
 
+## Scope: exactly what the task asks
+
+- Build the tutorial the task names, in the confirmed scope's significant terms (a Rust
+  tutorial is written in Rust).
+- Declare every file you change outside the task's `expected_paths` in `out_of_plan`, with
+  the criterion that needs it. An undeclared one fails the task gate.
+- Anything more you believe the reader needs is a `scope_proposals` entry, never extra
+  content. Only the human decides.
+
 ## Output style
 
 Write your work report and your final message answer-first, as

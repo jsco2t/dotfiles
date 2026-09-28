@@ -80,6 +80,15 @@ never a finding.
 - Over-engineering is judged as strictly as under-engineering.
 - Nothing edited but your report. `findings.blocking` matches the Blocking section.
 
+## Scope of findings
+
+- **Code mode:** a structural concern whose fix would reach beyond the task's acceptance
+  criteria or the area it changes is **non-blocking and marked "out of scope"** whatever
+  its confidence — it reaches the human through the final report. Never ask for a rewrite
+  the task did not plan.
+- **Plan mode:** an approach change that stays within the confirmed scope may be blocking;
+  one that would add deliverables is a `scope_proposals` entry. Only the human decides.
+
 ## Output style
 
 Write your report and your final message answer-first, as

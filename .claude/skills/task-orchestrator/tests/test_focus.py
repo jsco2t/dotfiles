@@ -331,7 +331,7 @@ class UpgradeTest(unittest.TestCase):
 
     def test_a_legacy_workflow_in_planning_is_upgraded_by_the_human(self) -> None:
         h = self.h
-        h.init()
+        h.init(confirm_scope=False)
         make_legacy(h)
         self.old_result("research", "codebase-researcher", "01-research-everything.codebase-researcher.md", verdict="n/a")
         self.old_result("pm-research", "project-manager", "02-pm-research.project-manager.md", verdict="fail")
@@ -349,7 +349,9 @@ class UpgradeTest(unittest.TestCase):
         self.assertIn("upgrade to kind `kb`", (h.wf / "decisions.md").read_text())
         status = h.orch("status")
         self.assertIn("kind kb", status)
-        self.assertIn("PM research-sufficiency", status)  # the pre-upgrade check no longer counts
+        self.assertIn("scope confirmed by the human", status)  # the scope check comes before anything else
+        h.confirm_scope()
+        self.assertIn("PM research-sufficiency", h.orch("status"))  # the pre-upgrade check no longer counts
         brief = h.orch("brief", "--plan", "pm-research", "--agent", "project-manager")
         self.assertIn("Do not change, fix, test", brief)
         self.assertIn("1200 lines — over the target", brief)

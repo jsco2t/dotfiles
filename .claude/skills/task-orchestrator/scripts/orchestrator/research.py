@@ -76,8 +76,18 @@ def default_mode(agent: str, kind: str) -> Optional[str]:
 
 
 def validate_new(agent: str, title: str, questions: List[str], done_when: str, context: str,
-                 mode: Optional[str]) -> List[str]:
+                 mode: Optional[str], serves: Optional[List[str]] = None,
+                 citable: Optional[Dict[str, str]] = None) -> List[str]:
     errors: List[str] = []
+    if citable is not None:
+        if not serves:
+            errors.append("--serves is required: the deliverable(s) D#, significant term(s) S#, or accepted "
+                          "proposal(s) P#-# from the confirmed scope this research serves")
+        else:
+            unknown = [s for s in serves if s not in citable]
+            if unknown:
+                errors.append(f"--serves names ids the confirmed scope does not have: {', '.join(unknown)} "
+                              f"(known: {', '.join(sorted(citable)) or 'none'})")
     if agent not in RESEARCHERS | LIAISONS:
         errors.append(f"research items are for {', '.join(sorted(RESEARCHERS | LIAISONS))}, not `{agent}`")
     if not title.strip() or words(title) > 12:
@@ -192,10 +202,92 @@ def require_approved(entries: List[Dict[str, Any]], state: Dict[str, Any], item_
     return item
 
 
+WAITING_PHASES = ("HALTED", "NEEDS_HUMAN")
+
+
+def _pause_started(state: Dict[str, Any]) -> Optional[str]:
+    """When the current, not-yet-banked wait on the human began, if the workflow is waiting on one."""
+    from .common import parse_ts
+
+    if state.get("phase") not in WAITING_PHASES:
+        return None
+    need = state.get("needs_human") or {}
+    began = need.get("raised_at") or state.get("halted_at") or state.get("phase_since")
+    banked = state.get("research_window_banked_at")  # time already counted by close_pause
+    began_at, banked_at = parse_ts(began), parse_ts(banked)
+    if began_at is not None and banked_at is not None and banked_at > began_at:
+        return banked
+    return began
+
+
+def window(state: Dict[str, Any]) -> Dict[str, Any]:
+    """The planning research window: wall-clock minutes from the first research dispatch,
+    not counting time the workflow spent waiting on the human (HALTED, NEEDS_HUMAN)."""
+    from datetime import datetime, timezone
+
+    from .common import parse_ts
+    from .roster import DEFAULT_BUDGETS
+
+    limit = int((state.get("budgets") or {}).get("research_window_minutes")
+                or DEFAULT_BUDGETS["research_window_minutes"])
+    started = parse_ts(state.get("research_window_started_at"))
+    now = datetime.now(timezone.utc)
+    seconds = (now - started).total_seconds() if started else 0.0
+    seconds -= float(state.get("research_window_paused_seconds") or 0)
+    waiting = parse_ts(_pause_started(state))
+    if started and waiting and waiting > started:
+        seconds -= (now - waiting).total_seconds()
+    elapsed = max(0, int(seconds // 60))
+    return {"started": bool(started), "limit": limit, "elapsed": elapsed,
+            "expired": bool(started) and elapsed >= limit}
+
+
+def close_pause(state: Dict[str, Any]) -> None:
+    """Call when the workflow leaves a wait on the human: bank the waiting time so it never
+    counts against the research window."""
+    from datetime import datetime, timezone
+
+    from .common import parse_ts
+
+    started = parse_ts(state.get("research_window_started_at"))
+    waiting = parse_ts(_pause_started(state))
+    if started and waiting and waiting > started:
+        now = datetime.now(timezone.utc)
+        state["research_window_paused_seconds"] = (float(state.get("research_window_paused_seconds") or 0)
+                                                   + (now - waiting).total_seconds())
+        state["research_window_banked_at"] = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+def reset_window(state: Dict[str, Any]) -> None:
+    """A plan revision starts a new research window with its first research dispatch."""
+    for key in ("research_window_started_at", "research_window_paused_seconds", "research_window_banked_at"):
+        state.pop(key, None)
+
+
+def in_flight(entries: List[Dict[str, Any]], state: Dict[str, Any]) -> List[str]:
+    """Research items briefed for dispatch that have not reported since (each item counts once)."""
+    briefed: Dict[str, int] = {}
+    for entry in entries:
+        if entry.get("kind") == "research_brief" and entry.get("item"):
+            briefed[str(entry["item"])] = int(entry.get("seq") or 0)
+    records = items(state)
+    out = []
+    for item_id, seq in sorted(briefed.items()):
+        if (records.get(item_id) or {}).get("status") == "DROPPED":
+            continue
+        latest = _latest(results_for(entries, item_id))
+        if latest is None or int(latest.get("seq") or 0) < seq:
+            out.append(item_id)
+    return out
+
+
 def describe(item: Dict[str, Any]) -> List[str]:
     """The item as brief lines."""
     mode = f", mode `{item['mode']}`" if item.get("mode") else ""
-    lines = [f"**{item['id']} — {item['title']}** (`{item['agent']}`{mode})", "", "Questions:"]
+    lines = [f"**{item['id']} — {item['title']}** (`{item['agent']}`{mode})"]
+    if item.get("serves"):
+        lines += ["", "Serves: " + ", ".join(item["serves"]) + " (see the confirmed scope below)"]
+    lines += ["", "Questions:"]
     lines += [f"{n}. {q}" for n, q in enumerate(item.get("questions") or [], 1)]
     lines += ["", f"Done when: {item.get('done_when')}"]
     if item.get("context"):

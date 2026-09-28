@@ -43,7 +43,8 @@ from .common import (
     utcnow,
     write_json_atomic,
 )
-from .roster import DEFAULT_AGENT_MINUTES, READONLY
+from .research import window as research_window
+from .roster import DEFAULT_AGENT_MINUTES, LIAISONS, READONLY, RESEARCHERS
 
 HANDBACK_TOOL = "SubagentHandback"
 FILE_TOOLS = ("Write", "Edit", "MultiEdit")
@@ -291,6 +292,10 @@ def stop_message(reason: str, info: Dict[str, Any], total: Optional[int]) -> str
         return ("THE HUMAN PAUSED THE WORKFLOW — stop now and report. Every tool call except writing your interim "
                 f"report is refused. {where}: what you finished, what remains, and exactly where to pick up. "
                 f"{finish} You will be resumed, with your context intact, when the human resumes the workflow.")
+    if reason == "window":
+        return ("THE PLANNING RESEARCH WINDOW IS USED — stop now and report. Every tool call except writing your "
+                f"interim report is refused. {where}: what you answered (with evidence), what remains, and how long "
+                f"it would take. {finish} The human decides whether research continues.")
     used = active_minutes(info)
     return ("TIME BUDGET REACHED — stop and report. You have used "
             f"{used} of your {total if total is not None else '?'} active minutes. Every tool call except writing "
@@ -330,6 +335,9 @@ def on_tool(wf: Workflow, state: Dict[str, Any], payload: Dict[str, Any]) -> Opt
         if reason is None:
             if agent_type in READONLY and pause_requested(wf, state):
                 reason = "pause"
+            elif (state.get("phase") == "PLANNING" and agent_type in (RESEARCHERS | LIAISONS)
+                  and research_window(state)["expired"]):
+                reason = "window"
             elif total is not None and active_seconds(info) >= total * 60:
                 reason = "time"
             if reason:

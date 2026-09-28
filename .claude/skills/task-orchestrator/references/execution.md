@@ -20,8 +20,11 @@ names the next unmet item; this document explains the why and the edge cases.
    assessed and met with evidence
 9. every required reviewer passes **at the current snapshot** with zero blocking findings
    (or the human waived those findings at this snapshot)
-10. integrity scan **at the current snapshot**
-11. PM acceptance **at the current snapshot**, citing the current scan digest
+10. integrity scan **at the current snapshot**, and **every changed file planned or declared**:
+    none outside `expected_paths` without an author's `out_of_plan` declaration (the PM's
+    scope check rules each declared group)
+11. no blocking scope proposal from this attempt awaiting the human
+12. PM acceptance **at the current snapshot**, citing the current scan digest
 
 "At the current snapshot" is recomputed from the workspace at accept time, so any change
 after an item was satisfied reopens it.
@@ -124,7 +127,9 @@ approved / adjusted>` (n more attempts, default 1) or `/task-orchestrator revise
 including the sub-agents skills fan out to. Reviewer skills fan out 3–6 sub-agents each, so:
 
 - run **reviewers sequentially** (one reviewer agent at a time);
-- run at most **3 research agents** at once in planning;
+- run at most **7 research agents** at once in planning (`orch brief research` refuses an
+  8th item while 7 are out without a report, and the hook refuses an 8th running agent;
+  `map`-mode researchers, domain researchers, and liaisons start no sub-agents of their own);
 - run at most **one author per workspace** (except parallel_safe document tasks);
 - never run a verifier while an author is writing in the same workspace.
 
@@ -204,6 +209,9 @@ Three passes, then NEEDS_HUMAN (`final_review_budget`: continue or waive).
 | NEEDS_HUMAN `continuation_budget` | progress summary | `resolve continue ...` |
 | NEEDS_HUMAN `integrity` | the integrity violation | a reply (`answer`) after they inspect |
 | NEEDS_HUMAN `time_budget` | the agent's interim report and the PM's review | `resolve continue [minutes] ...` · a reply (`answer`) |
+| NEEDS_HUMAN `research_window` | what research is done and open when the 90-minute window closed | `resolve continue [minutes] ...` · a reply (`answer`, e.g. plan with what exists) |
+| NEEDS_HUMAN `scope_change` | the blocking scope proposal, the PM's assessment, your recommendation | `proposal accept\|reject <id> <notes>` |
+| PLANNING (scope check) | scope.md: deliverables, significant terms, non-goals, questions | answers or corrections · `scope ok` |
 | PLAN_CHANGE_REQUIRED | the deviation and why | `revise <feedback>` |
 | HALTED | where things stand | `resume` |
 | DONE | the final report | `close` · `revise <feedback>` |
@@ -220,7 +228,7 @@ brief carries them.
 | `orch list [--all] [--json]` | orchestrator | catalogued workflows, most recent first (to pick one to resume) |
 | `orch status [--task T] [--fast] [--json]` | anyone | next action / checklist (+ agents needing attention) |
 | `orch validate [--for-approval]` / `orch plan-hash` / `orch render` | anyone / orchestrator | plan package |
-| `orch research add --agent A --title T --questions-file F --done-when D [--context-file F] [--mode map\|investigate]` | orchestrator | register a focused research item (PROPOSED) |
+| `orch research add --agent A --title T --questions-file F --done-when D --serves D#,S# [--context-file F] [--mode map\|investigate]` | orchestrator | register a focused research item (PROPOSED; needs the confirmed scope) |
 | `orch research list [-v]` / `orch research drop R## --reason R` | orchestrator | research items |
 | `orch brief [T] <stage> --agent A [--loop N\|--final] [--item R##] [--of AGENT_ID] [--mode] [--note \| --note-file]` | orchestrator | dispatch brief (`--item` for research, `--of` for pm-interim) |
 | `orch agents [AGENT_ID] [--calls] [--all] [--json]` | anyone | agents: status, active minutes vs budget, tool calls |
@@ -240,5 +248,7 @@ brief carries them.
 | `orch note "text" \| --file <path> [--title]` | orchestrator | append a clarification to decisions.md (`--file` for text with backticks or `$`) |
 | `orch halt` / `orch resume` / `orch close` | orchestrator | human-driven lifecycle |
 | `orch upgrade --kind K` | orchestrator | a workflow from before kinds/research items (needs the human's `/task-orchestrator upgrade K`) |
+| `orch scope submit` / `orch scope confirm` / `orch scope show` | orchestrator / anyone | the scope check (confirm needs the human's `/task-orchestrator scope ok`) |
+| `orch proposal list [--all]` / `orch proposal decide <id>` | orchestrator | scope proposals (decide needs the human's `/task-orchestrator proposal accept\|reject <id>`) |
 | `orch ledger [--task T] [--kind K] [--tail N] [--json]` | anyone | inspect evidence |
 | `orch doctor` / `orch selftest [--check]` | orchestrator | installation checks |

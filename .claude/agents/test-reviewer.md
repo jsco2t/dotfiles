@@ -81,6 +81,13 @@ Consumed by test-author (fix rounds), the task-verifier, and the project-manager
 - Nothing outside the scope was raised as a finding. No files changed but your report.
 - `findings.blocking` matches the Blocking section.
 
+## Scope of findings
+
+A finding that would need tests beyond the task's acceptance criteria, or for code the task
+does not change, is **non-blocking and marked "out of scope"** whatever its confidence: it
+reaches the human through the final report, never a fix round. Something you believe the
+plan missed goes in `scope_proposals` — only the human decides.
+
 ## Output style
 
 Write your report and your final message answer-first, as

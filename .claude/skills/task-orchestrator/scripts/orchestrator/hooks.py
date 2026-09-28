@@ -44,7 +44,16 @@ from .common import (
     utcnow,
     write_json_atomic,
 )
-from .roster import AUTHORS, PLANNERS, READONLY, RECORD_DONT_INVESTIGATE, ROSTER
+from .roster import (
+    AUTHORS,
+    LIAISONS,
+    MAX_PARALLEL_RESEARCH,
+    PLANNERS,
+    READONLY,
+    RECORD_DONT_INVESTIGATE,
+    RESEARCHERS,
+    ROSTER,
+)
 
 FILE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 AGENT_TOOLS = frozenset({"Agent", "Task"})
@@ -159,6 +168,8 @@ def _workflow_write(wf: Workflow, state: Dict[str, Any], path: Path, caller: str
                     "record it with `orch deviation --summary ...` and stop for the human")
         if path == wf.request:
             return None if is_main else "only the orchestrator records request.md"
+        if path == wf.scope:
+            return None if is_main else "only the orchestrator drafts scope.md; the human confirms it"
         if caller in PLANNERS:
             return None
         return (f"plan documents are written by planning-author (and test-planner for the test plan); "
@@ -206,6 +217,14 @@ def pretool_policy(payload: Dict[str, Any], wf: Workflow, state: Dict[str, Any])
             if wanted not in ROSTER:
                 return (f"this process uses pre-defined roster agents only; `{wanted}` is not one "
                         f"(roster: {', '.join(sorted(ROSTER))})")
+            if phase == "PLANNING" and wanted in (RESEARCHERS | LIAISONS):
+                from . import ledger
+
+                running = [r for r in activity.summaries(wf, state, ledger.read(wf))
+                           if r["status"] == "running" and r["agent_type"] in (RESEARCHERS | LIAISONS)]
+                if len(running) >= MAX_PARALLEL_RESEARCH:
+                    return (f"{len(running)} research agents are already running (the limit is "
+                            f"{MAX_PARALLEL_RESEARCH}); end your turn and dispatch this one when one hands back")
             return _brief_problem(wf, str(wanted), str(tool_input.get("prompt") or ""))
         return None
 
@@ -293,11 +312,14 @@ def _record_human(wf: Workflow, parsed: Optional[Tuple[str, List[str]]], raw: st
     verb = parsed[0] if parsed else None
     args = (parsed[1] if parsed else [])[:60]
     if verb is not None:
+        # One typed command reaches both prompt hooks; the same hook twice is the human typing it twice.
+        hook = via.split(" (")[0]
         recent = [e for e in ledger.read(wf)[-5:] if e.get("kind") == "human"]
         now = parse_ts(utcnow())
         for entry in recent:
             stamp = parse_ts(entry.get("ts"))
             if (entry.get("verb") == verb and entry.get("args") == args and stamp and now
+                    and str(entry.get("via") or "").split(" (")[0] != hook
                     and (now - stamp).total_seconds() < 15):
                 return
     ledger.append(wf, {"kind": "human", "verb": verb, "args": args, "raw": raw[:4000],
@@ -376,16 +398,20 @@ Workflow `{workflow_id}` — directory {root}
 - Write only your own report file (its name ends in `.{agent}.md`). Never edit `.orch/`, plan documents after approval, generated index files, or another agent's report — hooks will refuse.
 - Judge the snapshot you were given. If the workspace changes under you, say so in your report.
 - Finish with the ```orch-result block from your brief, every placeholder replaced. If you hand back with SubagentHandback, end that message with the block; either way, also end your final text message with it. Without a valid block your work is not recorded.
-- Scope: {non_goals} {record}
-- The budget hook may stop you — when your time budget is reached, or when the human pauses the workflow. Every tool call except writing your interim report is then refused: follow its message and your brief's "If you are stopped" section.
+- Scope: {non_goals} {record}{scope_line}
+- Exactly what was asked — not less, and not more. If you believe the plan missed something the human needs, never do it: raise it in `scope_proposals` (your brief says how). If you hit something the plan does not cover, stop (`blocked`) and say so answer-first: what you hit, what needs deciding, the options.
+- The budget hook may stop you — when your time budget is reached, the planning research window closes, or the human pauses the workflow. Every tool call except writing your interim report is then refused: follow its message and your brief's "If you are stopped" section.
 - Output style: write your report and your final message answer-first, as {style} defines it — read it before you write. The point first, then only the explanation the reader needs; every finding leads with its state; complete sentences; tables only for short, uniform values. Reviewers always give each finding's confidence score.
 - {mandate}"""
+
+HELPER_CONTRACT = """TASK-ORCHESTRATOR SCOPE (injected by the SubagentStart hook)
+You are a helper started by an agent of task-orchestrator workflow `{workflow_id}`. Answer only the question your parent gave you, as far as it needs and no further. {record} Change no files unless your parent's instructions explicitly require it. Report answer-first: the answer, then its evidence."""
 
 
 def handle_subagent_start(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     agent = payload.get("agent_type")
     if agent not in ROSTER:
-        return None
+        return _helper_start(payload)
     bound = bound_workflow(payload)
     if bound is None:
         return None
@@ -401,11 +427,28 @@ def handle_subagent_start(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     except Exception as exc:  # the contract still goes out
         log_error("SubagentStart activity", exc)
     kind = state.get("kind") or LEGACY_KIND
+    scope_line = (f" Read {wf.scope}: the scope the human confirmed — work only in its deliverables and significant "
+                  "terms." if wf.scope.is_file() else "")
     text = CONTRACT.format(
         workflow_id=state.get("workflow_id"), root=wf.root, decisions=wf.decisions, agent=agent,
         mandate=QUALITY_MANDATE, non_goals=NON_GOALS.get(kind, NON_GOALS[LEGACY_KIND]),
-        record=RECORD_DONT_INVESTIGATE, style=OUTPUT_STYLE,
+        record=RECORD_DONT_INVESTIGATE, style=OUTPUT_STYLE, scope_line=scope_line,
     )
+    return {"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": text}}
+
+
+def _helper_start(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A non-roster sub-agent (a skill's fan-out) while a workflow is bound: give it the scope line.
+
+    Unverified live: whether SubagentStart fires for agents started by sub-agents.
+    `heartbeat("SubagentStart-helper")` records it when it does (`orch doctor` shows it).
+    """
+    bound = bound_workflow(payload)
+    if bound is None:
+        return None
+    _, state = bound
+    heartbeat("SubagentStart-helper")
+    text = HELPER_CONTRACT.format(workflow_id=state.get("workflow_id"), record=RECORD_DONT_INVESTIGATE)
     return {"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": text}}
 
 

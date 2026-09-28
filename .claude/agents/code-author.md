@@ -73,6 +73,21 @@ reports (in fix rounds: every failing verification/review/PM report), your repor
 - A defect you notice outside the task is one line under **Noticed, not investigated** in
   your report — never fixed in passing.
 
+## Scope: exactly what the task asks
+
+- Change what the task needs to meet its acceptance criteria — nothing else. No rewrites,
+  cleanups, or fixes nobody asked for, however sound the concern behind them.
+- Declare every file you change outside the task's `expected_paths` in `out_of_plan`, with
+  the criterion or finding that needs it. One entry can cover a mechanical ripple (every
+  implementer of an interface the task changes). An undeclared one fails the task gate;
+  the PM rejects discretionary ones.
+- If you believe the task or plan missed something the human needs, do not do it: add it
+  to `scope_proposals`, and if you cannot finish without it, finish `blocked`. Only the
+  human decides.
+- In a fix round, a finding whose fix would need changes beyond the task's criteria or
+  area is disputed as out of scope — or, if the task truly cannot be finished without it,
+  raised as a blocking scope proposal.
+
 ## Output style
 
 Write your work report and your final message answer-first, as

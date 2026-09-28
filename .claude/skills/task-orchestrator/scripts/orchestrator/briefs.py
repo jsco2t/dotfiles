@@ -28,12 +28,15 @@ from .common import (
     write_text_atomic,
 )
 from .gates import LEGACY_PLANNING, Context, final_workspaces, loop_tasks, open_interims
+from . import scope as scopemod
 from .roster import (
     AUTHORS,
     DOC_KINDS,
     INTERIM_DECISIONS,
     LEGACY_KIND,
     LIAISONS,
+    MAX_NOTE_WORDS,
+    MAX_PARALLEL_RESEARCH,
     NON_GOALS,
     READONLY,
     RECORD_DONT_INVESTIGATE,
@@ -158,13 +161,22 @@ STAGE_TEXT: Dict[str, str] = {
         "FIX ROUND {round}. Address EVERY blocking finding in the failing reports listed below "
         "(verification, reviews, PM). For each finding, report `fixed` (what changed, where) or "
         "`disputed` (concrete evidence it is wrong). Never weaken a test, an assertion, or a criterion to "
-        "make a finding go away, and make no unrelated changes. Re-run the task's validation commands."
+        "make a finding go away, and make no unrelated changes. A finding whose fix would need changes "
+        "beyond the task's acceptance criteria — or a new area of the code the plan never touched — is not "
+        "fixed: dispute it as out of scope, or, if the task genuinely cannot be finished without it, raise a "
+        "blocking scope proposal and stop. Declare every file you change outside the task's expected paths "
+        "in `out_of_plan`, with the finding or criterion that needs it. Re-run the task's validation commands."
     ),
     "pm-scope": (
         "MODE: scope check (after an author pass, round {round}). Compare what the author CLAIMS "
         "(its report) with what ACTUALLY changed (changes.patch, changed-files.txt, scan.md). Fail on: "
         "significant unplanned work, out-of-scope files, weakened tests or criteria, findings claimed "
-        "fixed that are not, disputes without evidence, or a test-forward sequence that was not followed."
+        "fixed that are not, disputes without evidence, or a test-forward sequence that was not followed. "
+        "Rule on EVERY out-of-plan change in scan.md — each declared group and each undeclared file — as one "
+        "of: (1) a necessary consequence of the planned change (e.g. every implementer of an interface the "
+        "task changes) — allowed; (2) discretionary (a rewrite, a cleanup, a fix nobody asked for) — FAIL, "
+        "it is reverted; (3) a change to what gets delivered — you cannot allow it: FAIL, and add a blocking "
+        "`scope_proposals` entry so the human decides. An undeclared out-of-plan file is always a FAIL."
     ),
     "verification": (
         "MODE: completion verification. Independently establish whether EVERY acceptance criterion is "
@@ -178,15 +190,18 @@ STAGE_TEXT: Dict[str, str] = {
     "review": (
         "Review ONLY this task's changes — the files in changed-files.txt / changes.patch. Other "
         "uncommitted work in the tree is context, not a review target. A finding is BLOCKING when its "
-        "confidence is >= 85; record lower-confidence findings as non-blocking. If the author disputed "
-        "earlier findings (see fix reports), rule on each dispute: withdraw it, or maintain it with "
-        "evidence. verdict pass = zero blocking findings."
+        "confidence is >= 85; record lower-confidence findings as non-blocking. A finding whose fix would "
+        "need changes beyond the task's acceptance criteria or outside the area it changes is non-blocking "
+        "and marked out of scope, whatever its confidence — it goes to the human through the final report, "
+        "never into a fix round. If the author disputed earlier findings (see fix reports), rule on each "
+        "dispute: withdraw it, or maintain it with evidence. verdict pass = zero blocking findings."
     ),
     "pm-accept": (
         "MODE: acceptance stamp — the external viewpoint. Did the work do what the task and plan asked, "
         "all of it and nothing else? Were the quality gates real and green at this snapshot? Did every "
         "reviewer review what it should have (right scope, right lens)? Were disputes resolved on "
-        "evidence? Is every scan hit adjudicated and every non-blocking finding acceptable? Cite the scan "
+        "evidence? Is every scan hit adjudicated and every non-blocking finding acceptable? Was every "
+        "out-of-plan change ruled a necessary consequence, with nothing discretionary left in? Cite the scan "
         "digest you adjudicated in `scan_digest`."
     ),
     "pm-resolution": (
@@ -237,7 +252,8 @@ STAGE_TEXT: Dict[str, str] = {
         "code, URL + date for external sources) and says what you could not confirm. Structure the report: "
         "the answers first, one section per question; then \"Noticed, not investigated\" (one line each); "
         "then \"Open questions\". Aim for at most about {target} lines — a much longer report usually means "
-        "work beyond the questions, and the PM checks length against them."
+        "work beyond the questions, and the PM checks length against them. Stay on the significant terms of "
+        "the confirmed scope: an answer about an adjacent thing a term rules out fails the item."
     ),
     "pm-research-plan": (
         "MODE: research-plan review — the fence in front of every research agent. Review each PROPOSED "
@@ -245,7 +261,9 @@ STAGE_TEXT: Dict[str, str] = {
         "without its answer; its questions are focused (at most 3) and answerable by that agent within its "
         "time budget; it asks for the facts the plan needs — not verification, grading, or audits of code or "
         "docs the request did not ask for; it is not a lead forwarded from an earlier report's out-of-scope "
-        "observations; it respects the workflow's non-goals; and the agent and mode fit the question. Reject "
+        "observations; it respects the workflow's non-goals; it genuinely serves the deliverables and terms it "
+        "cites (a vague citation is not a reason); it stays on the significant terms (SOC 2 research is not "
+        "HIPAA research); and the agent and mode fit the question. Reject "
         "with a reason and a narrower rewrite (agent, title, questions, done-when) otherwise. Report "
         "`approved` (ids) and `rejected` ({{\"id\", \"reason\"}}); verdict pass only when you approved every "
         "item you reviewed."
@@ -255,10 +273,11 @@ STAGE_TEXT: Dict[str, str] = {
         "enough to write a plan with evidence-grounded claims, objective acceptance criteria, and no "
         "guessing? Name any missing research precisely (what question, which agent should answer it). "
         "Also judge proportion: did each report answer its item's questions and stay inside them? Flag "
-        "drift — work outside the item's questions, re-verification or audits nobody asked for, reports far "
-        "past the length target (line counts are listed below) — and say whether anything should be "
-        "discarded. Items under \"Noticed, not investigated\" are observations for the human, not missing "
-        "research: name one as missing only if the plan cannot be written without it."
+        "drift — work outside the item's questions, re-verification or audits nobody asked for, work about "
+        "things a significant term rules out, reports far past the length target (line counts are listed "
+        "below) — and say whether anything should be discarded. Items under \"Noticed, not investigated\" are "
+        "observations for the human, not missing research: name one as missing only if the plan cannot be "
+        "written without it."
     ),
     "pm-interim": (
         "MODE: interim review. Agent `{interim_agent}` ({interim_type}) stopped at its time budget after "
@@ -278,9 +297,12 @@ STAGE_TEXT: Dict[str, str] = {
         "Write (or revise) the plan package in the workflow directory, following the task-orchestrator "
         "plan-package reference exactly: plan.md, architecture.md (when warranted), gate.json, and "
         "tasks/T###-<slug>.md. Ground every claim about existing code in file:line evidence from the "
-        "research. Every requirement traces to tasks; every task has objective acceptance criteria with "
-        "`Verified by`; code tasks are test-forward. Run `{orch} validate` and fix every error before you "
-        "finish. {revision_note}"
+        "research. Every requirement serves the confirmed scope (`- R1: ... — Serves: D1`), every deliverable "
+        "is served, and nothing is planned that no deliverable asks for. Every requirement traces to tasks; "
+        "every task has objective acceptance criteria with `Verified by`, and every task that writes declares "
+        "its `expected_paths` (files, directories, or globs — include the index files, lockfiles, and "
+        "generated files it will touch); code tasks are test-forward. Run `{orch} validate` and fix every "
+        "error before you finish. {revision_note}"
     ),
     "test-plan": (
         "Run the /eng-test-planning skill against {plan} so it appends the `## Test plan` section, then "
@@ -296,7 +318,10 @@ STAGE_TEXT: Dict[str, str] = {
         "tasks; every task has objective, checkable acceptance criteria with `Verified by`; task size "
         "<= 1.5 days; code tasks are test-forward with real test plans; reviewers meet type minimums; "
         "loops are ordered correctly; open questions are all surfaced; plan reviews were addressed; nothing "
-        "in the plan quietly shrinks what the request asked for. Report `plan_hash` exactly as given."
+        "in the plan quietly shrinks what the request asked for — AND nothing in the plan goes beyond it: no "
+        "task, requirement, or document the confirmed scope's deliverables do not call for (audits, fixes, "
+        "threat models, comparisons nobody asked for), no citation of a deliverable the work does not really "
+        "serve, nothing on the adjacent things a significant term rules out. Report `plan_hash` exactly as given."
     ),
     "selftest": (
         "SELFTEST. Do not do real work, and ignore the \"Read these in full\" list. (1) Say whether your "
@@ -407,9 +432,9 @@ def _pm_interim(ctx: Context, of_agent: Optional[str], fields: Dict[str, Any], f
     interim = next((e for e in open_interims(ctx) if e.get("agent_id") == of_agent), None)
     if interim is None:
         raise OrchError(f"agent {of_agent} has no open interim report (see `orch agents`)")
-    if (interim.get("interim_reason") or "time") == "pause":
-        raise OrchError(f"agent {of_agent} was paused by the human, not stopped by its budget: after the human "
-                        f"resumes, `orch agent continue {of_agent}` — no PM review is needed")
+    if (interim.get("interim_reason") or "time") in ("pause", "window"):
+        raise OrchError(f"agent {of_agent} was stopped by a pause or the research window, not by its own budget: "
+                        f"once the human resumes or extends, `orch agent continue {of_agent}` — no PM review is needed")
     res = interim.get("result") or {}
     interim_report = Path(str(res.get("report")))
     original = report_for_interim(interim_report)
@@ -469,7 +494,13 @@ def build(
                                          "final-verification", "plan-review"} and not stage.startswith("pm-")
         else "pass | fail",
     }
+    if note and researchmod.words(note) > MAX_NOTE_WORDS:
+        raise OrchError(f"the note is {researchmod.words(note)} words (max {MAX_NOTE_WORDS}). A note is context — "
+                        "pins, paths, a pointer to a report — written answer-first, never extra asks; anything "
+                        "that changes the work belongs in the plan (`orch deviation` for the human)")
     read: List[str] = [f"{wf.decisions}  (binding clarifications and human decisions)"]
+    if wf.scope.is_file():
+        read.append(f"{wf.scope}  (the scope the human confirmed — deliverables, significant terms, non-goals)")
     extra: List[str] = []
     fmt: Dict[str, Any] = {"orch": ORCH, "task": task_id or "", "loop": loop or "", "round": 0,
                            "snapshot": "", "topic": topic or "(given by the orchestrator below)",
@@ -639,7 +670,16 @@ def build(
                                 "item's --context-file (word-limited, and the PM reviews it)")
             if not item:
                 raise OrchError("research briefs need --item R## (see `orch research list`)")
+            win = researchmod.window(state)
+            if win["expired"]:
+                raise OrchError(f"the research window is used ({win['elapsed']} of {win['limit']} minutes): "
+                                "nothing new is dispatched until the human decides "
+                                "(`orch needs-human --kind research_window --summary ...`)")
             record = researchmod.require_approved(ctx.entries, state, item, agent)
+            flying = researchmod.in_flight(ctx.entries, state)
+            if item not in flying and len(flying) >= MAX_PARALLEL_RESEARCH:
+                raise OrchError(f"{len(flying)} research items are already out ({', '.join(flying)}); at most "
+                                f"{MAX_PARALLEL_RESEARCH} run at once — brief this one when one reports back")
             fields["item"] = item
             text_key = "research-item"
             stem = f"research-{item.lower()}-{slugify(record['title'], 24)}"
@@ -670,6 +710,16 @@ def build(
         fields.setdefault("scan_digest", "")
     if stage == "selftest":
         text = text.replace("{request}", str(wf.request)).replace("{interim}", str(interim_path(report)))
+    if agent in AUTHORS and stage in ("work", "fix", "final-fix"):
+        fields["out_of_plan"] = []
+    fields["scope_proposals"] = []
+    if stage.startswith("pm-"):
+        pending = scopemod.undecided(ctx.entries)
+        if pending:
+            body += ["", "## Scope proposals awaiting the human", "",
+                     "Assess each in your report — a genuine gap in what the human asked for, or drift — with "
+                     "your evidence. You cannot accept or reject one; the human decides."]
+            body += [f"- {scopemod.describe(p)}" for p in pending]
 
     lines = [
         f"# Dispatch brief — `{stage}` · `{agent}`",
@@ -695,14 +745,29 @@ def build(
     lines += body
     if note:
         lines += ["", "## Orchestrator notes for this dispatch", "", note]
+    lines += scopemod.brief_lines(wf)
     lines += [
         "",
-        "## Scope",
+        "## Stay in scope",
         "",
         NON_GOALS.get(kind, NON_GOALS[LEGACY_KIND]),
         "",
         RECORD_DONT_INVESTIGATE,
+        "",
+        "If you believe the plan missed something the human needs, do NOT do it: add it to "
+        "`scope_proposals` — `{\"what\": \"<the change, one sentence>\", \"why\": \"<the evidence>\", "
+        "\"blocking\": <true only if you cannot finish your brief without it>}` — and, when blocking, finish "
+        "with `status: blocked`. The human decides every proposal.",
     ]
+    if agent in AUTHORS and stage in ("work", "fix", "final-fix"):
+        lines += [
+            "",
+            "Declare every file you change outside the task's expected paths in `out_of_plan` — "
+            "`{\"paths\": \"<file, directory, or glob>\", \"reason\": \"<the acceptance criterion or finding that "
+            "needs it>\"}` (one entry can cover many files, e.g. every implementer of a changed interface). An "
+            "undeclared out-of-plan file fails the task gate, and the PM rejects discretionary ones "
+            "(rewrites, cleanups, fixes nobody asked for).",
+        ]
     lines += _stop_section(state, agent, report)
     lines += [
         "",
@@ -712,8 +777,9 @@ def build(
         "questions in your report; you will be resumed with answers.",
         "- Write only your report file (below) inside the workflow directory. Never edit `.orch/`, the plan "
         "documents, generated index files, or another agent's report.",
-        "- If what you find contradicts the plan, do not work around it: say so, and finish with "
-        "`status: blocked` and a `deviations` list.",
+        "- If what you find contradicts the plan, or you hit something the plan does not cover, do not "
+        "improvise: say so plainly — answer-first: what you hit, what you need decided, the options — and "
+        "finish with `status: blocked` and a `deviations` list.",
         "",
         "## Finish",
         "",

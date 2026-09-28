@@ -56,6 +56,10 @@ stop and tell the user. Roster agents pin their own models in their definitions.
 8. **Every verdict must be at the current snapshot.** Any change after a verification,
    review, or PM stamp makes it stale; the gates re-require it. There is no way to fix
    something after review without re-review.
+9. **Exactly what was asked — not less, and not more.** The human's request, clarified in
+   the confirmed `scope.md`, bounds every agent. Anything an agent believes the plan
+   missed is a **scope proposal**, never an action; the PM assesses it, and only the human
+   decides it. Anything the plan does not cover stops the work (`blocked`) for a decision.
 
 ## The `orch` CLI
 
@@ -87,6 +91,8 @@ Determine the mode **only** from the literal argument:
 | `resume [<workflow-dir \| workflow-id>]` | continue a workflow; in a new session, pick one and bind it — see [Pause, resume, restarts](#pause-resume-restarts) |
 | `status` | report `orch status` (it includes `orch agents` lines); do no work |
 | `halt` | pause: `orch halt` (or the human can `touch <workflow>/HALT`) — see [Pause, resume, restarts](#pause-resume-restarts) |
+| `scope ok` | the human confirms the scope: `orch scope confirm` |
+| `proposal accept\|reject <id> <notes>` | the human decides a scope proposal: `orch proposal decide <id>` |
 | `upgrade <kind>` | bring a workflow created before kinds and research items under the current rules: `orch upgrade --kind <kind>` |
 | `close` | after the human's acceptance testing: `orch close` |
 | `list` | `orch list` — every catalogued workflow, most recent first |
@@ -130,7 +136,9 @@ and **minimum** reviewers (a plan may add reviewers, never remove them) — see
    generator pins identity values, the snapshot, the files to read, and the report path.
 2. Call the Agent tool with `subagent_type: <agent>` and the brief text as the prompt,
    **verbatim** — the PreToolUse hook refuses a dispatch whose prompt does not contain the
-   saved brief for that agent. Put anything extra in `--note-file <path>`: a scratch file
+   saved brief for that agent. A note is at most 150 words of context — pins, paths, a
+   pointer to a report — written answer-first; never extra asks (anything that changes the
+   work belongs in the plan). Put it in `--note-file <path>`: a scratch file
    outside the workflow directory, written in Bash with a quoted heredoc
    (`cat > <path> <<'EOF'`); the Write tool is refused to the orchestrator there. Never
    pass shell-quoted note text containing backticks or `$(...)`: in `--note "..."` the
@@ -192,32 +200,66 @@ the orchestrator routes. This is deliberate: one coordinator, no conflicting dec
    `research`, `pm`, `integration`, or `mixed`. It sets the non-goals every brief carries
    (a `kb` workflow documents code; it never fixes, tests, or audits it) and how deep
    planning research goes. Ask the human if the request does not make it clear.
-4. **Research plan.** Break what the plan needs to know into **focused research items** —
+4. **Scope check — before any research.** People often think they were clear when they
+   weren't. Read the request closely and write `scope.md` in the workflow directory (the
+   Write tool is allowed there during planning):
+
+   ```markdown
+   # Scope — <title>
+   ## Deliverables
+   - D1: <what will be delivered, in the human's terms>
+   ## Significant terms
+   - S1: <term> — <what it means in this request>. Not: <adjacent things that are out>
+   ## Non-goals
+   - <what this work will not do>
+   ## Questions
+   - [ ] Q1: <a question whose answer changes the work>
+   ```
+
+   **Significant terms** are the words that carry specific meaning — a named standard or
+   regime (SOC 2 — *Not:* HIPAA, ISO 27001), a language or technology (Rust — *Not:*
+   Python), a product, version, component, or a comparison set ("other k8s distributions"
+   — which ones?). Each names what it rules out; that boundary is what keeps research on
+   topic. Ask at most about five questions, only ones whose answer changes the work.
+   `orch scope submit`, present the scope, and **stop**. The human answers (record each as
+   `- [x] Qn: … — Answer: …`, `orch scope submit` again) or corrects the scope, and confirms
+   it by typing `/task-orchestrator scope ok` → `orch scope confirm`. Everything after cites
+   it; scope.md is frozen with the plan.
+5. **Research plan.** Break what the plan needs to know into **focused research items** —
    breadth comes from more items, never bigger ones. Each item is one agent, at most 3
-   short questions, a "done when" line (what answer the planner needs), and an optional
-   context note (pins, paths, constraints — at most 150 words, no extra asks):
-   `orch research add --agent <agent> --title "..." --questions-file <file> --done-when "..." [--context-file <file>] [--mode map|investigate]`.
+   short questions, a "done when" line (what answer the planner needs), what it serves in
+   the confirmed scope, and an optional context note (pins, paths, constraints — at most
+   150 words, no extra asks):
+   `orch research add --agent <agent> --title "..." --questions-file <file> --done-when "..." --serves D1,S2 [--context-file <file>] [--mode map|investigate]`.
    Write the files in Bash with a quoted heredoc outside the workflow directory.
    `codebase-researcher` per code area (mode `map` — a structure map — is the default for
    documentation kinds; `investigate` runs /code-sleuth), `domain-researcher` for external
    technology, liaisons for referenced tickets/issues/PRs. **For docs, kb, tutorial, and
    education workflows, planning research is a structure map** — enough to split the
    documents into tasks, not their content; each document task researches its own area.
-5. **PM research-plan review:** `orch brief --plan pm-research-plan --agent project-manager`.
+6. **PM research-plan review:** `orch brief --plan pm-research-plan --agent project-manager`.
    It approves or rejects every proposed item before anything is dispatched. Rework a
    rejection as its report says (`orch research drop R## --reason ...`, then a narrower
    `orch research add`) and re-review.
-6. **Research** (parallel, at most 3 at a time): `orch brief --plan research --item R## --agent <agent>`
-   per approved item. A research brief carries only its item; there is no `--note` for it.
-   `orch research list -v` shows every item and its status.
-7. **PM research check:** `orch brief pm-research --agent project-manager` — sufficiency and
-   proportion (did each report stay inside its questions?). Register any gap it names as a
-   new item (back to step 5), then re-check.
-8. **Plan package:** `orch brief plan --agent planning-author`. It writes `plan.md`,
+7. **Research** (up to 7 at once — `orch brief research` refuses an 8th while 7 items are
+   out, and the hook refuses an 8th running agent):
+   `orch brief --plan research --item R## --agent <agent>` per approved item. A research
+   brief carries only its item; there is no `--note` for it. All planning research shares a
+   **90-minute wall-clock window** from its first dispatch: when it closes, running
+   researchers are stopped with interim reports, nothing new is dispatched, and
+   `orch needs-human --kind research_window` puts it to the human (`resolve continue
+   [minutes]` extends it; a reply says how to proceed — e.g. plan with what exists, dropping
+   the open items). `orch research list -v` shows every item and its status.
+8. **PM research check:** `orch brief pm-research --agent project-manager` — sufficiency and
+   proportion (did each report stay inside its questions and on the significant terms?).
+   Register any gap it names as a new item (back to step 6), then re-check.
+9. **Plan package:** `orch brief plan --agent planning-author`. It writes `plan.md`,
    `architecture.md` (when warranted), `gate.json` commands, and `tasks/T###-*.md` per
-   [references/plan-package.md](references/plan-package.md), and runs `orch validate`.
-9. **Test plan** (if any code/test tasks): `orch brief test-plan --agent test-planner`.
-10. **Plan reviews** — sequentially:
+   [references/plan-package.md](references/plan-package.md), and runs `orch validate`: every
+   requirement serves the confirmed scope (`— Serves: D#`), every deliverable is served, and
+   every task that writes declares its `expected_paths`.
+10. **Test plan** (if any code/test tasks): `orch brief test-plan --agent test-planner`.
+11. **Plan reviews** — sequentially:
    - `doc-reviewer` (always): `orch brief plan-review --agent doc-reviewer --mode plan`
    - `architecture-reviewer --mode plan` when the change has moderate+ architectural
      impact (new subsystem/package/interface, cross-layer change, new structural
@@ -228,13 +270,16 @@ the orchestrator routes. This is deliberate: one coordinator, no conflicting dec
    Send findings back to the **same** planning-author (SendMessage, with
    `orch brief plan --agent planning-author --note-file <file naming the reports>`),
    then re-review — any plan edit makes earlier plan reviews stale.
-11. **PM plan audit:** `orch brief pm-plan --agent project-manager`. Fix and re-audit until it
-    passes. `orch validate` must be clean.
-12. **Submit:** `orch submit`. Present to the human: a short summary of the plan, the path to
-    `index.md` (the roadmap), every open question, the research observations worth their
-    attention, and exactly how to respond (`/task-orchestrator approve`, or
-    `/task-orchestrator revise <feedback>` — including answers to open questions). End the
-    turn.
+12. **PM plan audit:** `orch brief pm-plan --agent project-manager` — nothing shrunk *and*
+    nothing added beyond the confirmed scope. Fix and re-audit until it passes.
+    `orch validate` must be clean.
+13. **Submit:** `orch submit`. Present to the human: a short summary of the plan, the path to
+    `index.md` (the roadmap), every open question, every scope proposal awaiting their
+    decision (`orch proposal list`, with the PM's assessment — approval refuses until each
+    is decided), the research observations worth their attention, and exactly how to
+    respond (`/task-orchestrator approve`, `/task-orchestrator proposal accept|reject <id>
+    <notes>`, or `/task-orchestrator revise <feedback>` — including answers to open
+    questions). End the turn.
 
 ## Stage 2 — Approval
 
@@ -303,6 +348,38 @@ recorded non-blocking concern, the PM's process observations, and next steps:
 "After your acceptance testing: `/task-orchestrator close`, or
 `/task-orchestrator revise <what needs to change>`." Never close on your own.
 
+## Scope proposals and out-of-plan changes
+
+Every scope question follows the same path, and only the human decides a change to what
+gets delivered.
+
+- **Agents never act on scope.** Something noticed is one line under "Noticed, not
+  investigated". Something an agent believes the plan missed goes in `scope_proposals` on
+  its result — blocking (it cannot finish its brief without it; it also reports `blocked`)
+  or not.
+- **Every proposal reaches the human.** `orch proposal list` shows the undecided ones; every
+  PM brief lists them for the PM to *assess* (genuine gap or drift — the PM cannot decide).
+  - A **blocking** one: `orch status` shows `SCOPE PROPOSAL (blocking)` first —
+    `orch needs-human --kind scope_change --summary "..."`, present it with the PM's
+    assessment, and stop.
+  - Non-blocking ones: present them at the next human stop. `orch approve` and
+    `orch final accept` refuse while any is undecided.
+  - The human answers `/task-orchestrator proposal accept|reject <id> <notes>` →
+    `orch proposal decide <id>`. Accepted before approval: it is in scope (cite it as
+    `P#-#`) and the plan must account for it. Accepted after approval: a plan revision
+    opens. Rejected: recorded; resume a blocked agent with the human's words.
+- **Out-of-plan files.** A task's `expected_paths` is its planned footprint (globs allowed).
+  An author declares every file it changes outside them in `out_of_plan`, with the
+  criterion or finding that needs it — one entry can cover a mechanical ripple across many
+  files. An undeclared one fails the task gate. The PM's scope check rules each declared
+  group: a **necessary consequence** of the planned change (allowed, listed in the final
+  report), **discretionary** — a rewrite, cleanup, or unrequested fix (FAIL: reverted), or
+  a **change to what gets delivered** (the PM files a blocking scope proposal; the human
+  decides).
+- **Fix rounds cannot widen scope.** A finding whose fix would need changes beyond the
+  task's criteria or area is non-blocking and out of scope for reviewers; an author
+  disputes it, or raises a blocking proposal if the task truly cannot be finished without it.
+
 ## Time budgets and interim reports
 
 Every roster agent's frontmatter registers the budget hook (`hook.py budget`), which sees
@@ -334,11 +411,13 @@ its budget, tool calls, its last tool — and `orch status` includes the same li
 
 ## Human boundaries
 
-Stop and present clearly — what happened, your recommendation, and the exact command — at:
-AWAITING_APPROVAL, NEEDS_HUMAN (`question`, `readiness`, `environment`, `review_budget`,
-`task_budget`, `final_review_budget`, `external_write`, `continuation_budget`,
-`integrity`, `time_budget`), PLAN_CHANGE_REQUIRED, HALTED, and DONE. Outside these, the Stop
-hook keeps you working; do not ask the human for permission between steps.
+Stop and present clearly — answer-first: what happened, your recommendation, and the exact
+command — at: the scope check (before research), AWAITING_APPROVAL, NEEDS_HUMAN
+(`question`, `readiness`, `environment`, `review_budget`, `task_budget`,
+`final_review_budget`, `external_write`, `continuation_budget`, `integrity`,
+`time_budget`, `research_window`, `scope_change`), PLAN_CHANGE_REQUIRED, HALTED, and DONE.
+Outside these, the Stop hook keeps you working; do not ask the human for permission
+between steps.
 
 ## Pause, resume, restarts
 

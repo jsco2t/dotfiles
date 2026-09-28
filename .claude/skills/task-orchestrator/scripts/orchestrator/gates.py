@@ -20,6 +20,7 @@ from . import activity
 from . import ledger
 from . import plan as planmod
 from . import research
+from . import scope as scopemod
 from . import snapshot as snapmod
 from .common import OrchError, Workflow
 from .roster import CODE_LIKE_TYPES, RESOLVE_ACTIONS, required_final_reviewers
@@ -234,6 +235,12 @@ def interim_req(ctx: Context, interim: Dict[str, Any]) -> Req:
             return Req("interim", label, False, f"paused by the human ({report})",
                        "wait for the human's `/task-orchestrator resume`, then " + cont)
         return Req("interim", label, False, f"paused by the human ({report})", cont)
+    if reason == "window":
+        if research.window(ctx.state)["expired"]:
+            return Req("interim", label, False, f"stopped when the research window closed ({report})",
+                       "stop for the human: `orch needs-human --kind research_window --summary ...` — they extend "
+                       "the window (then " + cont + ") or say how to proceed (e.g. `orch research drop <id> --reason ...`)")
+        return Req("interim", label, False, f"stopped when the research window closed ({report})", cont)
     review = pm_interim_review(ctx, interim)
     if review is None:
         return Req("interim", label, False, f"{reason} stop ({report}); the PM has not reviewed it",
@@ -480,6 +487,21 @@ def task_checklist(ctx: Context, task_id: str) -> List[Req]:
     else:
         reqs.append(Req("scan", "integrity scan at current snapshot", True,
                         f"digest {scan.get('digest')}, {scan.get('hit_count')} hit(s)"))
+        undeclared = int((scan.get("by_category") or {}).get("out_of_plan_undeclared") or 0)
+        reqs.append(Req("footprint", "every changed file is planned or declared by its author",
+                        undeclared == 0,
+                        f"{undeclared} file(s) outside expected_paths with no declaration (see scan.md)"
+                        if undeclared else "", fix + " (the author declares each in `out_of_plan` with its reason, "
+                        "or reverts it)", failed=bool(undeclared)))
+
+    # Scope proposals raised in this attempt that the task cannot finish without.
+    blocking = [p for p in scopemod.undecided(ctx.entries, blocking_only=True)
+                if p.get("task") == task_id and (p["seq"] or 0) > start_seq]
+    if blocking:
+        reqs.append(Req("proposal", "no blocking scope proposal awaiting the human", False,
+                        "; ".join(p["id"] for p in blocking),
+                        "stop for the human: `orch needs-human --kind scope_change --summary \"<the proposal>\"`; "
+                        "they decide with `/task-orchestrator proposal accept|reject <id> <notes>`"))
 
     # 10. PM acceptance stamp citing the current scan
     pm = ctx.latest_result("pm-accept", **match)
@@ -646,6 +668,11 @@ def final_checklist(ctx: Context) -> List[Req]:
             "gap needs a plan change, `orch deviation`",
         )
     )
+    undecided = scopemod.undecided(ctx.entries)
+    reqs.append(Req("proposals", "every scope proposal decided by the human", not undecided,
+                    ", ".join(p["id"] for p in undecided),
+                    "present each to the human (`orch needs-human --kind scope_change --summary ...`); they decide "
+                    "with `/task-orchestrator proposal accept|reject <id> <notes>`"))
     del rnd
     return reqs
 
@@ -688,6 +715,15 @@ def research_checklist(ctx: Context) -> List[Req]:
         reqs.append(Req("research", "approved research complete", True,
                         f"{sum(1 for st in live.values() if st[0] == 'DONE')} item(s) done"))
         return reqs
+    win = research.window(state)
+    if win["expired"]:
+        reqs.append(Req("research-window", "research within its window", False,
+                        f"{win['elapsed']} of {win['limit']} minutes used; still open: {', '.join(open_items)}",
+                        "stop for the human: `orch needs-human --kind research_window --summary \"<what is done, what "
+                        "is open, your recommendation>\"` — they extend the window (`resolve continue [minutes]`) or "
+                        "say how to proceed (e.g. plan with what exists: `orch research drop <id> --reason ...`)",
+                        failed=True))
+        return reqs
     first = open_items[0]
     first_state = live[first][0]
     if first in interims:
@@ -705,10 +741,31 @@ def research_checklist(ctx: Context) -> List[Req]:
     return reqs
 
 
+def scope_req(ctx: Context) -> Optional[Req]:
+    """The human confirmed scope.md before any research (workflows with research items)."""
+    state = ctx.state
+    if research.is_legacy(state):
+        return None
+    ok, detail = scopemod.confirmed(ctx.wf, state)
+    if ok:
+        return Req("scope", "scope confirmed by the human", True, detail)
+    doc = scopemod.parse(ctx.wf)
+    if doc is None:
+        action = ("draft scope.md from the request — deliverables (D#), significant terms (S#, each with `Not:`), "
+                  "non-goals, and your questions for the human — then `orch scope submit`, present it, and stop")
+    elif state.get("scope_submitted_sha256") == doc["sha256"]:
+        action = ("WAITING FOR THE HUMAN: they answer the scope questions (update scope.md and `orch scope submit` "
+                  "again) or type `/task-orchestrator scope ok`; then `orch scope confirm`")
+    else:
+        action = "`orch scope submit` (scope.md changed since it was last submitted), present it, and stop"
+    return Req("scope", "scope confirmed by the human", False, detail, action)
+
+
 def planning_checklist(ctx: Context, current_hash: str) -> List[Req]:
     state = ctx.state
     rev = int(state.get("plan_revision") or 1)
-    reqs: List[Req] = research_checklist(ctx)
+    first = scope_req(ctx)
+    reqs: List[Req] = ([first] if first else []) + research_checklist(ctx)
     last_research = ledger.latest(ctx.results("research"))
     # After an upgrade, only a sufficiency check made under the new rules counts.
     floor = max(int((last_research or {}).get("seq") or 0), int(state.get("upgraded_seq") or 0))
@@ -731,9 +788,20 @@ def planning_checklist(ctx: Context, current_hash: str) -> List[Req]:
         )
     )
     plan_result = ctx.latest_result("plan", plan_revision=rev, status="complete")
-    reqs.append(Req("plan", f"plan package written (planning-author, revision {rev})", plan_result is not None,
-                    "" if plan_result is None else f"report: {_res(plan_result).get('report')}",
-                    "`orch brief --plan plan --agent planning-author` then dispatch planning-author"))
+    accepted = [p for p in scopemod.proposals(ctx.entries) if p["decision"] == "accept"]
+    newest = max((int(p["decided_seq"] or 0) for p in accepted), default=0)
+    stale = plan_result is not None and int(plan_result.get("seq") or 0) < newest
+    reqs.append(Req("plan", f"plan package written (planning-author, revision {rev})",
+                    plan_result is not None and not stale,
+                    ("the human accepted a scope proposal after it was written" if stale else
+                     "" if plan_result is None else f"report: {_res(plan_result).get('report')}"),
+                    "`orch brief --plan plan --agent planning-author` then dispatch planning-author"
+                    + (" (resume it to fold in the accepted proposal)" if stale else "")))
+    undecided = scopemod.undecided(ctx.entries)
+    if undecided:
+        reqs.append(Req("proposals", "every scope proposal decided by the human", True,
+                        f"{len(undecided)} awaiting the human — present them with the plan; approval refuses "
+                        "until each is decided"))
     has_code = any(t.type in CODE_LIKE_TYPES for t in ctx.pkg.tasks.values())
     if has_code:
         test_plan = ctx.latest_result("test-plan", plan_revision=rev, status="complete")
@@ -786,6 +854,9 @@ def needs_human_text(state: Dict[str, Any]) -> str:
     actions = RESOLVE_ACTIONS.get(kind, ())
     task = f" {need['task']}" if need.get("task") else ""
     options = " | ".join(f"`/task-orchestrator resolve {a}{task} <notes>`" for a in actions)
+    if kind == "scope_change":
+        ids = need.get("proposals") or ["<id>"]
+        options = " | ".join(f"`/task-orchestrator proposal accept|reject {pid} <notes>`" for pid in ids)
     report = f" Report: {need['report']}." if need.get("report") else ""
     return (
         f"WAITING FOR THE HUMAN ({kind}): {need.get('summary', '')}.{report} "
@@ -810,6 +881,17 @@ def next_action(ctx: Context, current_hash: Optional[str] = None) -> str:
             return (f"INTERRUPTED — {row['agent_type']} {row['agent_id']} ({row.get('stage') or '?'}) was running when "
                     f"its session ended. Next: `orch agent continue {row['agent_id']}` and SendMessage the printed text "
                     "to that agent id; if that fails, dispatch a fresh agent for the same stage")
+        blocking = scopemod.undecided(ctx.entries, blocking_only=True)
+        if blocking:
+            return ("SCOPE PROPOSAL (blocking) — " + scopemod.describe(blocking[0]) + ". Only the human decides: "
+                    "`orch needs-human --kind scope_change --summary \"<the proposal, the PM's assessment if any, your "
+                    "recommendation>\"` and stop; they answer `/task-orchestrator proposal accept|reject "
+                    f"{blocking[0]['id']} <notes>`")
+    if phase == "AWAITING_APPROVAL" and scopemod.undecided(ctx.entries):
+        pending = ", ".join(p["id"] for p in scopemod.undecided(ctx.entries))
+        return ("WAITING FOR THE HUMAN: review the plan package and decide each scope proposal "
+                f"({pending}: `/task-orchestrator proposal accept|reject <id> <notes>`) — approval refuses until "
+                "every one is decided — then `/task-orchestrator approve` or `/task-orchestrator revise <feedback>`.")
     if phase == "PLANNING" and research.is_legacy(state):
         return (LEGACY_PLANNING + " Stop and ask the human which kind this workflow delivers (code, docs, kb, "
                 "tutorial, education, research, pm, integration, mixed); they type `/task-orchestrator upgrade "

@@ -85,6 +85,15 @@ A report at the brief's path and a result block with
   recorded, not blocking.
 - No documents were edited. `findings.blocking` matches the Blocking section.
 
+## Scope of findings
+
+- **Task reviews:** a finding that would need content beyond the task's acceptance
+  criteria is **non-blocking and marked "out of scope"** whatever its confidence — it
+  reaches the human through the final report, never a fix round. Content about something
+  a significant term of the confirmed scope rules out is a blocking `Wrong`.
+- **Plan reviews:** a finding that would add a deliverable the confirmed scope does not
+  have is a `scope_proposals` entry, not a blocking finding. Only the human decides.
+
 ## Output style
 
 Write your report and your final message answer-first, as

@@ -93,6 +93,18 @@ def write_task_diff(ctx: Context, task_id: str, since: Optional[str] = None) -> 
     }
 
 
+def declared_out_of_plan(ctx: Context, task_id: str, attempt: int) -> List[Dict[str, str]]:
+    """What this attempt's authors declared changing outside the task's expected paths, and why."""
+    out: List[Dict[str, str]] = []
+    for stage in ("work", "fix"):
+        for entry in ctx.results(stage, task=task_id, attempt=attempt):
+            for item in (entry.get("result") or {}).get("out_of_plan") or []:
+                if isinstance(item, dict) and item.get("paths"):
+                    out.append({"paths": str(item["paths"]), "reason": str(item.get("reason") or ""),
+                                "agent": str(entry.get("agent_type"))})
+    return out
+
+
 def run_task_scan(ctx: Context, task_id: str) -> Dict[str, Any]:
     info = task_state(ctx, task_id)
     spec = ctx.spec(task_id)
@@ -107,14 +119,21 @@ def run_task_scan(ctx: Context, task_id: str) -> Dict[str, Any]:
         after_checkpoint = [
             c["path"] for c in snapmod.name_status(checkpoint, now) if scanmod.is_test_path(c["path"])
         ]
+    declared = declared_out_of_plan(ctx, task_id, attempt)
     result = scanmod.scan(
         diff_text,
         expected_paths=spec.expected_paths,
         prefix=start.prefix,
         tests_changed_after_checkpoint=after_checkpoint,
+        declared=[d["paths"] for d in declared],
     )
+    result["declared_out_of_plan"] = declared
     write_text_atomic(run_dir / "scan.json", json.dumps(result, indent=2) + "\n")
-    write_text_atomic(run_dir / "scan.md", scanmod.render_markdown(result, f"{task_id} attempt {attempt}"))
+    markdown = scanmod.render_markdown(result, f"{task_id} attempt {attempt}")
+    if declared:
+        markdown += "\n## Out-of-plan changes the authors declared\n\n" + "".join(
+            f"- `{d['paths']}` ({d['agent']}): {d['reason']}\n" for d in declared)
+    write_text_atomic(run_dir / "scan.md", markdown)
     entry = ledger.append(
         ctx.wf,
         {

@@ -172,6 +172,15 @@ def take(
             if real_path.is_file():
                 shutil.copyfile(real_path, index)
             env = {"GIT_INDEX_FILE": str(index)}
+            # The exclude pathspec only limits what `add -A` touches; workflow files
+            # the user (or an auto-sync) already staged or committed stay in the copied
+            # index unless they are dropped first. -f: auto-sync leaves them staged and
+            # then edited again, which plain `rm --cached` refuses.
+            try:
+                rel_wf = wf.root.resolve().relative_to(toplevel.resolve()).as_posix()
+                _run_git(["rm", "-r", "--cached", "-f", "-q", "--ignore-unmatch", "--", rel_wf], toplevel, env=env)
+            except ValueError:
+                pass
             _run_git(["add", "-A", "--", *specs], toplevel, env=env)
             tree = _run_git(["write-tree"], toplevel, env=env).strip()
         finally:
@@ -185,7 +194,9 @@ def take(
             )
             snap_id = _scoped_id("gs", listing)
         elif prefix:
-            sub = _run_git(["rev-parse", f"{tree}:{prefix}"], toplevel, check=False).strip()
+            # --verify: without it a missing subtree echoes "<tree>:<prefix>" to stdout,
+            # which ties an empty workspace's id to the whole repository tree.
+            sub = _run_git(["rev-parse", "--verify", "-q", f"{tree}:{prefix}"], toplevel, check=False).strip()
             snap_id = f"g:{sub or 'empty'}"
         else:
             snap_id = f"g:{tree}"

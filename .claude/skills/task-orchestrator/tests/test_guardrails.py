@@ -389,6 +389,39 @@ class SnapshotTest(unittest.TestCase):
             # The user's real index is untouched: nothing staged by the snapshot.
             self.assertEqual(git(ws, "diff", "--cached", "--name-only").strip(), "")
 
+    def test_git_snapshot_ignores_workflow_files_already_in_the_index(self) -> None:
+        # An auto-sync commits and stages the workflow's own files; they must not reach
+        # the snapshot, and an empty workspace must not take the repository's tree id.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "notebook"
+            ws = repo / "projects" / "p"
+            ws.mkdir(parents=True)
+            (repo / "other.txt").write_text("o\n")
+            wf = Workflow(ws / "wf")
+            wf.control.mkdir(parents=True)
+            (wf.root / "plan.md").write_text("v1\n")
+            git(repo, "init", "-q")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-qm", "sync")
+            (wf.root / "plan.md").write_text("v2\n")
+            git(repo, "add", "-A")
+            (wf.root / "plan.md").write_text("v3\n")  # staged, then edited again
+            index_before = git(repo, "ls-files", "-s")
+            one = snapmod.take(wf, "kb", ws)
+            self.assertEqual(one.id, "g:empty")
+            self.assertEqual(git(repo, "ls-files", "-s"), index_before)
+            (repo / "other.txt").write_text("changed\n")
+            git(repo, "add", "-A")
+            self.assertEqual(snapmod.take(wf, "kb", ws).id, "g:empty")
+            (ws / "kb").mkdir()
+            (ws / "kb" / "a.md").write_text("# A\n")
+            two = snapmod.take(wf, "kb", ws)
+            self.assertNotEqual(two.id, "g:empty")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-qm", "sync")
+            self.assertEqual(snapmod.take(wf, "kb", ws).id, two.id)
+            self.assertEqual(snapmod.name_status(one, two), [{"status": "A", "path": "kb/a.md"}])
+
     def test_shadow_snapshot_for_plain_directories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ws = Path(tmp) / "docs"

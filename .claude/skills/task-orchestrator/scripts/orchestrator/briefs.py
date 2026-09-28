@@ -14,30 +14,71 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import activity
 from . import ops
 from . import plan as planmod
-from .common import ORCH_CLI, QUALITY_MANDATE, OrchError, write_text_atomic
-from .gates import Context, final_workspaces, loop_tasks
+from . import research as researchmod
+from .common import (
+    ORCH_CLI,
+    QUALITY_MANDATE,
+    OrchError,
+    interim_path,
+    report_for_interim,
+    slugify,
+    write_text_atomic,
+)
+from .gates import LEGACY_PLANNING, Context, final_workspaces, loop_tasks, open_interims
 from .roster import (
     AUTHORS,
+    DOC_KINDS,
+    INTERIM_DECISIONS,
+    LEGACY_KIND,
     LIAISONS,
+    NON_GOALS,
+    READONLY,
+    RECORD_DONT_INVESTIGATE,
+    RESEARCH_REPORT_TARGET_LINES,
     RESEARCHERS,
     REVIEWERS,
     STAGES,
 )
 
 ORCH = f'python3 "{ORCH_CLI}"'
+STYLE_FILE = Path.home() / ".claude" / "output-styles" / "answer-first.md"
 
 TASK_STAGES = {"readiness", "pm-start", "work", "fix", "pm-scope", "verification", "review", "pm-accept", "pm-resolution"}
 LOOP_STAGES = {"pm-loop-entry", "pm-loop-exit"}
 FINAL_STAGES = {"final-review", "final-fix", "final-verification", "pm-final"}
-PLAN_STAGES = {"research", "pm-research", "plan", "test-plan", "plan-review", "pm-plan", "selftest"}
+PLAN_STAGES = {"research", "pm-research-plan", "pm-research", "plan", "test-plan", "plan-review", "pm-plan", "selftest"}
 EVALUATING = {"pm-scope", "verification", "review", "pm-accept"}
+
+MODE_TEXT = {
+    "map": (
+        "MODE `map` — build a structure map: what the components are, where each lives (directories, "
+        "packages, entry points), roughly how big each is, how they connect at a high level, and which docs "
+        "and tests exist. Use Read, Grep, and Glob. Do NOT invoke /code-sleuth and do not trace call chains "
+        "line by line; cite paths, and `file:line` only where a specific claim needs it."
+    ),
+    "investigate": (
+        "MODE `investigate` — trace how the code actually behaves to answer the questions, with /code-sleuth. "
+        "Follow each thread only as far as the questions need."
+    ),
+}
+DOMAIN_TEXT = (
+    "Use external primary sources (official docs via context7, specifications, release notes). In the "
+    "repository, read only the files the item names (versions, lockfiles, named docs): you do not audit the code."
+)
+DOC_DEPTH_TEXT = (
+    "This is planning research for a documentation workflow. Produce what the planner needs to split the "
+    "documentation into tasks — the map, not the documentation's content. Each documentation task researches "
+    "its own area when it runs. \"Comprehensive\" in the request means the documentation covers the whole "
+    "subject, not that planning research goes deep."
+)
 
 
 # ---------------------------------------------------------------- stage text
 
-def _work_text(agent: str, spec: planmod.TaskSpec) -> str:
+def _work_text(agent: str, spec: planmod.TaskSpec, kind: str) -> str:
     tid = spec.id
     if agent == "test-author":
         if spec.type == "test":
@@ -68,10 +109,13 @@ def _work_text(agent: str, spec: planmod.TaskSpec) -> str:
             "test-author can fix it. Run the task's validation commands yourself before you finish."
         )
     if agent in RESEARCHERS:
+        how = DOMAIN_TEXT if agent == "domain-researcher" else MODE_TEXT[
+            researchmod.default_mode(agent, kind) or "investigate"]
         return (
-            "Investigate what the task asks and write a complete, evidence-grounded findings report. "
-            "Your report is the input doc-author turns into the deliverable, so include every fact, "
-            "source, file:line reference, and uncertainty the deliverable needs."
+            "Answer what the task asks — its goal, scope, and acceptance criteria are your boundary — and write "
+            "an evidence-grounded findings report. Your report is the input doc-author turns into the "
+            "deliverable, so include every fact, source, file:line reference, and uncertainty the deliverable "
+            f"needs, and nothing the task does not ask for. {how}"
         )
     if agent in LIAISONS:
         return (
@@ -187,15 +231,48 @@ STAGE_TEXT: Dict[str, str] = {
         "should know about. Add a short 'Process observations' section: what in this process helped or "
         "got in the way."
     ),
-    "research": (
-        "Research topic: {topic}. Produce a complete, evidence-grounded research document the planner "
-        "can build a plan from: facts with sources (file:line for code, URL/ticket for external), what "
-        "exists today, constraints, risks, open questions, and what you could not confirm."
+    "research-item": (
+        "Answer the questions of research item {item} below — those questions, fully, and nothing else. "
+        "Stop when the \"done when\" line is satisfied. Every answer carries its evidence (`file:line` for "
+        "code, URL + date for external sources) and says what you could not confirm. Structure the report: "
+        "the answers first, one section per question; then \"Noticed, not investigated\" (one line each); "
+        "then \"Open questions\". Aim for at most about {target} lines — a much longer report usually means "
+        "work beyond the questions, and the PM checks length against them."
+    ),
+    "pm-research-plan": (
+        "MODE: research-plan review — the fence in front of every research agent. Review each PROPOSED "
+        "research item below BEFORE it is dispatched. Approve an item only when: the plan cannot be written "
+        "without its answer; its questions are focused (at most 3) and answerable by that agent within its "
+        "time budget; it asks for the facts the plan needs — not verification, grading, or audits of code or "
+        "docs the request did not ask for; it is not a lead forwarded from an earlier report's out-of-scope "
+        "observations; it respects the workflow's non-goals; and the agent and mode fit the question. Reject "
+        "with a reason and a narrower rewrite (agent, title, questions, done-when) otherwise. Report "
+        "`approved` (ids) and `rejected` ({{\"id\", \"reason\"}}); verdict pass only when you approved every "
+        "item you reviewed."
     ),
     "pm-research": (
         "MODE: research-sufficiency check. Read request.md and every research document. Is the research "
         "enough to write a plan with evidence-grounded claims, objective acceptance criteria, and no "
-        "guessing? Name any missing research precisely (what question, which agent should answer it)."
+        "guessing? Name any missing research precisely (what question, which agent should answer it). "
+        "Also judge proportion: did each report answer its item's questions and stay inside them? Flag "
+        "drift — work outside the item's questions, re-verification or audits nobody asked for, reports far "
+        "past the length target (line counts are listed below) — and say whether anything should be "
+        "discarded. Items under \"Noticed, not investigated\" are observations for the human, not missing "
+        "research: name one as missing only if the plan cannot be written without it."
+    ),
+    "pm-interim": (
+        "MODE: interim review. Agent `{interim_agent}` ({interim_type}) stopped at its time budget after "
+        "{interim_minutes} active minutes and wrote an interim report. Decide how it continues. Judge from "
+        "evidence, not its claims: compare the brief's questions with the interim report and with the "
+        "agent's tool-call log (`{orch} agents {interim_agent} --calls`). Reading far outside the named area, "
+        "re-verifying claims nobody asked about, and chasing leads are drift.\n\n"
+        "- `continue` — it is working on its brief's questions and needs more time (verdict pass).\n"
+        "- `redirect` — it drifted: it continues only on what you name. List exactly what stays in scope and "
+        "what is dropped (verdict fail).\n"
+        "- `split` — finish now what is answered, and hand off the rest: list the remaining questions as "
+        "proposed research items (agent, title, at most 3 questions, done-when) (verdict fail).\n\n"
+        "`grant_minutes`: how much more active time it gets (1–60); for `split`, just enough to finish its "
+        "report. Never approve widening the brief's questions."
     ),
     "plan": (
         "Write (or revise) the plan package in the workflow directory, following the task-orchestrator "
@@ -222,9 +299,14 @@ STAGE_TEXT: Dict[str, str] = {
         "in the plan quietly shrinks what the request asked for. Report `plan_hash` exactly as given."
     ),
     "selftest": (
-        "SELFTEST. Do not do real work. (1) Say whether your context contains the text "
-        "'TASK-ORCHESTRATOR CONTRACT' (injected by the SubagentStart hook) — set `contract_seen` true or "
-        "false. (2) Write a one-line report to the report path. (3) Finish with the result block."
+        "SELFTEST. Do not do real work, and ignore the \"Read these in full\" list. (1) Say whether your "
+        "context contains the text 'TASK-ORCHESTRATOR CONTRACT' (injected by the SubagentStart hook) — set "
+        "`contract_seen` true or false. (2) Make exactly one Read call, of {{request}}. This selftest gives "
+        "you a 0-minute time budget, so the budget hook should refuse it with a TIME BUDGET message: set "
+        "`budget_stopped` true if it was refused, false if the Read succeeded. (3) If it was refused, write "
+        "a one-line interim report to {{interim}} and finish with the result block with \"status\": "
+        "\"interim\" and \"report\" set to that path. If the Read succeeded, write a one-line report to the "
+        "report path below and finish with \"status\": \"complete\"."
     ),
 }
 
@@ -248,6 +330,113 @@ def _existing_reports(folder: Path) -> List[Path]:
     return sorted(p for p in folder.glob("*.md") if REPORT_NAME_RE.match(p.name))
 
 
+# ---------------------------------------------------------------- sections
+
+
+def _stop_section(state: Dict[str, Any], agent: str, report: Path) -> List[str]:
+    """How to behave when the budget hook stops this agent (read-only roles and budgeted agents)."""
+    budget = activity.budget_minutes(state, agent)
+    if agent not in READONLY and budget is None:
+        return []
+    reasons = []
+    if budget is not None:
+        reasons.append(f"when you reach your time budget of {budget} active minutes (the clock pauses while "
+                       "you are not running, and runs on until your next tool call)")
+    if agent in READONLY:
+        reasons.append("when the human pauses the workflow")
+    return [
+        "",
+        "## If you are stopped",
+        "",
+        "The budget hook stops you " + ", or ".join(reasons) + ". From then on every tool call except "
+        "writing your interim report is refused. Do not work around it:",
+        "",
+        f"1. Write your interim report to `{interim_path(report)}`: what is done (with its evidence), what "
+        "remains and why, whether your scope grew and what led you there, and what you would do with more "
+        "time — and how many minutes that needs.",
+        "2. Finish with the result block below, with \"status\": \"interim\" and \"report\" set to that "
+        "interim path.",
+        "",
+        "The project-manager reviews a time stop and you are resumed with its decision. After a pause you "
+        "are resumed when the human resumes the workflow.",
+    ]
+
+
+def _research_plan_body(ctx: Context, fields: Dict[str, Any], body: List[str], read: List[str]) -> None:
+    state = ctx.state
+    kind = state.get("kind") or LEGACY_KIND
+    records = researchmod.items(state)
+    sts = researchmod.statuses(ctx.entries, state)
+    proposed = [i for i, st in sts.items() if st[0] == "PROPOSED"]
+    if not proposed:
+        raise OrchError("no PROPOSED research items to review; register them with `orch research add`")
+    fields["approved"] = ["<ids of the items you approve>"]
+    fields["rejected"] = [{"id": "<R##>", "reason": "<why, and the narrower rewrite>"}]
+    body += ["", "## Items to review", ""]
+    for iid in proposed:
+        body += researchmod.describe(records[iid]) + [""]
+    others = [(i, st) for i, st in sts.items() if st[0] != "PROPOSED"]
+    if others:
+        body += ["## Other items (context only — do not re-review)", ""]
+        body += [f"- {i} — {records[i]['title']} (`{records[i]['agent']}`): {st[0]}" for i, st in others]
+        body.append("")
+    body.append(f"Workflow kind: `{kind}`." + (f" {DOC_DEPTH_TEXT}" if kind in DOC_KINDS else ""))
+    earlier = sorted(p for p in ctx.wf.research_dir.glob("*.md") if p.name != "index.md")
+    read += [f"{p}  (earlier research — check that no item forwards its out-of-scope observations)"
+             for p in earlier]
+
+
+def _research_lengths(ctx: Context, body: List[str]) -> None:
+    docs = sorted(p for p in ctx.wf.research_dir.glob("*.md") if p.name != "index.md")
+    if not docs:
+        return
+    body += ["", f"## Research report sizes (target: about {RESEARCH_REPORT_TARGET_LINES} lines)", ""]
+    for path in docs:
+        try:
+            count = len(path.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            continue
+        flag = " — over the target: check it stayed inside its questions" if count > RESEARCH_REPORT_TARGET_LINES else ""
+        body.append(f"- `{path.name}`: {count} lines{flag}")
+
+
+def _pm_interim(ctx: Context, of_agent: Optional[str], fields: Dict[str, Any], fmt: Dict[str, Any],
+                read: List[str], extra: List[str]) -> str:
+    if not of_agent:
+        raise OrchError("pm-interim briefs need --of <agent_id> (see `orch agents`)")
+    interim = next((e for e in open_interims(ctx) if e.get("agent_id") == of_agent), None)
+    if interim is None:
+        raise OrchError(f"agent {of_agent} has no open interim report (see `orch agents`)")
+    if (interim.get("interim_reason") or "time") == "pause":
+        raise OrchError(f"agent {of_agent} was paused by the human, not stopped by its budget: after the human "
+                        f"resumes, `orch agent continue {of_agent}` — no PM review is needed")
+    res = interim.get("result") or {}
+    interim_report = Path(str(res.get("report")))
+    original = report_for_interim(interim_report)
+    fields["interim_agent"] = of_agent
+    fields["decision"] = " | ".join(INTERIM_DECISIONS)
+    fields["grant_minutes"] = "<integer 1-60>"
+    fmt.update(interim_agent=of_agent, interim_type=interim.get("agent_type"),
+               interim_minutes=interim.get("active_minutes", "?"))
+    extra.append(f"- Interim report under review: agent `{of_agent}` ({interim.get('agent_type')}), stage "
+                 f"`{res.get('stage')}`" + (f", task {res['task']}" if res.get("task") else "")
+                 + (f", research item {res['item']}" if res.get("item") else ""))
+    read.append(f"{ctx.wf.request}  (the request, verbatim)")
+    brief = original.parent / "briefs" / original.name
+    if brief.exists():
+        read.append(f"{brief}  (the agent's brief — its questions are the scope you judge against)")
+    if res.get("task"):
+        read.append(f"{ctx.spec(str(res['task'])).path}  (the task)")
+    read.append(f"{interim_report}  (the interim report)")
+    text = STAGE_TEXT["pm-interim"].format(**fmt)
+    if res.get("task"):
+        text += ("\n\nThis agent is working task " + str(res["task"]) + ": decide `continue` or `redirect` only. "
+                 "`split` is for planning research — a task's remaining work cannot be handed off. If the task "
+                 "cannot be finished as planned in reasonable time, say so plainly in your report: the "
+                 "orchestrator raises a plan deviation for the human.")
+    return text
+
+
 # ---------------------------------------------------------------- builder
 
 def build(
@@ -259,6 +448,8 @@ def build(
     topic: Optional[str] = None,
     note: Optional[str] = None,
     mode_hint: Optional[str] = None,
+    item: Optional[str] = None,
+    of_agent: Optional[str] = None,
 ) -> Tuple[str, Path]:
     spec_stage = STAGES.get(stage)
     if spec_stage is None:
@@ -268,10 +459,12 @@ def build(
         raise OrchError(f"agent `{agent}` cannot perform stage `{stage}` (allowed: {allowed})")
     state = ctx.state
     wf = ctx.wf
+    kind = state.get("kind") or LEGACY_KIND
+    statuses = "complete | needs_input | blocked" + (" | interim" if agent in READONLY else "")
     fields: Dict[str, Any] = {
         "workflow": state["workflow_id"],
         "stage": stage,
-        "status": "complete | needs_input | blocked",
+        "status": statuses,
         "verdict": "n/a" if stage not in {"readiness", "verification", "review", "final-review",
                                          "final-verification", "plan-review"} and not stage.startswith("pm-")
         else "pass | fail",
@@ -280,7 +473,11 @@ def build(
     extra: List[str] = []
     fmt: Dict[str, Any] = {"orch": ORCH, "task": task_id or "", "loop": loop or "", "round": 0,
                            "snapshot": "", "topic": topic or "(given by the orchestrator below)",
-                           "plan": str(wf.plan), "mode_hint": mode_hint or "", "revision_note": ""}
+                           "plan": str(wf.plan), "mode_hint": mode_hint or "", "revision_note": "",
+                           "item": item or "", "target": RESEARCH_REPORT_TARGET_LINES}
+    body: List[str] = []  # stage-specific sections after the stage text
+    folder: Optional[Path] = None
+    stem: Optional[str] = None
 
     if stage in TASK_STAGES:
         if not task_id:
@@ -327,7 +524,7 @@ def build(
             for dep in deps:
                 read.append(f"{dep.path}  (dependency {dep.id})")
         if stage == "work":
-            text = _work_text(agent, spec)
+            text = _work_text(agent, spec, kind)
             if agent == "doc-author" and spec.type == "research":
                 findings = [p for p in prior if ".codebase-researcher." in p.name or ".domain-researcher." in p.name]
                 if not findings:
@@ -408,7 +605,13 @@ def build(
             fields["criteria"] = [{"id": f, "met": "true | false", "evidence": "<concrete evidence>"}
                                   for f in ctx.pkg.plan.final_criteria]
         text = STAGE_TEXT[stage].format(**fmt)
+    elif stage == "pm-interim":
+        text = _pm_interim(ctx, of_agent, fields, fmt, read, extra)
+        folder = wf.reviews_dir / "agents"
     else:  # planning + selftest
+        if stage != "selftest" and researchmod.is_legacy(state):
+            raise OrchError(LEGACY_PLANNING + " The human upgrades it with `/task-orchestrator upgrade <kind>` "
+                            "(then `orch upgrade --kind <kind>`); planning briefs are refused until then.")
         folder = wf.research_dir if stage == "research" else wf.reviews_dir / ("selftest" if stage == "selftest" else "plan")
         rev = int(state.get("plan_revision") or 1)
         if stage in ("plan", "test-plan", "plan-review"):
@@ -416,7 +619,7 @@ def build(
         if stage in ("plan-review", "pm-plan"):
             fields["plan_hash"] = planmod.plan_hash(wf)
         read += [f"{wf.request}  (the request, verbatim)"]
-        if stage != "research":
+        if stage not in ("research", "pm-research-plan"):
             read.append(f"{wf.research_dir / 'index.md'}  (research inputs — read every linked document)")
         if stage in ("test-plan", "plan-review", "pm-plan", "plan"):
             read += [f"{wf.plan}", f"{wf.gate}", f"{wf.tasks_dir}/T*.md (every task document)"]
@@ -426,21 +629,47 @@ def build(
         if stage == "plan" and rev > 1:
             fmt["revision_note"] = (f"This is plan revision {rev}: apply the human's revision request "
                                     "recorded at the end of decisions.md, and nothing else.")
-        if stage == "research" and not topic:
-            raise OrchError("research briefs need --topic")
+        text_key = stage
+        if stage == "research":
+            if topic:
+                raise OrchError("research is dispatched from an approved research item: "
+                                "`orch brief --plan research --item R## --agent <agent>` (no --topic)")
+            if note:
+                raise OrchError("a research brief carries only its approved item; put context in the "
+                                "item's --context-file (word-limited, and the PM reviews it)")
+            if not item:
+                raise OrchError("research briefs need --item R## (see `orch research list`)")
+            record = researchmod.require_approved(ctx.entries, state, item, agent)
+            fields["item"] = item
+            text_key = "research-item"
+            stem = f"research-{item.lower()}-{slugify(record['title'], 24)}"
+            extra.append(f"- Research item: {item} — {record['title']}")
+            body += ["", "## Research item", ""] + researchmod.describe(record)
+            if agent == "domain-researcher":
+                body += ["", DOMAIN_TEXT]
+            elif record.get("mode"):
+                body += ["", MODE_TEXT[record["mode"]]]
+            if kind in DOC_KINDS:
+                body += ["", DOC_DEPTH_TEXT]
+        if stage == "pm-research-plan":
+            _research_plan_body(ctx, fields, body, read)
+        if stage == "pm-research":
+            _research_lengths(ctx, body)
         if stage == "selftest":
             fields["contract_seen"] = "true | false"
-        text = STAGE_TEXT[stage].format(**fmt)
+            fields["budget_stopped"] = "true | false"
+        text = STAGE_TEXT[text_key].format(**fmt)
 
+    assert folder is not None
     number = _next_number(folder)
-    stem = stage if stage in PLAN_STAGES or stage in LOOP_STAGES else f"{stage}-r{fmt['round']}"
-    if stage == "research" and topic:
-        from .common import slugify
-        stem = f"research-{slugify(topic, 32)}"
+    if stem is None:
+        stem = stage if stage in PLAN_STAGES or stage in LOOP_STAGES else f"{stage}-r{fmt['round']}"
     report = folder / f"{number:02d}-{stem}.{agent}.md"
     fields["report"] = str(report)
     if stage == "pm-accept":
         fields.setdefault("scan_digest", "")
+    if stage == "selftest":
+        text = text.replace("{request}", str(wf.request)).replace("{interim}", str(interim_path(report)))
 
     lines = [
         f"# Dispatch brief — `{stage}` · `{agent}`",
@@ -455,15 +684,26 @@ def build(
         f"- workflow: `{state['workflow_id']}`",
         f"- stage: `{stage}`",
     ]
-    for key in ("task", "attempt", "round", "loop", "snapshot", "plan_revision", "plan_hash", "scan_digest"):
+    for key in ("task", "attempt", "round", "loop", "snapshot", "plan_revision", "plan_hash", "scan_digest",
+                "item", "interim_agent"):
         if key in fields and not str(fields[key]).startswith("<"):
             lines.append(f"- {key}: `{fields[key]}`")
     lines += extra
     lines += ["", "## Read these in full before you start", ""]
-    lines += [f"- {item}" for item in read]
+    lines += [f"- {entry}" for entry in read]
     lines += ["", "## What this stage must produce", "", text]
+    lines += body
     if note:
         lines += ["", "## Orchestrator notes for this dispatch", "", note]
+    lines += [
+        "",
+        "## Scope",
+        "",
+        NON_GOALS.get(kind, NON_GOALS[LEGACY_KIND]),
+        "",
+        RECORD_DONT_INVESTIGATE,
+    ]
+    lines += _stop_section(state, agent, report)
     lines += [
         "",
         "## Rules that always apply",
@@ -477,9 +717,10 @@ def build(
         "",
         "## Finish",
         "",
-        f"Write your full report to `{report}`. Then finish with this block, every placeholder replaced "
-        "(booleans as JSON true/false, counts as integers). If you hand back with SubagentHandback, end "
-        "that message with the block; either way, also end your final text message with it:",
+        f"Write your full report to `{report}`, answer-first (`{STYLE_FILE}`: the point first, then only the "
+        "explanation the reader needs). Then finish with this block, every placeholder replaced (booleans as "
+        "JSON true/false, counts as integers). If you hand back with SubagentHandback, end that message with "
+        "the block; either way, also end your final text message with it:",
         "",
         _template(fields),
         "",

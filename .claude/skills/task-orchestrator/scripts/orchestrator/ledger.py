@@ -20,13 +20,21 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from .common import Workflow, file_lock, is_within, parse_ts, utcnow
-from .roster import BASE_FIELDS, GATE_STAGES, STAGES, STATUSES, VERDICTS
+from .common import INTERIM_DIR, Workflow, file_lock, is_within, parse_ts, utcnow
+from .roster import (
+    BASE_FIELDS,
+    GATE_STAGES,
+    INTERIM_DECISIONS,
+    MAX_GRANT_MINUTES,
+    STAGES,
+    STATUSES,
+    VERDICTS,
+)
 
 RESULT_BLOCK_RE = re.compile(r"```orch-result[ \t]*\r?\n(.*?)\r?\n[ \t]*```", re.S)
 HUMAN_PREFIX = "/task-orchestrator"
 HUMAN_VERBS = frozenset(
-    {"approve", "revise", "resolve", "resume", "status", "halt", "close", "list", "selftest"}
+    {"approve", "revise", "resolve", "resume", "status", "halt", "close", "list", "selftest", "upgrade"}
 )
 
 
@@ -197,8 +205,12 @@ def validate_result(
             errors.append("`report` must be a path inside the workflow directory")
         elif not path.name.endswith(f".{agent_type}.md"):
             errors.append(f"`report` file name must end with `.{agent_type}.md`")
+        elif (status == "interim") != (path.parent.name == INTERIM_DIR):
+            errors.append("an interim result's `report` is the interim report (the `interim/` folder beside "
+                          "your report, same file name); any other result's `report` is the brief's report path")
     elif "report" in result:
         errors.append("`report` must be a non-empty path")
+    errors += _stage_specific(result, stage, state)
     if "criteria" in result and result["criteria"] is not None:
         crit = result["criteria"]
         if not isinstance(crit, list):
@@ -224,6 +236,42 @@ def validate_result(
     task = result.get("task")
     if task is not None and tasks and task not in tasks:
         errors.append(f"unknown task `{task}`")
+    return errors
+
+
+def _stage_specific(result: Dict[str, Any], stage: Any, state: Dict[str, Any]) -> List[str]:
+    """Field rules for the research-item and interim stages."""
+    errors: List[str] = []
+    known = state.get("research_items")
+    if stage == "research" and isinstance(known, dict):
+        item = result.get("item")
+        if not isinstance(item, str) or item not in known:
+            errors.append("stage `research` requires `item`: the research item id from your brief")
+    if stage == "pm-research-plan":
+        ids = set(known or {})
+        approved = result.get("approved")
+        rejected = result.get("rejected")
+        if not isinstance(approved, list) or not all(isinstance(a, str) for a in approved):
+            errors.append("`approved` must be a list of research item ids")
+        elif any(a not in ids for a in approved):
+            errors.append(f"`approved` names unknown items: {[a for a in approved if a not in ids]}")
+        if not isinstance(rejected, list) or not all(
+                isinstance(r, dict) and isinstance(r.get("id"), str) and str(r.get("reason") or "").strip()
+                for r in rejected):
+            errors.append("`rejected` must be a list of {\"id\": \"R##\", \"reason\": \"...\"}")
+        elif any(r["id"] not in ids for r in rejected):
+            errors.append("`rejected` names unknown items")
+        if (result.get("status") == "complete" and result.get("verdict") == "pass"
+                and isinstance(rejected, list) and rejected):
+            errors.append("verdict `pass` means every reviewed item was approved; with rejections it is `fail`")
+    if stage == "pm-interim":
+        if result.get("decision") not in INTERIM_DECISIONS:
+            errors.append(f"`decision` must be one of {', '.join(INTERIM_DECISIONS)}")
+        grant = result.get("grant_minutes")
+        if not (isinstance(grant, int) and not isinstance(grant, bool) and 0 < grant <= MAX_GRANT_MINUTES):
+            errors.append(f"`grant_minutes` must be an integer from 1 to {MAX_GRANT_MINUTES}")
+        if not isinstance(result.get("interim_agent"), str) or not result.get("interim_agent"):
+            errors.append("`interim_agent` must be the agent id from the brief")
     return errors
 
 

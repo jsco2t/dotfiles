@@ -14,6 +14,11 @@ Verified payload facts (Claude Code 2.1.282):
   tool and then write a short closing message, so the result block can live only
   in the hand-back call's `input.message` in `agent_transcript_path` (the
   subagent's own transcript).
+* (2.1.283, read from the binary) Hooks declared in an agent definition's
+  frontmatter are registered under that agent's id, apply only to its own tool
+  calls, and are cleared when it ends; matcher "*" matches every tool, MCP tools
+  included. Every roster agent registers `hook.py budget` that way, which is how
+  the time budget sees Read/Grep/WebFetch calls the global matcher does not.
 """
 from __future__ import annotations
 
@@ -24,12 +29,14 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import activity
 from .common import (
     ACTIVE_PHASES,
     QUALITY_MANDATE,
     SKILL_DIR,
     STOP_PHASES,
     Workflow,
+    find_workflow,
     get_binding,
     orch_home,
     read_json,
@@ -37,12 +44,14 @@ from .common import (
     utcnow,
     write_json_atomic,
 )
-from .roster import AUTHORS, PLANNERS, READONLY, ROSTER
+from .roster import AUTHORS, PLANNERS, READONLY, RECORD_DONT_INVESTIGATE, ROSTER
 
 FILE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 AGENT_TOOLS = frozenset({"Agent", "Task"})
 REPORT_DIRS = ("runs", "research", "reviews", "loops", "final")
-SUBAGENT_ORCH_COMMANDS = frozenset({"status", "evidence", "gate", "snapshot", "ledger", "validate", "plan-hash", "where", "wait"})
+SUBAGENT_ORCH_COMMANDS = frozenset({"status", "evidence", "gate", "snapshot", "ledger", "validate", "plan-hash",
+                                    "where", "wait", "agents"})
+OUTPUT_STYLE = Path.home() / ".claude" / "output-styles" / "answer-first.md"
 SKILL_FILE = SKILL_DIR / "SKILL.md"
 HUMAN_SOURCES = (None, "user", "sdk")
 SUBAGENT_TASK_COMMANDS = frozenset({"diff", "scan", "status"})
@@ -188,6 +197,10 @@ def pretool_policy(payload: Dict[str, Any], wf: Workflow, state: Dict[str, Any])
         return "this process never uses the Workflow tool; orchestrate with roster subagents (Agent tool)"
 
     if tool in AGENT_TOOLS:
+        if is_main and activity.pause_requested(wf, state):
+            return ("the human paused this workflow: dispatch nothing new. Agents already running finish or "
+                    "write interim reports; end your turn (it becomes HALTED) and wait for "
+                    "`/task-orchestrator resume`")
         if is_main and phase in (ACTIVE_PHASES | {"PLANNING"}):
             wanted = tool_input.get("subagent_type")
             if wanted not in ROSTER:
@@ -291,11 +304,20 @@ def _record_human(wf: Workflow, parsed: Optional[Tuple[str, List[str]]], raw: st
                        "prompt_sha": sha256_text(raw)[:16], "via": via, "source": source})
 
 
+def _resume_target(parsed: Optional[Tuple[str, List[str]]]) -> Optional[Workflow]:
+    """The workflow a `/task-orchestrator resume <dir | workflow-id>` names, for an unbound session.
+
+    A fresh session is not bound yet, so without this the human's resume would reach
+    no ledger and un-halting would need the command typed twice. The capture is still
+    the hook recording what the human typed; only the target comes from the argument.
+    """
+    if not parsed or parsed[0] != "resume" or not parsed[1]:
+        return None
+    root = find_workflow(parsed[1][0])
+    return Workflow(root) if root else None
+
+
 def handle_user_prompt(payload: Dict[str, Any]) -> None:
-    bound = bound_workflow(payload)
-    if bound is None:
-        return
-    wf, _ = bound
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
         return
@@ -309,7 +331,17 @@ def handle_user_prompt(payload: Dict[str, Any]) -> None:
         return
     from . import ledger
 
-    _record_human(wf, ledger.parse_human_command(prompt), prompt, "UserPromptSubmit", source)
+    parsed = ledger.parse_human_command(prompt)
+    bound = bound_workflow(payload)
+    via = "UserPromptSubmit"
+    if bound is None:
+        target = _resume_target(parsed)
+        if target is None:
+            return
+        wf, via = target, "UserPromptSubmit (unbound session)"
+    else:
+        wf = bound[0]
+    _record_human(wf, parsed, prompt, via, source)
     heartbeat("UserPromptSubmit")
 
 
@@ -317,17 +349,22 @@ def handle_user_prompt_expansion(payload: Dict[str, Any]) -> None:
     """User-typed slash commands, before expansion (command_name + command_args)."""
     if payload.get("expansion_type") not in (None, "slash_command"):
         return
-    bound = bound_workflow(payload)
-    if bound is None:
-        return
-    wf, _ = bound
     from . import ledger
 
     parsed = ledger.parse_command_parts(payload.get("command_name"), payload.get("command_args"))
     if parsed is None:
         return
+    bound = bound_workflow(payload)
+    via = "UserPromptExpansion"
+    if bound is None:
+        target = _resume_target(parsed)
+        if target is None:
+            return
+        wf, via = target, "UserPromptExpansion (unbound session)"
+    else:
+        wf = bound[0]
     raw = f"/{str(payload.get('command_name')).lstrip('/')} {payload.get('command_args') or ''}".strip()
-    _record_human(wf, parsed, raw, "UserPromptExpansion", "user")
+    _record_human(wf, parsed, raw, via, "user")
     heartbeat("UserPromptExpansion")
 
 
@@ -339,6 +376,9 @@ Workflow `{workflow_id}` — directory {root}
 - Write only your own report file (its name ends in `.{agent}.md`). Never edit `.orch/`, plan documents after approval, generated index files, or another agent's report — hooks will refuse.
 - Judge the snapshot you were given. If the workspace changes under you, say so in your report.
 - Finish with the ```orch-result block from your brief, every placeholder replaced. If you hand back with SubagentHandback, end that message with the block; either way, also end your final text message with it. Without a valid block your work is not recorded.
+- Scope: {non_goals} {record}
+- The budget hook may stop you — when your time budget is reached, or when the human pauses the workflow. Every tool call except writing your interim report is then refused: follow its message and your brief's "If you are stopped" section.
+- Output style: write your report and your final message answer-first, as {style} defines it — read it before you write. The point first, then only the explanation the reader needs; every finding leads with its state; complete sentences; tables only for short, uniform values. Reviewers always give each finding's confidence score.
 - {mandate}"""
 
 
@@ -351,11 +391,37 @@ def handle_subagent_start(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     wf, state = bound
     heartbeat("SubagentStart")
+    from . import ledger
+    from .roster import LEGACY_KIND, NON_GOALS
+
+    try:
+        info = activity.start(wf, payload)
+        ledger.append(wf, {"kind": "dispatch", "agent_type": agent, "agent_id": payload.get("agent_id"),
+                           "resumed": bool(info.get("resumed"))})
+    except Exception as exc:  # the contract still goes out
+        log_error("SubagentStart activity", exc)
+    kind = state.get("kind") or LEGACY_KIND
     text = CONTRACT.format(
         workflow_id=state.get("workflow_id"), root=wf.root, decisions=wf.decisions, agent=agent,
-        mandate=QUALITY_MANDATE,
+        mandate=QUALITY_MANDATE, non_goals=NON_GOALS.get(kind, NON_GOALS[LEGACY_KIND]),
+        record=RECORD_DONT_INVESTIGATE, style=OUTPUT_STYLE,
     )
     return {"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": text}}
+
+
+def handle_budget(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The budget hook: every tool call of a roster agent (frontmatter PreToolUse, matcher "*")."""
+    if payload.get("hook_event_name") not in (None, "PreToolUse") or not payload.get("agent_id"):
+        return None
+    if payload.get("agent_type") not in ROSTER:
+        return None
+    bound = bound_workflow(payload)
+    if bound is None:
+        return None
+    wf, state = bound
+    heartbeat("Budget")
+    reason = activity.on_tool(wf, state, payload)
+    return deny(reason) if reason else None
 
 
 HANDBACK_TOOL = "SubagentHandback"
@@ -459,6 +525,16 @@ def handle_subagent_stop(payload: Dict[str, Any]) -> None:
     }
     if handback_id:
         entry["handback_tool_use_id"] = handback_id
+    try:
+        info = activity.stop(wf, payload)
+    except Exception as exc:
+        log_error("SubagentStop activity", exc)
+        info = None
+    if info is not None:
+        entry["active_minutes"] = activity.active_minutes(info)
+        if (result or {}).get("status") == "interim":
+            # Why it stopped: the budget hook's reason, or `self` if it stopped on its own.
+            entry["interim_reason"] = info.get("stop_reason") or "self"
     if result:
         report = ledger.report_path(result, wf)
         if report is not None and not report.exists() and report.name.endswith(f".{agent}.md"):
@@ -479,6 +555,14 @@ def handle_session_start(payload: Dict[str, Any]) -> Optional[str]:
         return None
     wf, state = bound
     heartbeat("SessionStart")
+    swept: List[str] = []
+    if payload.get("source") in ("resume", "startup"):
+        # A new process: no background agent from before it survived. (`clear` and
+        # `compact` happen inside a live process whose agents may still be running.)
+        try:
+            swept = activity.sweep_interrupted(wf)
+        except Exception as exc:
+            log_error("SessionStart sweep", exc)
     try:
         from .gates import Context, next_action
 
@@ -493,6 +577,9 @@ def handle_session_start(payload: Dict[str, Any]) -> Optional[str]:
         f"`python3 \"{SKILL_DIR / 'scripts' / 'orch.py'}\" status` rather than relying on memory; "
         "continue with `/task-orchestrator resume`.",
     ]
+    if swept:
+        lines.append(f"Agents that were running when the previous process ended are INTERRUPTED: "
+                     f"{', '.join(swept)} (`orch agents`).")
     if payload.get("source") == "compact":
         lines += [
             QUALITY_MANDATE,
@@ -669,19 +756,28 @@ HANDLERS = {
 }
 
 
-def dispatch(payload: Dict[str, Any]) -> Tuple[Optional[str], int]:
-    """Run the handler for this payload; return (stdout text, exit code)."""
-    event = payload.get("hook_event_name")
-    handler = HANDLERS.get(event)
-    if handler is None:
-        return None, 0
+def _run(name: str, handler, payload: Dict[str, Any]) -> Tuple[Optional[str], int]:
     try:
         result = handler(payload)
     except Exception as exc:  # fail open
-        log_error(str(event), exc)
+        log_error(name, exc)
         return None, 0
     if result is None:
         return None, 0
     if isinstance(result, str):
         return result, 0
     return json.dumps(result), 0
+
+
+def dispatch(payload: Dict[str, Any]) -> Tuple[Optional[str], int]:
+    """Run the handler for this payload; return (stdout text, exit code)."""
+    event = payload.get("hook_event_name")
+    handler = HANDLERS.get(str(event))
+    if handler is None:
+        return None, 0
+    return _run(str(event), handler, payload)
+
+
+def dispatch_budget(payload: Dict[str, Any]) -> Tuple[Optional[str], int]:
+    """Entry for `hook.py budget` — the frontmatter PreToolUse hook of every roster agent."""
+    return _run("Budget", handle_budget, payload)

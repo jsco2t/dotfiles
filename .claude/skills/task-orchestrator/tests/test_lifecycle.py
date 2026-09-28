@@ -50,8 +50,7 @@ class LifecycleTest(unittest.TestCase):
     def test_approval_requires_the_human(self) -> None:
         h = self.h
         h.init()
-        h.agent(["research", "--topic", "calc"], "codebase-researcher")
-        h.agent(["pm-research"], "project-manager")
+        h.research_phase()
         h.agent(["plan"], "planning-author", work=h.write_plan)
         h.agent(["test-plan"], "test-planner")
         h.agent(["plan-review"], "doc-reviewer")
@@ -68,8 +67,7 @@ class LifecycleTest(unittest.TestCase):
     def test_plan_change_after_review_makes_pm_audit_stale(self) -> None:
         h = self.h
         h.init()
-        h.agent(["research", "--topic", "calc"], "codebase-researcher")
-        h.agent(["pm-research"], "project-manager")
+        h.research_phase()
         h.agent(["plan"], "planning-author", work=h.write_plan)
         h.agent(["test-plan"], "test-planner")
         h.agent(["plan-review"], "doc-reviewer")

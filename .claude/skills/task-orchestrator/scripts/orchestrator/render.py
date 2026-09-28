@@ -49,7 +49,7 @@ def render_all(wf: Workflow) -> None:
         nxt = f"(could not compute: {exc}) — run `orch status`"
     _render_root(wf, ctx, nxt)
     _render_tasks(wf, ctx)
-    _render_research(wf)
+    _render_research(wf, ctx)
     _render_status(wf, ctx, nxt)
     for task_id in (state.get("tasks") or {}):
         _render_run_index(wf, ctx, task_id)
@@ -132,8 +132,18 @@ def _render_tasks(wf: Workflow, ctx: Context) -> None:
     write_text_atomic(wf.tasks_dir / "index.md", "\n".join(lines) + "\n")
 
 
-def _render_research(wf: Workflow) -> None:
+def _render_research(wf: Workflow, ctx: Context) -> None:
+    from . import research
+
     lines = ["# Research", "", BANNER, "", "Parent: [../index.md](../index.md)", ""]
+    items = research.items(ctx.state)
+    if items:
+        lines += ["## Research plan", "", "| Item | Agent | Title | Status |", "| --- | --- | --- | --- |"]
+        for iid, (status, _) in research.statuses(ctx.entries, ctx.state).items():
+            item = items[iid]
+            lines.append(f"| {iid} | {item.get('agent')} | {item.get('title')} | {status} |")
+        lines += ["", "## Research documents", ""]
+    # Top-level documents only: interim reports live in interim/ and are not research findings.
     docs = sorted(p for p in wf.research_dir.glob("*.md") if p.name != "index.md") if wf.research_dir.is_dir() else []
     if not docs:
         lines.append("No research documents yet.")
@@ -196,6 +206,13 @@ def _describe(entry: Dict[str, Any]) -> str:
         return f"{head} {entry.get('what')} {entry.get('task') or ''} -> {entry.get('to')}"
     if kind == "human":
         return f"{head} verb={entry.get('verb')}"
+    if kind == "dispatch":
+        return f"{head} {entry.get('agent_type')} {entry.get('agent_id')}{' (resumed)' if entry.get('resumed') else ''}"
+    if kind == "agent_continue":
+        extra = f" {entry.get('decision')} +{entry.get('grant_minutes')} min" if entry.get("reason") == "time" else ""
+        return f"{head} {entry.get('agent_id')} after {entry.get('reason')}{extra}"
+    if kind == "research_item":
+        return f"{head} {entry.get('action')} {entry.get('item')}"
     return f"{head} {entry.get('task') or ''}"
 
 

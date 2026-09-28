@@ -16,11 +16,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from . import activity
 from . import ledger
 from . import plan as planmod
+from . import research
 from . import snapshot as snapmod
 from .common import OrchError, Workflow
 from .roster import CODE_LIKE_TYPES, RESOLVE_ACTIONS, required_final_reviewers
+
+LEGACY_PLANNING = ("UPGRADE NEEDED — this workflow was created before workflow kinds and focused research "
+                   "items, so its briefs would carry no deliverable-specific non-goals and its research would "
+                   "skip the PM's approval.")
 
 
 @dataclass
@@ -166,6 +172,11 @@ def _verdict_req(
     at = _snap_id(entry)
     if now is not None and at != now:
         return Req(key, label, False, f"stale (evaluated {at}, current {now})", dispatch)
+    if res.get("status") == "interim":
+        aid = (entry or {}).get("agent_id")
+        return Req(key, label, False, f"stopped with an interim report ({res.get('report')})",
+                   f"`orch agent continue {aid}` once `orch status` shows it is due (a time stop needs the PM's "
+                   f"pm-interim review first), then SendMessage the printed text to agent {aid}")
     if res.get("status") != "complete":
         return Req(
             key,
@@ -178,6 +189,62 @@ def _verdict_req(
         detail = extra_detail or f"verdict {res.get('verdict')} (report: {res.get('report')})"
         return Req(key, label, False, detail, on_fail, failed=True)
     return Req(key, label, True, f"report: {res.get('report')}")
+
+
+# ================================================================== interim reports
+
+
+def open_interims(ctx: Context) -> List[Dict[str, Any]]:
+    """Agents whose latest valid result is an interim report not yet acted on by `orch agent continue`."""
+    latest: Dict[str, Dict[str, Any]] = {}
+    continued: Dict[str, int] = {}
+    for entry in ctx.entries:
+        aid = entry.get("agent_id")
+        if not aid:
+            continue
+        if entry.get("kind") == "agent_result" and entry.get("valid"):
+            latest[aid] = entry
+        elif entry.get("kind") == "agent_continue":
+            continued[aid] = max(continued.get(aid, 0), int(entry.get("seq") or 0))
+    return sorted(
+        (e for aid, e in latest.items()
+         if _res(e).get("status") == "interim" and continued.get(aid, 0) < int(e.get("seq") or 0)),
+        key=lambda e: e.get("seq", 0),
+    )
+
+
+def pm_interim_review(ctx: Context, interim: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The PM's latest pm-interim result for this interim report (after it was recorded)."""
+    aid = interim.get("agent_id")
+    return ledger.latest([
+        e for e in ctx.results("pm-interim")
+        if _res(e).get("interim_agent") == aid and e.get("seq", 0) > interim.get("seq", 0)
+    ])
+
+
+def interim_req(ctx: Context, interim: Dict[str, Any]) -> Req:
+    aid = interim.get("agent_id")
+    agent = interim.get("agent_type")
+    reason = interim.get("interim_reason") or "time"
+    report = _res(interim).get("report")
+    label = f"interim report from {agent} {aid} acted on"
+    cont = f"`orch agent continue {aid}`, then SendMessage the printed text to agent {aid}"
+    if reason == "pause":
+        if activity.pause_requested(ctx.wf, ctx.state):
+            return Req("interim", label, False, f"paused by the human ({report})",
+                       "wait for the human's `/task-orchestrator resume`, then " + cont)
+        return Req("interim", label, False, f"paused by the human ({report})", cont)
+    review = pm_interim_review(ctx, interim)
+    if review is None:
+        return Req("interim", label, False, f"{reason} stop ({report}); the PM has not reviewed it",
+                   f"`orch brief pm-interim --of {aid} --agent project-manager` then dispatch project-manager")
+    if _res(review).get("status") != "complete":
+        return Req("interim", label, False, f"the PM's review returned status {_res(review).get('status')}",
+                   "answer the PM's questions (see its report) and resume the same PM agent via SendMessage")
+    res = _res(review)
+    return Req("interim", label, False,
+               f"PM decided `{res.get('decision')}` with {res.get('grant_minutes')} more minute(s)",
+               cont)
 
 
 # ================================================================== tasks
@@ -279,15 +346,21 @@ def task_checklist(ctx: Context, task_id: str) -> List[Req]:
             else:
                 reqs.append(Req("checkpoint", f"{checkpoint} evidence before implementation", True,
                                 f"seq {evidence['seq']}"))
-        reqs.append(
-            Req(
-                f"work:{author}",
-                f"work by {author}",
-                work is not None,
-                f"report: {_res(work).get('report')}" if work else "not yet run",
-                "" if work else brief("work", author),
-            )
+        work_req = Req(
+            f"work:{author}",
+            f"work by {author}",
+            work is not None,
+            f"report: {_res(work).get('report')}" if work else "not yet run",
+            "" if work else brief("work", author),
         )
+        if work is None:
+            for interim in open_interims(ctx):
+                res = _res(interim)
+                if (interim.get("agent_type") == author and res.get("task") == task_id
+                        and res.get("attempt") == attempt and res.get("stage") in ("work", "fix")):
+                    stop = interim_req(ctx, interim)
+                    work_req = Req(work_req.key, work_req.label, False, stop.detail, stop.action)
+        reqs.append(work_req)
         previous = work or previous
         if work is None:
             break
@@ -580,24 +653,81 @@ def final_checklist(ctx: Context) -> List[Req]:
 # ================================================================== planning
 
 
+def research_checklist(ctx: Context) -> List[Req]:
+    """Focused research items: registered, approved by the PM before dispatch, then complete."""
+    state = ctx.state
+    if research.is_legacy(state):
+        return []
+    items = research.items(state)
+    live = {iid: st for iid, st in research.statuses(ctx.entries, state).items() if st[0] != "DROPPED"}
+    if not live and state.get("upgraded_seq") and ctx.results("research"):
+        return [Req("research-items", "research gathered", True,
+                    "research from before the upgrade carries over; the PM's sufficiency check judges it")]
+    if not live:
+        return [Req("research-items", "focused research items registered", False, "none yet",
+                    "register each question set with `orch research add --agent <agent> --title \"...\" "
+                    "--questions-file <file> --done-when \"...\"` (at most 3 questions per item; more items, "
+                    "not bigger ones), then the PM's research-plan review")]
+    reqs: List[Req] = []
+    proposed = [i for i, st in live.items() if st[0] == "PROPOSED"]
+    rejected = [i for i, st in live.items() if st[0] == "REJECTED"]
+    if proposed:
+        reqs.append(Req("pm-research-plan", "PM approved every research item before dispatch", False,
+                        f"awaiting review: {', '.join(proposed)}",
+                        "`orch brief --plan pm-research-plan --agent project-manager` then dispatch project-manager"))
+    elif rejected:
+        reqs.append(Req("pm-research-plan", "PM approved every research item before dispatch", False,
+                        "rejected: " + "; ".join(f"{i} ({live[i][1]})" for i in rejected),
+                        "rework each rejected item as the PM's report says: `orch research drop <id> --reason ...`, "
+                        "`orch research add` a narrower one, then the PM's research-plan review", failed=True))
+    else:
+        reqs.append(Req("pm-research-plan", "PM approved every research item before dispatch", True))
+    interims = {(_res(e).get("item")): e for e in open_interims(ctx) if _res(e).get("stage") == "research"}
+    open_items = [i for i, st in live.items() if st[0] in ("APPROVED", "INTERIM", "NEEDS_INPUT", "BLOCKED")]
+    if not open_items:
+        reqs.append(Req("research", "approved research complete", True,
+                        f"{sum(1 for st in live.values() if st[0] == 'DONE')} item(s) done"))
+        return reqs
+    first = open_items[0]
+    first_state = live[first][0]
+    if first in interims:
+        stop = interim_req(ctx, interims[first])
+        detail, action = f"{first}: {stop.detail}", stop.action
+    elif first_state == "APPROVED":
+        agent = items[first].get("agent")
+        detail = f"not yet reported: {', '.join(i for i in open_items if live[i][0] == 'APPROVED')}"
+        action = (f"`orch brief --plan research --item {first} --agent {agent}` then dispatch {agent} "
+                  "(at most 3 research agents at once)")
+    else:
+        detail = f"{first} is {first_state}: {live[first][1]}"
+        action = "answer its questions (see its report) and resume the same agent via SendMessage"
+    reqs.append(Req("research", "approved research complete", False, detail, action))
+    return reqs
+
+
 def planning_checklist(ctx: Context, current_hash: str) -> List[Req]:
     state = ctx.state
     rev = int(state.get("plan_revision") or 1)
-    reqs: List[Req] = []
-    research = ctx.results("research")
-    last_research = ledger.latest(research)
-    pm_research = ledger.latest(
-        [e for e in ctx.results("pm-research") if not last_research or e["seq"] > last_research["seq"]]
-    )
+    reqs: List[Req] = research_checklist(ctx)
+    last_research = ledger.latest(ctx.results("research"))
+    # After an upgrade, only a sufficiency check made under the new rules counts.
+    floor = max(int((last_research or {}).get("seq") or 0), int(state.get("upgraded_seq") or 0))
+    pm_research = ledger.latest([e for e in ctx.results("pm-research") if e["seq"] > floor])
+    if research.is_legacy(state):
+        dispatch = insufficient = ("upgrade the workflow first: the human types `/task-orchestrator upgrade "
+                                   "<kind>`, then `orch upgrade --kind <kind>`")
+    else:
+        dispatch = "`orch brief --plan pm-research --agent project-manager` then dispatch project-manager"
+        insufficient = ("research is insufficient — register each gap the PM names as a focused item "
+                        "(`orch research add`), get it approved (pm-research-plan), dispatch it, then re-check")
     reqs.append(
         _verdict_req(
             "pm-research",
             "PM research-sufficiency check",
             pm_research,
             None,
-            "dispatch research agents (codebase-researcher / domain-researcher / liaisons) with "
-            "`orch brief --plan research --agent <agent>`, then `orch brief --plan pm-research --agent project-manager`",
-            "research is insufficient — dispatch the additional research the PM names, then re-check",
+            dispatch,
+            insufficient,
         )
     )
     plan_result = ctx.latest_result("plan", plan_revision=rev, status="complete")
@@ -666,6 +796,24 @@ def needs_human_text(state: Dict[str, Any]) -> str:
 def next_action(ctx: Context, current_hash: Optional[str] = None) -> str:
     state = ctx.state
     phase = state.get("phase")
+    if phase in ("PLANNING", "EXECUTING", "FINAL"):
+        if state.get("halt_requested") or ctx.wf.halt_path.exists():
+            return ("PAUSE REQUESTED by the human — dispatch nothing new. Running read-only agents write interim "
+                    "reports and authors finish their current pass; end your turn and the workflow becomes HALTED.")
+        interims = open_interims(ctx)
+        if interims:
+            req = interim_req(ctx, interims[0])
+            return f"INTERIM — {req.label}: {req.detail}. Next: {req.action}"
+        cut_off = [r for r in activity.summaries(ctx.wf, state, ctx.entries) if r["status"] == "interrupted"]
+        if cut_off:
+            row = cut_off[0]
+            return (f"INTERRUPTED — {row['agent_type']} {row['agent_id']} ({row.get('stage') or '?'}) was running when "
+                    f"its session ended. Next: `orch agent continue {row['agent_id']}` and SendMessage the printed text "
+                    "to that agent id; if that fails, dispatch a fresh agent for the same stage")
+    if phase == "PLANNING" and research.is_legacy(state):
+        return (LEGACY_PLANNING + " Stop and ask the human which kind this workflow delivers (code, docs, kb, "
+                "tutorial, education, research, pm, integration, mixed); they type `/task-orchestrator upgrade "
+                "<kind>`, then run `orch upgrade --kind <kind>`.")
     if phase == "PLANNING":
         req = first_unmet(planning_checklist(ctx, current_hash or planmod.plan_hash(ctx.wf)))
         return f"PLANNING — next: {req.label}: {req.action}" if req else "PLANNING — run `orch submit`"

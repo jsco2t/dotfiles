@@ -23,21 +23,26 @@ from typing import Any, Dict, List, Optional
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from orchestrator import briefs, gates, ledger, ops, render  # noqa: E402
+from orchestrator import activity, briefs, gates, ledger, ops, render  # noqa: E402
 from orchestrator import plan as planmod  # noqa: E402
+from orchestrator import research as researchmod  # noqa: E402
 from orchestrator import snapshot as snapmod  # noqa: E402
 from orchestrator.common import (  # noqa: E402
     ORCH_CLI,
     SCHEMA,
     OrchError,
     Workflow,
+    catalog_entries,
     clear_binding,
     current_session_id,
     file_lock,
+    find_workflow,
     get_binding,
-    list_bindings,
     orch_home,
+    parse_ts,
     read_json,
+    register_workflow,
+    report_for_interim,
     resolve_workflow,
     set_binding,
     slugify,
@@ -48,13 +53,18 @@ from orchestrator.common import (  # noqa: E402
 )
 from orchestrator.roster import (  # noqa: E402
     AGENTS,
+    BUDGET_HOOK_COMMAND,
+    DEFAULT_AGENT_MINUTES,
     DEFAULT_BUDGETS,
+    KINDS,
+    LEGACY_KIND,
     RESOLVE_ACTIONS,
     ROSTER,
 )
 
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "SubagentStart",
                "SubagentStop", "Stop")
+TAKEOVER_MINUTES = 15  # `orch bind` refuses to take a workflow another session drove this recently
 
 
 # ================================================================ helpers
@@ -187,7 +197,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         "tasks": {},
         "loops": {},
         "final": {"status": "PENDING", "round": 0, "budget": DEFAULT_BUDGETS["final_review_passes"]},
-        "budgets": dict(DEFAULT_BUDGETS),
+        "budgets": dict(DEFAULT_BUDGETS, agent_minutes=dict(DEFAULT_AGENT_MINUTES)),
+        "kind": args.kind,
+        "research_items": {},
         "needs_human": None,
         "halt_requested": False,
         "block_reason": None,
@@ -199,34 +211,75 @@ def cmd_init(args: argparse.Namespace) -> int:
         "session_id": None if args.no_bind else session,
     }
     wf.save_state(state)
-    transition(wf, "workflow", "PLANNING", title=args.title)
+    transition(wf, "workflow", "PLANNING", title=args.title, workflow_kind=args.kind)
+    register_workflow(wf.root, candidate, args.title)
     if session and not args.no_bind:
         set_binding(session, wf.root, candidate)
     safe_render(wf)
     out(str(wf.root))
-    out(f"Workflow {candidate} initialized (phase PLANNING). Write the verbatim request to {wf.request} "
-        "if --request-file was not given, then follow the planning stage.")
+    out(f"Workflow {candidate} initialized (kind {args.kind}, phase PLANNING). Write the verbatim request to "
+        f"{wf.request} if --request-file was not given, then follow the planning stage.")
     return 0
+
+
+def last_activity(wf: Workflow, state: Dict[str, Any]) -> Optional[str]:
+    """The latest sign of life: a state change, a ledger entry, or an agent's tool call."""
+    stamps = [state.get("updated_at")]
+    entries = ledger.read(wf)
+    if entries:
+        stamps.append(entries[-1].get("ts"))
+    stamps += [a.get("last_call_at") for a in activity.all_agents(wf)]
+    parsed = [(parse_ts(s), s) for s in stamps if s]
+    parsed = [(p, s) for p, s in parsed if p is not None]
+    return max(parsed)[1] if parsed else None
+
+
+def _age(stamp: Optional[str]) -> str:
+    moment = parse_ts(stamp)
+    if moment is None:
+        return "unknown"
+    seconds = int((parse_ts(utcnow()) - moment).total_seconds())  # type: ignore[operator]
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{seconds // size}{unit} ago"
+    return f"{seconds}s ago"
 
 
 def cmd_bind(args: argparse.Namespace) -> int:
     session = current_session_id()
     if not session:
         raise OrchError("CLAUDE_CODE_SESSION_ID is not set")
-    wf = resolve_workflow(args.workflow_dir)
+    root = find_workflow(args.workflow_dir)
+    if root is None:
+        raise OrchError(f"{args.workflow_dir} is neither a workflow directory nor a workflow id `orch list` knows")
+    wf = Workflow(root)
     bound = get_binding(session)
     if bound and Path(bound["workflow_dir"]).resolve() != wf.root:
         raise OrchError(f"this session already drives {bound['workflow_dir']}; `orch unbind` first")
     with state_lock(wf):
         state = wf.load_state()
         previous = state.get("session_id")
+        if previous and previous != session and get_binding(previous) and not args.take_over:
+            recent = last_activity(wf, state)
+            moment = parse_ts(recent)
+            now = parse_ts(utcnow())
+            if moment and now and (now - moment).total_seconds() < TAKEOVER_MINUTES * 60:
+                raise OrchError(
+                    f"session {previous[:8]} drove this workflow {_age(recent)}; if that session is still "
+                    "running, two orchestrators would fight over it. If it is gone (a restart or crash), re-run "
+                    "with --take-over")
         if previous and previous != session:
             clear_binding(previous)
         state["session_id"] = session
         wf.save_state(state)
     set_binding(session, wf.root, state["workflow_id"])
+    register_workflow(wf.root, state["workflow_id"], state.get("title") or state["workflow_id"])
     transition(wf, "binding", session, previous=previous)
     out(f"Session bound to {state['workflow_id']} ({wf.root}), phase {state['phase']}.")
+    ctx = gates.Context(wf, fast=True)
+    for line in agent_lines(wf, ctx.state, ctx.entries):
+        out(line)
+    out("NEXT: " + gates.next_action(ctx))
     return 0
 
 
@@ -256,14 +309,216 @@ def cmd_status(args: argparse.Namespace) -> int:
         print_reqs(gates.task_checklist(ctx, args.task))
         return 0
     out(f"{state['workflow_id']} — {state['title']}")
-    out(f"phase {state['phase']} · iteration {state.get('iteration')} · plan revision {state.get('plan_revision')}")
+    out(f"phase {state['phase']} · kind {state.get('kind') or LEGACY_KIND} · iteration {state.get('iteration')} · "
+        f"plan revision {state.get('plan_revision')}")
     out(f"directory {wf.root}")
     if state.get("tasks"):
         counts: Dict[str, int] = {}
         for info in state["tasks"].values():
             counts[info["status"]] = counts.get(info["status"], 0) + 1
         out("tasks " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+    if not researchmod.is_legacy(state) and researchmod.items(state):
+        counts = {}
+        for status, _ in researchmod.statuses(ctx.entries, state).values():
+            counts[status] = counts.get(status, 0) + 1
+        out("research items " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) + " (`orch research list`)")
+    for line in agent_lines(wf, state, ctx.entries):
+        out(line)
     out("NEXT: " + gates.next_action(ctx))
+    return 0
+
+
+# ================================================================ agents
+
+
+def _format_agent(row: Dict[str, Any]) -> str:
+    budget = f"/{row['budget_minutes']}" if row.get("budget_minutes") is not None else ""
+    last = f", last {row['last_tool']} {row['last_call_age_s']}s ago" if row.get("last_tool") and \
+        row.get("last_call_age_s") is not None else ""
+    what = " ".join(str(x) for x in (row.get("stage"), row.get("subject")) if x)
+    stop = f" ({row['stop_reason']})" if row.get("stop_reason") and row["status"] in ("interim", "running") else ""
+    return (f"{row['agent_id']}  {row['agent_type']}  {what or '?'}  {row['status'].upper()}{stop}  "
+            f"{row['active_minutes']}{budget} min  {row['calls']} call(s){last}")
+
+
+def agent_lines(wf: Workflow, state: Dict[str, Any], entries: List[Dict[str, Any]]) -> List[str]:
+    """Status lines for agents that need attention, plus whether it is safe to exit."""
+    rows = activity.summaries(wf, state, entries)
+    active = [r for r in rows if r["status"] in activity.ACTIVE_STATUSES]
+    lines = [f"agent {_format_agent(r)}" for r in active]
+    running = [r for r in rows if r["status"] == "running"]
+    if activity.pause_requested(wf, state):
+        lines.append("safe to exit: yes — no agent is running" if not running else
+                     f"safe to exit: not yet — {len(running)} agent(s) still running; they hand back or write "
+                     "interim reports, then it is")
+    return lines
+
+
+def cmd_agents(args: argparse.Namespace) -> int:
+    wf = resolve_workflow(args.wf)
+    ctx = gates.Context(wf, fast=True)
+    rows = activity.summaries(wf, ctx.state, ctx.entries)
+    if args.agent_id:
+        row = next((r for r in rows if r["agent_id"] == args.agent_id), None)
+        if row is None:
+            raise OrchError(f"no activity record for agent {args.agent_id}")
+        if args.json:
+            out(json.dumps(row, indent=2))
+            return 0
+        out(_format_agent(row))
+        out(f"report: {row.get('report') or 'unknown'}")
+        calls = activity.read_calls(wf, args.agent_id, tail=args.tail) if args.calls else row.get("recent") or []
+        if calls:
+            out("tool calls (oldest first):" if args.calls else "recent tool calls:")
+            for call in calls:
+                flag = "  REFUSED" if call.get("refused") else ""
+                minutes = f" [{call['minutes']} min]" if call.get("minutes") is not None else ""
+                out(f"  {call.get('at', '')[11:19]}{minutes} {call.get('call')}{flag}")
+        return 0
+    shown = rows if args.all else [r for r in rows if r["status"] in activity.ACTIVE_STATUSES]
+    if args.json:
+        out(json.dumps(shown, indent=2))
+        return 0
+    if not shown:
+        out("No agents need attention." + (f" ({len(rows)} recorded; `--all` lists them.)" if rows else ""))
+    for row in shown:
+        out(_format_agent(row))
+    hidden = len(rows) - len(shown)
+    if hidden and not args.all:
+        out(f"({hidden} finished agent(s) not shown; `orch agents --all`)")
+    return 0
+
+
+def _continue_message(wf: Workflow, interim: Dict[str, Any], reason: str, decision: Optional[str],
+                      grant: Optional[int], pm_report: Optional[str]) -> str:
+    res = interim.get("result") or {}
+    original = report_for_interim(Path(str(res.get("report"))))
+    finish = (f"When you are done, write your full report to `{original}` and finish with the result block from "
+              "your original brief, with \"status\": \"complete\" (it keeps its identity values).")
+    if reason == "pause":
+        return (f"RESUME — the human resumed the workflow. Read your interim report ({res.get('report')}) and "
+                f"carry on from where you stopped, within your brief's scope. {finish}")
+    how = {
+        "continue": "You are on course: carry on with your brief's questions as planned.",
+        "redirect": ("Continue ONLY on what the PM's report keeps in scope; anything it drops goes under "
+                     "\"Noticed, not investigated\" and is not pursued."),
+        "split": ("Stop investigating. Write your full report now, covering only what you have answered; list "
+                  "the remaining questions under \"Handed off\" — they will be researched separately."),
+    }.get(str(decision), "")
+    return (f"CONTINUE — the project-manager reviewed your interim report and decided `{decision}`. Read its "
+            f"report first: {pm_report}. You have {grant} more active minute(s). {how} {finish}")
+
+
+def cmd_agent(args: argparse.Namespace) -> int:
+    wf = resolve_workflow(args.wf)
+    aid = args.agent_id
+    with state_lock(wf):
+        ctx = gates.Context(wf, fast=True)
+        state = ctx.state
+        interim = next((e for e in gates.open_interims(ctx) if e.get("agent_id") == aid), None)
+        if interim is None:
+            row = next((r for r in activity.summaries(wf, state, ctx.entries) if r["agent_id"] == aid), None)
+            if row and row["status"] == "interrupted":
+                ledger.append(wf, {"kind": "agent_continue", "agent_id": aid, "reason": "interrupted"})
+                out(f"RESUME — your session was interrupted (a restart or crash) before you handed back. Check "
+                    f"what you had already written or changed, then finish your brief: write your report to "
+                    f"`{row.get('report') or 'the report path in your brief'}` and end with your brief's result "
+                    "block.")
+                return 0
+            raise OrchError(f"agent {aid} has no open interim report (see `orch agents`)")
+        reason = interim.get("interim_reason") or "time"
+        if reason == "pause":
+            if activity.pause_requested(wf, state):
+                raise OrchError("the workflow is still paused; the human resumes it with `/task-orchestrator resume`")
+            ledger.append(wf, {"kind": "agent_continue", "agent_id": aid, "reason": "pause"})
+            out(_continue_message(wf, interim, "pause", None, None, None))
+            return 0
+        review = gates.pm_interim_review(ctx, interim)
+        if review is None or (review.get("result") or {}).get("status") != "complete":
+            raise OrchError(f"the PM has not reviewed agent {aid}'s interim report: "
+                            f"`orch brief pm-interim --of {aid} --agent project-manager`, then dispatch it")
+        res = review.get("result") or {}
+        if res.get("decision") == "split" and (interim.get("result") or {}).get("task"):
+            raise OrchError(
+                "`split` hands the rest of the work to new research items, which exist only in planning — a "
+                "task's remaining work cannot be handed off. Re-dispatch the PM for `continue` or `redirect` "
+                f"(`orch brief pm-interim --of {aid} --agent project-manager --note-file <why>`), or, if the "
+                "task is too big as planned, `orch deviation --summary ...` for the human")
+        used = len([e for e in ctx.entries if e.get("kind") == "agent_continue" and e.get("agent_id") == aid
+                    and e.get("reason") == "time"])
+        human = [e for e in ctx.entries if e.get("kind") == "resolution" and e.get("need") == "time_budget"
+                 and e.get("action") == "continue" and e.get("agent") == aid]
+        allowed = int((state.get("budgets") or {}).get("time_grants", DEFAULT_BUDGETS["time_grants"])) + len(human)
+        if used >= allowed:
+            raise OrchError(
+                f"agent {aid} has used {used} time extension(s), its limit; a human decides now: "
+                f"`orch needs-human --kind time_budget --agent {aid} --summary \"...\" --report {res.get('report')}`")
+        grant = int(res.get("grant_minutes") or 0)
+        if human and used == allowed - 1 and human[-1].get("grant"):
+            grant = int(human[-1]["grant"])
+        activity.grant(wf, aid, grant)
+        ledger.append(wf, {"kind": "agent_continue", "agent_id": aid, "reason": "time", "decision": res.get("decision"),
+                           "grant_minutes": grant, "pm_seq": review.get("seq")})
+    out(_continue_message(wf, interim, "time", res.get("decision"), grant, res.get("report")))
+    return 0
+
+
+# ================================================================ research items
+
+
+def cmd_research(args: argparse.Namespace) -> int:
+    wf = resolve_workflow(args.wf)
+    if args.research_cmd == "list":
+        ctx = gates.Context(wf, fast=True)
+        state = ctx.state
+        if researchmod.is_legacy(state):
+            out("This workflow predates research items; its research uses free-topic briefs.")
+            return 0
+        records = researchmod.items(state)
+        if not records:
+            out("No research items. Register them with `orch research add`.")
+        for iid, (status, detail) in researchmod.statuses(ctx.entries, state).items():
+            item = records[iid]
+            mode = f" mode {item['mode']}" if item.get("mode") else ""
+            out(f"{iid}  {status:<11} {item['agent']}{mode} — {item['title']}  ({detail})")
+            if args.verbose:
+                for n, question in enumerate(item.get("questions") or [], 1):
+                    out(f"      {n}. {question}")
+                out(f"      done when: {item.get('done_when')}")
+        return 0
+    with state_lock(wf):
+        state = wf.load_state()
+        if researchmod.is_legacy(state):
+            raise OrchError("this workflow predates research items; dispatch research with --topic briefs")
+        require_phase(state, "PLANNING")
+        records = researchmod.items(state)
+        if args.research_cmd == "drop":
+            item = records.get(args.item_id)
+            if item is None:
+                raise OrchError(f"no research item {args.item_id}")
+            item.update(status="DROPPED", dropped_reason=args.reason, dropped_at=utcnow())
+            state["research_items"] = records
+            wf.save_state(state)
+            ledger.append(wf, {"kind": "research_item", "action": "drop", "item": args.item_id, "reason": args.reason})
+            out(f"{args.item_id} dropped.")
+            return 0
+        questions = researchmod.parse_questions(read_text_arg(args.questions_file, "--questions-file"))
+        context = read_text_arg(args.context_file, "--context-file") if args.context_file else ""
+        mode = args.mode or researchmod.default_mode(args.agent, state.get("kind") or LEGACY_KIND)
+        errors = researchmod.validate_new(args.agent, args.title, questions, args.done_when, context,
+                                          args.mode if args.mode else None)
+        if errors:
+            raise OrchError("research item refused:\n  - " + "\n  - ".join(errors))
+        iid = researchmod.next_id(state)
+        entry = ledger.append(wf, {"kind": "research_item", "action": "add", "item": iid, "agent": args.agent})
+        records[iid] = {"id": iid, "agent": args.agent, "title": args.title.strip(), "mode": mode,
+                        "questions": questions, "done_when": args.done_when.strip(), "context": context,
+                        "added_at": utcnow(), "added_seq": entry["seq"], "status": "OPEN"}
+        state["research_items"] = records
+        wf.save_state(state)
+    safe_render(wf)
+    out(f"{iid} registered (PROPOSED): {args.agent}{' mode ' + mode if mode else ''} — {args.title.strip()}")
+    out("NEXT: when the research plan is complete, `orch brief --plan pm-research-plan --agent project-manager`.")
     return 0
 
 
@@ -870,11 +1125,19 @@ def cmd_needs_human(args: argparse.Namespace) -> int:
             if not dry:
                 raise OrchError("no dry-run result from the liaison for this attempt")
             args.report = args.report or (dry[-1].get("result") or {}).get("report")
+        if kind == "time_budget":
+            interim = next((e for e in gates.open_interims(ctx) if e.get("agent_id") == args.agent), None)
+            if not args.agent or interim is None:
+                raise OrchError("time_budget needs --agent <agent_id> with an open interim report (see `orch agents`)")
+            review = gates.pm_interim_review(ctx, interim)
+            args.report = args.report or (review or interim).get("result", {}).get("report")
         if state["phase"] != "NEEDS_HUMAN":
             state["resume_phase"] = state["phase"]
         state["phase"] = "NEEDS_HUMAN"
         state["needs_human"] = {"kind": kind, "task": tid, "summary": args.summary, "report": args.report,
                                 "raised_at": utcnow()}
+        if args.agent:
+            state["needs_human"]["agent"] = args.agent
         wf.save_state(state)
     transition(wf, "workflow", "NEEDS_HUMAN", reason=kind, task=tid)
     safe_render(wf)
@@ -910,6 +1173,10 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             grant = numbers[0]
         resolution: Dict[str, Any] = {"kind": "resolution", "action": action, "task": tid, "human_seq": token["seq"],
                                       "need": kind}
+        if need.get("agent"):
+            # time_budget: `continue` lets `orch agent continue` grant one more extension (the human's
+            # minutes when given, else the PM's); `answer` leaves the decision to the human's words.
+            resolution["agent"] = need["agent"]
         info = state["tasks"].get(tid) if tid else None
         if info is not None:
             resolution["attempt"] = info.get("attempt")
@@ -918,6 +1185,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
                 state["final"]["budget"] = int(state["final"].get("budget") or 3) + (grant or 3)
             elif kind == "continuation_budget":
                 state["stop_continuations"] = 0
+            elif kind == "time_budget":
+                pass  # the resolution entry itself is the extra allowance `orch agent continue` counts
             elif info is not None:
                 info["review_budget"] = int(info.get("review_budget") or 3) + (grant or 3)
         elif action == "waive":
@@ -1019,6 +1288,45 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_upgrade(args: argparse.Namespace) -> int:
+    """Bring a workflow created before workflow kinds and research items under the current rules.
+
+    The human's call (it sets the non-goals every later brief carries): they type
+    `/task-orchestrator upgrade <kind>`. Research already gathered carries over — the PM's
+    sufficiency check, made after the upgrade, judges it — and any further research goes
+    through focused items and the PM's approval.
+    """
+    wf = resolve_workflow(args.wf)
+    with state_lock(wf):
+        ctx = gates.Context(wf, fast=True)
+        state = ctx.state
+        if state.get("phase") == "CLOSED":
+            raise OrchError("the workflow is CLOSED")
+        if not researchmod.is_legacy(state):
+            raise OrchError(f"this workflow already has kind `{state.get('kind') or LEGACY_KIND}` and research items; "
+                            "nothing to upgrade")
+        token = human_token(ctx.entries, "upgrade", state.get("created_at"), action=args.kind)
+        if token is None:
+            raise OrchError(f"upgrading is the human's call: they type `/task-orchestrator upgrade {args.kind}`")
+        consume(wf, token, "upgrade")
+        budgets = dict(state.get("budgets") or {})
+        budgets.setdefault("agent_minutes", dict(DEFAULT_AGENT_MINUTES))
+        budgets.setdefault("time_grants", DEFAULT_BUDGETS["time_grants"])
+        carried = len(ctx.results("research"))
+        entry = transition(wf, "upgrade", args.kind, human_seq=token["seq"], research_carried_over=carried)
+        state.update(kind=args.kind, research_items={}, budgets=budgets, upgraded_at=utcnow(),
+                     upgraded_seq=entry["seq"])
+        wf.save_state(state)
+    append_decision(wf, f"human decision: upgrade to kind `{args.kind}`", token.get("raw") or args.kind)
+    safe_render(wf)
+    out(f"Upgraded to kind `{args.kind}`. {carried} earlier research result(s) carry over; the PM's research check "
+        "must be made again under the current rules, and any further research is a focused item "
+        "(`orch research add`) the PM approves before dispatch. Earlier briefs that never got a report are not "
+        "re-dispatched.")
+    out("NEXT: " + gates.next_action(gates.Context(wf, fast=True)))
+    return 0
+
+
 def cmd_close(args: argparse.Namespace) -> int:
     wf = resolve_workflow(args.wf)
     with state_lock(wf):
@@ -1074,7 +1382,7 @@ def cmd_brief(args: argparse.Namespace) -> int:
     note = read_text_arg(args.note_file, "--note-file") if args.note_file else args.note
     ctx = gates.Context(wf)
     text, report = briefs.build(ctx, stage, args.agent, task_id=task_id, loop=args.loop, topic=args.topic,
-                                note=note, mode_hint=args.mode)
+                                note=note, mode_hint=args.mode, item=args.item, of_agent=args.of)
     safe_render(wf)
     out(text)
     return 0
@@ -1093,14 +1401,68 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     return 0
 
 
+def workflow_rows(include_closed: bool) -> List[Dict[str, Any]]:
+    """Every catalogued workflow with what a human needs to pick one to resume, most recent first."""
+    session = current_session_id()
+    rows: List[Dict[str, Any]] = []
+    for entry in catalog_entries():
+        wf = Workflow(Path(entry["workflow_dir"]))
+        if not wf.exists():
+            if include_closed:
+                rows.append({"workflow_id": entry.get("workflow_id"), "workflow_dir": str(wf.root),
+                             "phase": "MISSING", "title": entry.get("title"), "last_activity": None})
+            continue
+        try:
+            ctx = gates.Context(wf, fast=True)
+            state = ctx.state
+            nxt = gates.next_action(ctx)
+            agents = activity.summaries(wf, state, ctx.entries)
+        except Exception as exc:  # one broken workflow must not hide the others
+            rows.append({"workflow_id": entry.get("workflow_id"), "workflow_dir": str(wf.root), "phase": "UNREADABLE",
+                         "title": entry.get("title"), "last_activity": None, "next": f"({exc})"})
+            continue
+        if state.get("phase") == "CLOSED" and not include_closed:
+            continue
+        driver = state.get("session_id")
+        bound = "this session" if driver and driver == session else (
+            f"session {driver[:8]}" if driver and get_binding(driver) else "none")
+        counts: Dict[str, int] = {}
+        for row in agents:
+            if row["status"] in ("running", "interrupted", "interim"):
+                counts[row["status"]] = counts.get(row["status"], 0) + 1
+        rows.append({
+            "workflow_id": state.get("workflow_id"),
+            "workflow_dir": str(wf.root),
+            "title": state.get("title"),
+            "kind": state.get("kind") or LEGACY_KIND,
+            "phase": state.get("phase"),
+            "last_activity": last_activity(wf, state),
+            "bound": bound,
+            "agents": counts,
+            "next": nxt,
+        })
+    rows.sort(key=lambda r: parse_ts(r.get("last_activity")) or parse_ts("1970-01-01T00:00:00Z"), reverse=True)
+    for n, row in enumerate(rows, 1):
+        row["number"] = n
+    return rows
+
+
 def cmd_list(args: argparse.Namespace) -> int:
-    rows = list_bindings()
+    rows = workflow_rows(args.all)
+    if args.json:
+        out(json.dumps(rows, indent=2))
+        return 0
     if not rows:
-        out("No session bindings.")
+        out("No workflows are catalogued" + ("" if args.all else " (outside CLOSED ones; `--all` shows them)") +
+            ". A workflow directory you know can still be bound with `orch bind <dir>`.")
     for row in rows:
-        wf = Workflow(Path(row["workflow_dir"]))
-        phase = wf.load_state().get("phase") if wf.exists() else "MISSING"
-        out(f"{row['workflow_id']}  {phase}  {row['workflow_dir']}  (session {row['session_id'][:8]})")
+        agents = ", ".join(f"{v} {k}" for k, v in sorted((row.get("agents") or {}).items()))
+        out(f"{row['number']}. {row['workflow_id']} — {row.get('title') or ''}")
+        out(f"   {row['phase']} · kind {row.get('kind', '?')} · last activity {_age(row.get('last_activity'))} · "
+            f"driven by {row.get('bound', '?')}" + (f" · agents: {agents}" if agents else ""))
+        out(f"   {row['workflow_dir']}")
+        if row.get("next"):
+            out(f"   next: {row['next'][:240]}")
     return 0
 
 
@@ -1120,6 +1482,30 @@ def _settings_hooks() -> Dict[str, bool]:
     return found
 
 
+def agent_definition_problems(path: Path, name: str) -> List[str]:
+    """What is wrong with one roster agent file: its frontmatter must pin the roster's model and
+    effort and register the budget hook (PreToolUse, matcher "*")."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ["missing"]
+    match = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    if not match:
+        return ["no YAML frontmatter"]
+    front = match.group(1)
+    problems = []
+    for key in ("model", "effort"):
+        found = re.search(rf"^{key}:\s*(\S+)\s*$", front, re.M)
+        want = AGENTS[name][key]
+        if not found or found.group(1).strip("'\"") != want:
+            problems.append(f"{key} should be `{want}` (found `{found.group(1) if found else 'none'}`)")
+    hook = re.search(r"^hooks:\s*\n\s+PreToolUse:\s*\n\s+- matcher:\s*[\"']\*[\"']\s*\n(?:.*\n)*?.*"
+                     + re.escape(BUDGET_HOOK_COMMAND), front, re.M)
+    if not hook:
+        problems.append(f"no budget hook (frontmatter hooks.PreToolUse, matcher \"*\", command {BUDGET_HOOK_COMMAND})")
+    return problems
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     problems = 0
     out(f"python {sys.version.split()[0]} ({sys.executable})")
@@ -1135,11 +1521,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name in missing:
         problems += 1
         out(f"  MISSING agent definition: {agents_dir / (name + '.md')}")
+    for name in sorted(set(AGENTS) - set(missing)):
+        for problem in agent_definition_problems(agents_dir / f"{name}.md", name):
+            problems += 1
+            out(f"  {name}: {problem}")
+    style = Path.home() / ".claude" / "output-styles" / "answer-first.md"
+    if not style.is_file():
+        problems += 1
+        out(f"output style MISSING: {style} (agents are told to write answer-first from it)")
     for event, ok in _settings_hooks().items():
         out(f"hook {event}: {'registered' if ok else 'NOT REGISTERED'}")
         problems += 0 if ok else 1
     beat = read_json(orch_home() / "heartbeat.json", default={}) or {}
-    for event in HOOK_EVENTS:
+    for event in HOOK_EVENTS + ("Budget",):
         out(f"last {event}: {beat.get(event, 'never (while bound)')}")
     if shutil.which("git") is None:
         problems += 1
@@ -1158,10 +1552,14 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         if bound:
             raise OrchError(f"this session is bound to {bound['workflow_dir']}; the selftest needs an unbound session")
         ns = argparse.Namespace(plan_root=str(root), title="selftest", slug="selftest", workspace=None,
-                                request_file=None, no_bind=False)
+                                request_file=None, no_bind=False, kind="mixed")
         cmd_init(ns)
         wf = resolve_workflow(None)
         write_text_atomic(wf.request, "Selftest of the task-orchestrator hook wiring.\n")
+        with state_lock(wf):
+            state = wf.load_state()
+            state["budgets"]["agent_minutes"] = {"project-manager": 0}  # the first tool call is over budget
+            wf.save_state(state)
         ctx = gates.Context(wf)
         text, _ = briefs.build(ctx, "selftest", "project-manager")
         out("")
@@ -1188,6 +1586,14 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     checks.append(("SubagentStart injected the contract", bool(got) and (got.get("result") or {}).get("contract_seen") is True))
     beat = read_json(orch_home() / "heartbeat.json", default={}) or {}
     checks.append(("PreToolUse hook active", "PreToolUse" in beat))
+    record = activity.load(wf, str(got.get("agent_id"))) if got else None
+    checks.append(("the agent's frontmatter budget hook saw its tool calls",
+                   bool(record) and int((record or {}).get("calls") or 0) >= 1))
+    checks.append(("the budget hook stopped it at its (0-minute) budget",
+                   bool(record) and int((record or {}).get("denied") or 0) >= 1
+                   and (got.get("result") or {}).get("budget_stopped") is True))
+    checks.append(("it finished with an interim report the ledger accepted",
+                   bool(got) and bool(got.get("valid")) and (got.get("result") or {}).get("status") == "interim"))
     human = [e for e in entries if e.get("kind") == "human"]
     typed = [e for e in human if e.get("verb") == "status"]
     checks.append(("the human's `/task-orchestrator status` was captured as a command", bool(typed)))
@@ -1222,11 +1628,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--slug")
     p.add_argument("--workspace", action="append", help="name=path of a workspace the work changes (repeatable)")
     p.add_argument("--request-file", help="file holding the verbatim request")
+    p.add_argument("--kind", required=True, choices=KINDS,
+                   help="what the workflow delivers; sets the non-goals every brief carries and how deep "
+                        "planning research goes (docs/kb/tutorial/education: a structure map only)")
     p.add_argument("--no-bind", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("bind", help="bind this session to an existing workflow (e.g. after a restart)")
-    p.add_argument("workflow_dir")
+    p.add_argument("workflow_dir", help="workflow directory, or a workflow id from `orch list`")
+    p.add_argument("--take-over", action="store_true",
+                   help="take the workflow even though another session drove it in the last 15 minutes")
     p.set_defaults(func=cmd_bind)
     sub.add_parser("unbind", help="remove this session's binding").set_defaults(func=cmd_unbind)
     sub.add_parser("where", help="print the bound workflow directory").set_defaults(func=cmd_where)
@@ -1306,6 +1717,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kind", required=True, choices=sorted(RESOLVE_ACTIONS))
     p.add_argument("--summary", required=True)
     p.add_argument("--task")
+    p.add_argument("--agent", help="agent id (time_budget)")
     p.add_argument("--report")
     p.set_defaults(func=cmd_needs_human)
 
@@ -1321,6 +1733,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("halt", help="request a halt at the next turn boundary").set_defaults(func=cmd_halt)
     sub.add_parser("resume", help="un-halt (needs the human's /task-orchestrator resume)").set_defaults(func=cmd_resume)
+    p = sub.add_parser("upgrade", help="bring a workflow from before kinds/research items under the current rules "
+                                       "(needs the human's /task-orchestrator upgrade <kind>)")
+    p.add_argument("--kind", required=True, choices=KINDS)
+    p.set_defaults(func=cmd_upgrade)
     sub.add_parser("close", help="DONE -> CLOSED (needs the human's /task-orchestrator close)").set_defaults(func=cmd_close)
 
     p = sub.add_parser("note", help="append a clarification to decisions.md")
@@ -1336,12 +1752,45 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--loop", type=int)
     p.add_argument("--final", action="store_true")
     p.add_argument("--plan", action="store_true")
-    p.add_argument("--topic", help="research topic (research briefs)")
+    p.add_argument("--topic", help="research topic (only for workflows created before research items)")
+    p.add_argument("--item", help="research item id (research briefs)")
+    p.add_argument("--of", help="agent id whose interim report the PM reviews (pm-interim briefs)")
     p.add_argument("--mode", help="mode hint (e.g. 'plan' or 'code' for architecture-reviewer)")
     notes = p.add_mutually_exclusive_group()
     notes.add_argument("--note", help="extra context for this dispatch")
     notes.add_argument("--note-file", help="read the extra context from this file (safe for backticks and $)")
     p.set_defaults(func=cmd_brief)
+
+    p = sub.add_parser("research", help="focused planning research items: add | list | drop")
+    rsub = p.add_subparsers(dest="research_cmd", required=True)
+    rp = rsub.add_parser("add", help="register a research item (PROPOSED until the PM approves it)")
+    rp.add_argument("--agent", required=True, choices=sorted(ROSTER))
+    rp.add_argument("--title", required=True, help="at most 12 words")
+    rp.add_argument("--questions-file", required=True,
+                    help="one question per `- ` bullet or numbered line (at most 3)")
+    rp.add_argument("--done-when", required=True, help="what answer the planner needs, so the agent knows when to stop")
+    rp.add_argument("--context-file", help="pins, paths, constraints (at most 150 words; no extra asks)")
+    rp.add_argument("--mode", choices=("map", "investigate"),
+                    help="codebase-researcher only; default map for docs/kb/tutorial/education workflows")
+    rp = rsub.add_parser("list", help="research items and their status")
+    rp.add_argument("-v", "--verbose", action="store_true", help="include each item's questions")
+    rp = rsub.add_parser("drop", help="withdraw an item (e.g. after the PM rejects it)")
+    rp.add_argument("item_id")
+    rp.add_argument("--reason", required=True)
+    p.set_defaults(func=cmd_research)
+
+    p = sub.add_parser("agents", help="roster agents: status, active time vs budget, tool calls")
+    p.add_argument("agent_id", nargs="?")
+    p.add_argument("--calls", action="store_true", help="the agent's tool-call log")
+    p.add_argument("--tail", type=int, default=200)
+    p.add_argument("--all", action="store_true", help="include finished agents")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_agents)
+
+    p = sub.add_parser("agent", help="act on one agent: continue (after an interim report or an interruption)")
+    p.add_argument("agent_cmd", choices=("continue",))
+    p.add_argument("agent_id")
+    p.set_defaults(func=cmd_agent)
 
     p = sub.add_parser("ledger", help="show ledger entries")
     p.add_argument("--task")
@@ -1350,7 +1799,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_ledger)
 
-    sub.add_parser("list", help="list session bindings").set_defaults(func=cmd_list)
+    p = sub.add_parser("list", help="catalogued workflows, most recent first (to pick one to resume)")
+    p.add_argument("--all", action="store_true", help="include CLOSED and missing workflows")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_list)
     sub.add_parser("doctor", help="check installation and hook wiring").set_defaults(func=cmd_doctor)
     p = sub.add_parser("selftest", help="end-to-end hook check (run, dispatch the brief, then --check)")
     p.add_argument("--check", action="store_true")

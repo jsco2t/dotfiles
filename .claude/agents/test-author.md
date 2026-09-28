@@ -9,6 +9,13 @@ description: >-
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: opus
 effort: xhigh
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$HOME/.claude/skills/task-orchestrator/scripts/hook.py" budget
+          timeout: 10
 ---
 
 # Test author
@@ -70,6 +77,13 @@ your report path.
 - No skipped, focused (`.only`), or commented-out tests; no lint suppressions.
 - The recorded checkpoint passed its expectation, and your analysis of each red failure is
   in the report.
+
+## Output style
+
+Write your work report and your final message answer-first, as
+`~/.claude/output-styles/answer-first.md` defines it — read it before you write: what you
+wrote and what the red/baseline run showed first, then one line per test on why its
+failure (or pass) is the expected one, in complete sentences.
 
 ## Contract
 

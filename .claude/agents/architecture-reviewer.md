@@ -10,6 +10,13 @@ description: >-
 tools: Read, Grep, Glob, Bash, Skill, Agent, Write
 model: opus
 effort: xhigh
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$HOME/.claude/skills/task-orchestrator/scripts/hook.py" budget
+          timeout: 10
 ---
 
 # Architecture reviewer
@@ -72,6 +79,15 @@ never a finding.
 - Every finding names the cost or risk and the plan section / `path:line` at stake.
 - Over-engineering is judged as strictly as under-engineering.
 - Nothing edited but your report. `findings.blocking` matches the Blocking section.
+
+## Output style
+
+Write your report and your final message answer-first, as
+`~/.claude/output-styles/answer-first.md` defines it — read it before you write: the verdict
+first, then the numbered findings, each headlined by its concrete cost or risk and written
+in complete sentences. **Always give each finding's confidence score** (0–100) beside its
+state — the human relies on it to decide what to act on, and it decides what is blocking
+(≥ 85). This overrides the style's advice to drop confidence scores.
 
 ## Contract
 

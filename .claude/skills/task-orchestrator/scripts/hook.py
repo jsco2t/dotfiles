@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""task-orchestrator hook entry point for SessionStart, UserPromptSubmit,
-PreToolUse, SubagentStart, SubagentStop, and Stop. Register it in
-~/.claude/settings.json (see the skill's references/installation.md)."""
+"""task-orchestrator hook entry point.
+
+`hook.py` handles SessionStart, UserPromptSubmit, UserPromptExpansion,
+PreToolUse, SubagentStart, SubagentStop, and Stop — register it in
+~/.claude/settings.json (see the skill's references/installation.md).
+
+`hook.py budget` is the per-agent budget hook: every roster agent definition
+registers it in its frontmatter (PreToolUse, matcher "*"), so it sees each of
+that agent's tool calls and nothing else.
+"""
 from __future__ import annotations
 
 import json
@@ -20,10 +27,11 @@ def main() -> int:
     if not isinstance(payload, dict):
         return 0
     try:
-        from orchestrator.hooks import dispatch
+        from orchestrator.hooks import dispatch, dispatch_budget
     except Exception:
         return 0
-    text, code = dispatch(payload)
+    budget = len(sys.argv) > 1 and sys.argv[1] == "budget"
+    text, code = dispatch_budget(payload) if budget else dispatch(payload)
     if text:
         print(text)
     return code

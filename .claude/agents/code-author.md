@@ -9,6 +9,13 @@ description: >-
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: opus
 effort: xhigh
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$HOME/.claude/skills/task-orchestrator/scripts/hook.py" budget
+          timeout: 10
 ---
 
 # Code author
@@ -63,6 +70,15 @@ reports (in fix rounds: every failing verification/review/PM report), your repor
 - Nothing outside the task's scope changed; no opportunistic refactors.
 - No deferral markers, stubs, or partial implementations.
 - `changed_files` matches the actual diff.
+- A defect you notice outside the task is one line under **Noticed, not investigated** in
+  your report — never fixed in passing.
+
+## Output style
+
+Write your work report and your final message answer-first, as
+`~/.claude/output-styles/answer-first.md` defines it — read it before you write: what
+changed and where first, then only what the next stage needs to know (disputes, risks),
+in complete sentences.
 
 ## Contract
 

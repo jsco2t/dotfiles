@@ -9,7 +9,14 @@ description: >-
   criteria. Never modifies deliverables.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
-effort: xhigh
+effort: high
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$HOME/.claude/skills/task-orchestrator/scripts/hook.py" budget
+          timeout: 10
 ---
 
 # Task verifier
@@ -92,6 +99,13 @@ the delivered tasks, and check the request is satisfied end to end — not just 
 - You changed no deliverable. The only file you wrote is your report (evidence and gate
   logs are written by the CLI).
 - You did not relax a criterion's meaning to make it pass.
+
+## Output style
+
+Write your report and your final message answer-first, as
+`~/.claude/output-styles/answer-first.md` defines it — read it before you write: the
+verdict first, then each criterion with its state (met / not met) and its evidence, in
+complete sentences.
 
 ## Contract
 

@@ -1,11 +1,13 @@
 """Shared primitives: time, JSON I/O, locking, the session registry, workflow layout.
 
 Everything durable about a workflow lives in its workflow directory (chosen by
-the user). The only state outside it is the session registry under
-TASK_ORCH_HOME, which maps a Claude Code session id to the workflow directory
-that session drives. The registry defaults to ~/.cache/task-orchestrator
-because that is writable from inside the Claude Code Bash sandbox; losing it
-only loses the binding, which `orch bind <workflow-dir>` restores.
+the user). The only state outside it is the registry under TASK_ORCH_HOME:
+`sessions/` maps a Claude Code session id to the workflow directory that session
+drives, and `workflows/` catalogs every workflow created or bound on this
+machine so `orch list` can offer them for resuming. The registry defaults to
+~/.cache/task-orchestrator because that is writable from inside the Claude Code
+Bash sandbox; losing it only loses bindings and the catalog, which
+`orch bind <workflow-dir>` restores.
 """
 from __future__ import annotations
 
@@ -227,6 +229,51 @@ def list_bindings() -> List[Dict[str, Any]]:
     return out
 
 
+def _catalog_path(workflow_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", workflow_id)
+    return orch_home() / "workflows" / f"{safe}.json"
+
+
+def register_workflow(workflow_dir: Path, workflow_id: str, title: str) -> None:
+    """Record a workflow in the catalog (idempotent; keeps the first registration time)."""
+    path = _catalog_path(workflow_id)
+    existing = read_json(path) if path.exists() else None
+    write_json_atomic(path, {
+        "workflow_id": workflow_id,
+        "workflow_dir": str(Path(workflow_dir).resolve()),
+        "title": title,
+        "registered_at": (existing or {}).get("registered_at") or utcnow(),
+    })
+
+
+def catalog_entries() -> List[Dict[str, Any]]:
+    """Every known workflow: the catalog plus any bound workflow the catalog lacks."""
+    found: Dict[str, Dict[str, Any]] = {}
+    folder = orch_home() / "workflows"
+    if folder.is_dir():
+        for entry in sorted(folder.glob("*.json")):
+            data = read_json(entry)
+            if isinstance(data, dict) and data.get("workflow_dir"):
+                found[str(Path(data["workflow_dir"]).resolve())] = data
+    for binding in list_bindings():
+        root = str(Path(binding["workflow_dir"]).resolve())
+        found.setdefault(root, {"workflow_id": binding.get("workflow_id"), "workflow_dir": root})
+    return list(found.values())
+
+
+def find_workflow(target: str) -> Optional[Path]:
+    """A workflow directory from a path or a catalogued workflow id; None if neither."""
+    path = Path(target).expanduser()
+    if (path / ".orch" / "state.json").is_file():
+        return path.resolve()
+    for entry in catalog_entries():
+        if entry.get("workflow_id") == target:
+            root = Path(entry["workflow_dir"])
+            if (root / ".orch" / "state.json").is_file():
+                return root
+    return None
+
+
 # ---------------------------------------------------------------- layout
 
 
@@ -234,6 +281,20 @@ FROZEN_TOP_FILES = ("request.md", "plan.md", "architecture.md", "gate.json")
 GENERATED_FILES = ("index.md", "status.md", "tasks/index.md", "research/index.md")
 REPORT_DIRS = ("runs", "research", "reviews", "loops", "final")
 TASK_FILE_RE = re.compile(r"^(T\d{3,})-[a-z0-9][a-z0-9-]*\.md$")
+INTERIM_DIR = "interim"
+
+
+def interim_path(report: Path) -> Path:
+    """Where an agent stopped by the budget hook writes its interim report: an
+    `interim/` folder beside its report, same file name. Interim reports never
+    satisfy a gate and are not linked from the research index."""
+    report = Path(report)
+    return report.parent / INTERIM_DIR / report.name
+
+
+def report_for_interim(interim: Path) -> Path:
+    interim = Path(interim)
+    return interim.parent.parent / interim.name
 
 
 class Workflow:
@@ -262,6 +323,11 @@ class Workflow:
     @property
     def halt_path(self) -> Path:
         return self.root / "HALT"
+
+    @property
+    def agents_dir(self) -> Path:
+        """Per-agent activity records, written by the hooks (see activity.py)."""
+        return self.control / "agents"
 
     # plan package
     @property

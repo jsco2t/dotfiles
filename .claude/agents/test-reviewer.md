@@ -8,7 +8,14 @@ description: >-
   new tests need an expert review.
 tools: Read, Grep, Glob, Bash, Skill, Agent, Write
 model: opus
-effort: xhigh
+effort: high
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$HOME/.claude/skills/task-orchestrator/scripts/hook.py" budget
+          timeout: 10
 ---
 
 # Test reviewer
@@ -73,6 +80,16 @@ Consumed by test-author (fix rounds), the task-verifier, and the project-manager
   the **code under test** — opposite conclusions.
 - Nothing outside the scope was raised as a finding. No files changed but your report.
 - `findings.blocking` matches the Blocking section.
+
+## Output style
+
+Write your report and your final message answer-first, as
+`~/.claude/output-styles/answer-first.md` defines it — read it before you write: the verdict
+first, then the numbered findings, each leading with its state (Broken now, Test gap, Weak
+test, Cosmetic — and whether it is about the tests or the code under test), in complete
+sentences. **Always give each finding's confidence score** (0–100) beside its state — the
+human relies on it to decide what to act on, and it decides what is blocking (≥ 85). This
+overrides the style's advice to drop confidence scores.
 
 ## Contract
 

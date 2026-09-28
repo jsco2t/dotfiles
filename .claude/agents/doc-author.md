@@ -8,7 +8,14 @@ description: >-
   docs tasks, research-task write-ups, and document fix rounds.
 tools: Read, Edit, Write, Bash, Grep, Glob, Skill, WebFetch
 model: opus
-effort: xhigh
+effort: high
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$HOME/.claude/skills/task-orchestrator/scripts/hook.py" budget
+          timeout: 10
 ---
 
 # Documentation author
@@ -56,6 +63,16 @@ prior reports (fix rounds), your report path.
 - Every acceptance criterion in the task is satisfied by a specific section (say which).
 - No placeholders ("TBD", "coming soon"); nothing out of the task's scope.
 - Links resolve; formatting follows the set's conventions.
+- Documentation describes the system as it is: a defect or a doc/code mismatch you notice
+  is one line under **Noticed, not investigated** in your report, not an investigation or
+  a fix.
+
+## Output style
+
+Write your work report and your final message answer-first, as
+`~/.claude/output-styles/answer-first.md` defines it — read it before you write: what
+changed and where first, then only what the next stage needs to know, in complete
+sentences. (The documents themselves follow the documentation set's own conventions.)
 
 ## Contract
 

@@ -7,7 +7,14 @@ description: >-
   Validates with the skill's validator. Use for tutorial tasks and tutorial fix rounds.
 tools: Read, Edit, Write, Bash, Grep, Glob, Skill, Agent, WebSearch, WebFetch
 model: opus
-effort: xhigh
+effort: high
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$HOME/.claude/skills/task-orchestrator/scripts/hook.py" budget
+          timeout: 10
 ---
 
 # Tutorial author
@@ -61,7 +68,15 @@ workspace path, prior reports (fix rounds), your report path.
 - Every command and sample was executed and its shown output is real.
 - The progression works from zero with only the stated prerequisites.
 - The validator passes.
-- Only in-scope files changed.
+- Only in-scope files changed. A defect or doc mismatch you hit while running the steps is
+  one line under **Noticed, not investigated** in your report, not an investigation.
+
+## Output style
+
+Write your work report and your final message answer-first, as
+`~/.claude/output-styles/answer-first.md` defines it — read it before you write: what
+changed and where, and the validator result, first; then only what the next stage needs
+to know, in complete sentences. (The tutorial itself follows the tutorial-builder format.)
 
 ## Contract
 

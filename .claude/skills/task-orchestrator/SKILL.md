@@ -9,7 +9,7 @@ description: >
   every task passes start verification, test-forward work, independent completion
   verification, a review loop (max 3 passes), and a project-manager stamp, then a
   whole-package review. Supports revision cycles, halt/resume, and restarts.
-argument-hint: "<where to put the planning docs> <what to do> | approve | revise <feedback> | resolve <action> [T###] <notes> | resume [<workflow-dir>] | status | halt | close | list | selftest"
+argument-hint: "<where to put the planning docs> <what to do> | approve | revise <feedback> | resolve <action> [T###] <notes> | resume [<workflow-dir | workflow-id>] | status | halt | close | list | selftest"
 disable-model-invocation: true
 ---
 
@@ -84,39 +84,44 @@ Determine the mode **only** from the literal argument:
 | `approve` | apply the human's approval (`orch approve`) and begin execution |
 | `revise <feedback>` | open a plan revision (`orch revise`), then re-plan |
 | `resolve <action> [T###] <notes>` | apply the human's decision at a NEEDS_HUMAN stop (`orch resolve --action <action>`) |
-| `resume [<workflow-dir>]` | continue a workflow (rebind after a restart with `orch bind <dir>`) |
-| `status` | report `orch status`; do no work |
-| `halt` | `orch halt` (or the human can `touch <workflow>/HALT`) |
+| `resume [<workflow-dir \| workflow-id>]` | continue a workflow; in a new session, pick one and bind it — see [Pause, resume, restarts](#pause-resume-restarts) |
+| `status` | report `orch status` (it includes `orch agents` lines); do no work |
+| `halt` | pause: `orch halt` (or the human can `touch <workflow>/HALT`) — see [Pause, resume, restarts](#pause-resume-restarts) |
+| `upgrade <kind>` | bring a workflow created before kinds and research items under the current rules: `orch upgrade --kind <kind>` |
 | `close` | after the human's acceptance testing: `orch close` |
-| `list` | `orch list` |
+| `list` | `orch list` — every catalogued workflow, most recent first |
 | `selftest` | verify the hook wiring end to end (see [installation](references/installation.md)) |
 
 ## The roster
 
-| Agent | Kind | Used for |
-| --- | --- | --- |
-| `codebase-researcher` | research (`/code-sleuth`) | code exploration in planning; code research tasks |
-| `domain-researcher` | research (web, docs, context7) | external technology/standards research |
-| `atlassian-liaison` | integration (`/atlassian-toolkit`) | Jira/Confluence reads; approved Jira/Confluence writes |
-| `github-liaison` | integration (`/github-toolkit`) | issues/PRs/CI reads; approved GitHub writes |
-| `planning-author` | worker | the plan package; project-management deliverables |
-| `test-planner` | worker (`/eng-test-planning`) | the test plan in planning |
-| `test-author` | worker | tests first (red / characterization) |
-| `code-author` | worker | production code to make the tests pass |
-| `doc-author` | worker | technical documentation; research deliverables |
-| `kb-author` | worker (`/kb-updater`, `/knowledge-discovery`) | knowledge-base documents |
-| `tutorial-author` | worker (`/tutorial-builder`) | hands-on tutorials |
-| `education-author` | worker | courses, lessons, workshops, explainers, assessments |
-| `task-verifier` | verification | task start verification; completion verification; final verification |
-| `code-reviewer` | review (`/reviewomatic` local) | code review of a task diff or the whole package |
-| `test-reviewer` | review (`/test-reviewer`) | test review |
-| `doc-reviewer` | review (`/doc-reviewer`) | document review; plan-package review |
-| `architecture-reviewer` | review (`/arch-plan-reviewer`, `/arch-reviewer`) | plan architecture; code architecture |
-| `ux-reviewer` | review (`/eng-ux-reviewer`) | UI / TUI / CLI experience |
-| `project-manager` | gate | every stage transition (see rule 7) |
+| Agent | Kind | Model · effort | Used for |
+| --- | --- | --- | --- |
+| `codebase-researcher` | research (map, or `/code-sleuth` investigate) | opus · high | code research items in planning; code research tasks |
+| `domain-researcher` | research (web, docs, context7) | opus · high | external technology/standards research |
+| `atlassian-liaison` | integration (`/atlassian-toolkit`) | sonnet · high | Jira/Confluence reads; approved Jira/Confluence writes |
+| `github-liaison` | integration (`/github-toolkit`) | sonnet · high | issues/PRs/CI reads; approved GitHub writes |
+| `planning-author` | worker | opus · xhigh | the plan package; project-management deliverables |
+| `test-planner` | worker (`/eng-test-planning`) | opus · high | the test plan in planning |
+| `test-author` | worker | opus · xhigh | tests first (red / characterization) |
+| `code-author` | worker | opus · xhigh | production code to make the tests pass |
+| `doc-author` | worker | opus · high | technical documentation; research deliverables |
+| `kb-author` | worker (`/kb-updater`, `/knowledge-discovery`) | opus · high | knowledge-base documents |
+| `tutorial-author` | worker (`/tutorial-builder`) | opus · high | hands-on tutorials |
+| `education-author` | worker | opus · high | courses, lessons, workshops, explainers, assessments |
+| `task-verifier` | verification | opus · high | task start verification; completion verification; final verification |
+| `code-reviewer` | review (`/reviewomatic` local) | opus · xhigh | code review of a task diff or the whole package |
+| `test-reviewer` | review (`/test-reviewer`) | opus · high | test review |
+| `doc-reviewer` | review (`/doc-reviewer`) | opus · high | document review; plan-package review |
+| `architecture-reviewer` | review (`/arch-plan-reviewer`, `/arch-reviewer`) | opus · xhigh | plan architecture; code architecture |
+| `ux-reviewer` | review (`/eng-ux-reviewer`) | opus · high | UI / TUI / CLI experience |
+| `project-manager` | gate | opus · high | every stage transition (see rule 7); research plans; interim reports |
 
-Task types decide authors and **minimum** reviewers (a plan may add reviewers, never
-remove them) — see [references/plan-package.md](references/plan-package.md#task-types).
+Each agent definition pins its model and effort (`roster.py` is the source; `orch doctor`
+checks the files), registers the budget hook, and writes answer-first
+(`~/.claude/output-styles/answer-first.md`); reviewers always report confidence scores.
+These choices do not reach the sub-agents a skill fans out to. Task types decide authors
+and **minimum** reviewers (a plan may add reviewers, never remove them) — see
+[references/plan-package.md](references/plan-package.md#task-types).
 
 ## How to dispatch any agent
 
@@ -138,7 +143,8 @@ remove them) — see [references/plan-package.md](references/plan-package.md#tas
    lacks the block). Run `orch status`. If `orch ledger --tail 3` shows the result **invalid**,
    resume **the same agent** with SendMessage (its agent id) quoting the errors, and ask it to
    re-send its hand-back (SubagentHandback, if it has that tool) ending with the corrected block
-   and to end its final text message with the same block.
+   and to end its final text message with the same block. A result with status `interim`
+   means the budget hook stopped the agent — see [Time budgets](#time-budgets-and-interim-reports).
 5. Keep each author's agent id. Fix rounds and follow-ups go to the **same** author via
    SendMessage so it keeps its context; only start a fresh author when the PM or a failed
    attempt says the author's approach was wrong.
@@ -164,6 +170,11 @@ the orchestrator routes. This is deliberate: one coordinator, no conflicting dec
   budget, and the human decides at exhaustion.
 - **Decisions log.** `decisions.md` holds every clarification and human decision; every
   brief tells the agent to read it first, and the SubagentStart hook repeats that.
+- **Observations are for the human.** Agents record anything outside their brief under
+  "Noticed, not investigated". Never turn one into a research item, a brief note, or a
+  task: surface the ones worth it to the human (at submit, and in the final report). Add
+  research for one only when the plan cannot be written without it, say so in the item's
+  context, and let the PM's research-plan review judge it.
 
 ## Stage 1 — Plan
 
@@ -176,18 +187,37 @@ the orchestrator routes. This is deliberate: one coordinator, no conflicting dec
 2. **Workspaces.** Identify every directory the work will change (repositories, doc trees).
    Ask if unclear.
 3. **Init.** Write the verbatim request to a scratchpad file, then
-   `orch init <location> --title "<title>" --workspace <name>=<path> ... --request-file <file>`.
-4. **Research** (parallel, at most 3 at a time): `codebase-researcher` per code area,
-   `domain-researcher` for external technology, liaisons for referenced tickets/issues/PRs.
-   `orch brief research --agent <agent> --topic "<question>"`. Research is breadth —
-   dispatch as much as the problem needs.
-5. **PM research check:** `orch brief pm-research --agent project-manager`. Dispatch any
-   research it says is missing, then re-check.
-6. **Plan package:** `orch brief plan --agent planning-author`. It writes `plan.md`,
+   `orch init <location> --title "<title>" --kind <kind> --workspace <name>=<path> ... --request-file <file>`.
+   `--kind` is what the workflow delivers: `code`, `docs`, `kb`, `tutorial`, `education`,
+   `research`, `pm`, `integration`, or `mixed`. It sets the non-goals every brief carries
+   (a `kb` workflow documents code; it never fixes, tests, or audits it) and how deep
+   planning research goes. Ask the human if the request does not make it clear.
+4. **Research plan.** Break what the plan needs to know into **focused research items** —
+   breadth comes from more items, never bigger ones. Each item is one agent, at most 3
+   short questions, a "done when" line (what answer the planner needs), and an optional
+   context note (pins, paths, constraints — at most 150 words, no extra asks):
+   `orch research add --agent <agent> --title "..." --questions-file <file> --done-when "..." [--context-file <file>] [--mode map|investigate]`.
+   Write the files in Bash with a quoted heredoc outside the workflow directory.
+   `codebase-researcher` per code area (mode `map` — a structure map — is the default for
+   documentation kinds; `investigate` runs /code-sleuth), `domain-researcher` for external
+   technology, liaisons for referenced tickets/issues/PRs. **For docs, kb, tutorial, and
+   education workflows, planning research is a structure map** — enough to split the
+   documents into tasks, not their content; each document task researches its own area.
+5. **PM research-plan review:** `orch brief --plan pm-research-plan --agent project-manager`.
+   It approves or rejects every proposed item before anything is dispatched. Rework a
+   rejection as its report says (`orch research drop R## --reason ...`, then a narrower
+   `orch research add`) and re-review.
+6. **Research** (parallel, at most 3 at a time): `orch brief --plan research --item R## --agent <agent>`
+   per approved item. A research brief carries only its item; there is no `--note` for it.
+   `orch research list -v` shows every item and its status.
+7. **PM research check:** `orch brief pm-research --agent project-manager` — sufficiency and
+   proportion (did each report stay inside its questions?). Register any gap it names as a
+   new item (back to step 5), then re-check.
+8. **Plan package:** `orch brief plan --agent planning-author`. It writes `plan.md`,
    `architecture.md` (when warranted), `gate.json` commands, and `tasks/T###-*.md` per
    [references/plan-package.md](references/plan-package.md), and runs `orch validate`.
-7. **Test plan** (if any code/test tasks): `orch brief test-plan --agent test-planner`.
-8. **Plan reviews** — sequentially:
+9. **Test plan** (if any code/test tasks): `orch brief test-plan --agent test-planner`.
+10. **Plan reviews** — sequentially:
    - `doc-reviewer` (always): `orch brief plan-review --agent doc-reviewer --mode plan`
    - `architecture-reviewer --mode plan` when the change has moderate+ architectural
      impact (new subsystem/package/interface, cross-layer change, new structural
@@ -198,12 +228,13 @@ the orchestrator routes. This is deliberate: one coordinator, no conflicting dec
    Send findings back to the **same** planning-author (SendMessage, with
    `orch brief plan --agent planning-author --note-file <file naming the reports>`),
    then re-review — any plan edit makes earlier plan reviews stale.
-9. **PM plan audit:** `orch brief pm-plan --agent project-manager`. Fix and re-audit until it
-   passes. `orch validate` must be clean.
-10. **Submit:** `orch submit`. Present to the human: a short summary of the plan, the path to
-    `index.md` (the roadmap), every open question, and exactly how to respond
-    (`/task-orchestrator approve`, or `/task-orchestrator revise <feedback>` — including
-    answers to open questions). End the turn.
+11. **PM plan audit:** `orch brief pm-plan --agent project-manager`. Fix and re-audit until it
+    passes. `orch validate` must be clean.
+12. **Submit:** `orch submit`. Present to the human: a short summary of the plan, the path to
+    `index.md` (the roadmap), every open question, the research observations worth their
+    attention, and exactly how to respond (`/task-orchestrator approve`, or
+    `/task-orchestrator revise <feedback>` — including answers to open questions). End the
+    turn.
 
 ## Stage 2 — Approval
 
@@ -272,21 +303,87 @@ recorded non-blocking concern, the PM's process observations, and next steps:
 "After your acceptance testing: `/task-orchestrator close`, or
 `/task-orchestrator revise <what needs to change>`." Never close on your own.
 
+## Time budgets and interim reports
+
+Every roster agent's frontmatter registers the budget hook (`hook.py budget`), which sees
+each of its tool calls. Researchers and liaisons get **30 active minutes** per dispatch;
+other roles are logged, not limited (`budgets.agent_minutes` in state). The clock pauses
+while an agent is not running. At the agent's first tool call past its budget, the hook
+refuses everything except writing its **interim report** (the `interim/` folder beside its
+report) and handing back; it finishes with status `interim`. Interim reports never satisfy
+a gate.
+
+1. `orch status` shows it first (`INTERIM — …`). Dispatch the PM's review:
+   `orch brief pm-interim --of <agent_id> --agent project-manager`. The PM compares the brief
+   with the interim report and the tool-call log (`orch agents <id> --calls`) and decides
+   `continue`, `redirect` (continue only on what it names), or `split` (finish the answered
+   part now; the rest becomes new research items), plus `grant_minutes`.
+2. `orch agent continue <agent_id>` applies the decision and prints the message to send;
+   SendMessage it to the **same** agent. For `split`, register the PM's listed questions as
+   new items (`orch research add`) — they go through the research-plan review like any other.
+   `split` exists only for planning research: in a task stage the PM decides `continue` or
+   `redirect` (`agent continue` refuses a split there), and a task too big as planned is an
+   `orch deviation` for the human.
+3. Each agent gets 2 extensions (`budgets.time_grants`). After that `orch agent continue`
+   refuses: `orch needs-human --kind time_budget --agent <id> --summary "..."`, present the PM's
+   review, and stop. The human answers `/task-orchestrator resolve continue [minutes] <notes>`
+   (one more extension) or any reply (`orch resolve --action answer`; follow their words).
+
+`orch agents` lists every agent that needs attention — what it is on, active minutes against
+its budget, tool calls, its last tool — and `orch status` includes the same lines.
+
 ## Human boundaries
 
 Stop and present clearly — what happened, your recommendation, and the exact command — at:
 AWAITING_APPROVAL, NEEDS_HUMAN (`question`, `readiness`, `environment`, `review_budget`,
 `task_budget`, `final_review_budget`, `external_write`, `continuation_budget`,
-`integrity`), PLAN_CHANGE_REQUIRED, HALTED, and DONE. Outside these, the Stop hook keeps
-you working; do not ask the human for permission between steps.
+`integrity`, `time_budget`), PLAN_CHANGE_REQUIRED, HALTED, and DONE. Outside these, the Stop
+hook keeps you working; do not ask the human for permission between steps.
 
-## Resume, restarts, compaction
+## Pause, resume, restarts
 
-- `/task-orchestrator resume` → `orch status`, then continue from the first unmet item.
-- After a restart the session id changes: `/task-orchestrator resume <workflow-dir>` →
-  `orch bind <workflow-dir>` → `orch status`.
-- After compaction, the SessionStart hook re-injects the rules and the next action. Re-read
-  this skill and trust `orch status` over memory.
+**Pause** — `/task-orchestrator halt` → `orch halt`. From then on no new agent may be
+dispatched (hook-enforced). Running read-only agents are stopped at their next tool call and
+write interim reports; authors and planners finish their current pass. End your turn: the
+workflow becomes HALTED. `orch status` says `safe to exit: yes` once no agent is running —
+tell the human.
+
+**Resume, same session** — `/task-orchestrator resume` → `orch resume` (the human's typed
+command is the authority to un-halt) → `orch status`. Resume every agent paused with an
+interim report: `orch agent continue <id>` and SendMessage the printed text — no PM review
+is needed after a pause. Then continue from the first unmet item.
+
+**Resume in a new session** (after a reboot, or later):
+
+- `claude -r` and pick the old session keeps its session id (unless `--fork-session`), so
+  the binding still holds: the SessionStart hook marks every agent that was running when the
+  old process ended as INTERRUPTED and injects the next action, and the transcript still
+  knows every agent id. Then `/task-orchestrator resume` as above.
+- In a fresh `claude`, `/task-orchestrator resume` with no argument: run `orch list --json`.
+  One workflow → confirm it; two to four → AskUserQuestion; more → show the numbered list
+  and let the human type the number or id. Then `orch bind <dir>` and `orch status`. If the
+  workflow is HALTED, `orch resume` needs the human's typed command *after* binding — ask
+  them to type `/task-orchestrator resume` once more. A human who types
+  `/task-orchestrator resume <dir | workflow-id>` directly is recorded before the bind, so
+  no second command is needed.
+- `orch bind` refuses a workflow another session drove in the last 15 minutes: if that
+  session is gone (a restart or crash), re-run with `--take-over`, after confirming with the
+  human.
+- Agents that were running when the old session died show as `INTERRUPTED` in `orch
+  status` / `orch agents`. For each: `orch agent continue <id>` prints a message — try
+  SendMessage to that agent id first (its transcript is on disk). If that fails, dispatch a
+  fresh agent for the same stage. An interrupted author may have left partial edits: the
+  next PM scope check covers them against the task diff.
+
+**Workflows from before kinds and research items** — while one is still planning,
+`orch status` says `UPGRADE NEEDED` and planning briefs are refused. Stop and ask the human
+which kind it delivers; they type `/task-orchestrator upgrade <kind>`, then run `orch upgrade
+--kind <kind>`. Its research carries over, the PM's research check is made again under the
+current rules, and any further research is a focused item. Never re-dispatch an old brief
+that never got a report. (Workflows already executing carry on without upgrading.)
+
+**Compaction** — the SessionStart hook re-injects the rules and the next action. Re-read
+this skill and trust `orch status` over memory.
 
 ## Out of scope for the orchestrator
 

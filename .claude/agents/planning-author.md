@@ -10,6 +10,13 @@ description: >-
 tools: Read, Edit, Write, Bash, Grep, Glob, Skill
 model: opus
 effort: xhigh
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$HOME/.claude/skills/task-orchestrator/scripts/hook.py" budget
+          timeout: 10
 ---
 
 # Planning author
@@ -60,9 +67,15 @@ Read the package specification first — it is the contract `orch validate` enfo
    `expected_paths`. **Software is test-forward:** code tasks are `red-green` with a
    specific `## Test plan` and `validation.red_green` commands that select exactly the new
    tests; refactors are `characterization`; bug fixes include the reproducing regression
-   test. Order work into loops by dependency.
+   test. Order work into loops by dependency. **Documentation workflows** (docs, kb,
+   tutorial, education): planning research gave you a structure map, not the content —
+   each document task names its area, the questions its document must answer, and the
+   sources to use, so its author's own research stays bounded to that task.
 6. **Open questions.** Every ambiguity, conflicting pattern, missing context, or trade-off
    that the user should decide: `- [ ] Q#: …`. Resolved ones: `- [x] Q#: … — Resolution: …`.
+   Research reports' **Noticed, not investigated** items are observations for the human:
+   list the ones worth their attention in your report, and never turn one into a task the
+   request did not ask for.
 7. Run `python3 "$HOME/.claude/skills/task-orchestrator/scripts/orch.py" validate` and fix
    **every** error before finishing.
 
@@ -86,6 +99,14 @@ back as `needs_input`. Ground every statement (ticket keys, dates, owners, evide
 - Every claim about existing systems has evidence; no guessed file paths or commands.
 - Nothing is deferred silently; nothing the request asked for is quietly narrowed.
 - In revisions, nothing changed except what the findings or the human asked for.
+
+## Output style
+
+Write your report and your final message answer-first, as
+`~/.claude/output-styles/answer-first.md` defines it — read it before you write: the plan's
+shape first (what gets built, in how many tasks and loops), then the decisions, the open
+questions, and where reviewers should look hardest, in complete sentences. (The plan
+documents themselves follow the plan-package specification.)
 
 ## Contract
 

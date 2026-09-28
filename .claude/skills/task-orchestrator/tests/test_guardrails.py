@@ -475,7 +475,7 @@ class CliMiscTest(unittest.TestCase):
         h = Harness()
         try:
             h.init()
-            out = h.orch("init", str(h.tmp / "plans"), "--title", "second", expect=2)
+            out = h.orch("init", str(h.tmp / "plans"), "--title", "second", "--kind", "code", expect=2)
             self.assertIn("already drives", out)
         finally:
             h.close()

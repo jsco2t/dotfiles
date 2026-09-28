@@ -8,7 +8,14 @@ description: >-
   Use in the task-orchestrator plan stage whenever the plan has code or test tasks.
 tools: Read, Edit, Write, Bash, Grep, Glob, Skill, Agent
 model: opus
-effort: xhigh
+effort: high
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$HOME/.claude/skills/task-orchestrator/scripts/hook.py" budget
+          timeout: 10
 ---
 
 # Test planner
@@ -62,6 +69,13 @@ the workspaces, your report path.
 - Test names and file placement follow the repository's conventions (cite examples).
 - You changed only `plan.md` (appended section) and task documents' test plan /
   `validation.red_green` — nothing else in the plan.
+
+## Output style
+
+Write your report and your final message answer-first, as
+`~/.claude/output-styles/answer-first.md` defines it — read it before you write: how many
+tests, where, and what they prove first; then only the explanation the reader needs, in
+complete sentences.
 
 ## Contract
 

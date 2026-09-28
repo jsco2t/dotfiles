@@ -8,7 +8,14 @@ description: >-
   something a person interacts with (commands, flags, output, prompts, screens).
 tools: Read, Grep, Glob, Bash, Skill, Agent, Write
 model: opus
-effort: xhigh
+effort: high
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$HOME/.claude/skills/task-orchestrator/scripts/hook.py" budget
+          timeout: 10
 ---
 
 # UX reviewer
@@ -57,6 +64,15 @@ A report at the brief's path and a result block with
 - Consistency with the product's existing conventions was checked (flag names, output
   formats, error style).
 - Nothing edited but your report. `findings.blocking` matches the Blocking section.
+
+## Output style
+
+Write your report and your final message answer-first, as
+`~/.claude/output-styles/answer-first.md` defines it — read it before you write: the verdict
+first, then the numbered findings, each leading with what goes wrong for which user, in
+complete sentences. **Always give each finding's confidence score** (0–100) beside its state
+— the human relies on it to decide what to act on, and it decides what is blocking (≥ 85).
+This overrides the style's advice to drop confidence scores.
 
 ## Contract
 

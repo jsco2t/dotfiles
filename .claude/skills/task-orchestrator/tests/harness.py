@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -182,6 +183,26 @@ class Harness:
             return None
         return json.loads(text)["hookSpecificOutput"]["permissionDecisionReason"]
 
+    def budget(self, tool: str, tool_input: Dict[str, Any], agent: str, agent_id: str) -> Optional[str]:
+        """One tool call through the agent's frontmatter budget hook; the refusal reason, or None."""
+        full = {"session_id": self.session, "cwd": str(self.tmp), "hook_event_name": "PreToolUse",
+                "tool_name": tool, "tool_input": tool_input, "agent_type": agent, "agent_id": agent_id}
+        text, _ = hooks.dispatch_budget(full)
+        return json.loads(text)["hookSpecificOutput"]["permissionDecisionReason"] if text else None
+
+    def subagent_start(self, agent: str, agent_id: str) -> Optional[str]:
+        text, _ = self.hook({"hook_event_name": "SubagentStart", "agent_type": agent, "agent_id": agent_id})
+        return json.loads(text)["hookSpecificOutput"]["additionalContext"] if text else None
+
+    def age_agent(self, agent_id: str, minutes: int) -> None:
+        """Pretend the agent's open segment started `minutes` ago."""
+        assert self.wf is not None
+        path = self.wf / ".orch" / "agents" / f"{agent_id}.json"
+        info = json.loads(path.read_text())
+        start = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        info["segments"][-1]["start"] = start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        path.write_text(json.dumps(info))
+
     def state(self) -> Dict[str, Any]:
         return json.loads((self.wf / ".orch" / "state.json").read_text())
 
@@ -275,12 +296,33 @@ class Harness:
         time.sleep(0.01)
 
     # -------------------------------------------------------- scenario steps
-    def init(self) -> None:
+    def init(self, kind: str = "code") -> None:
         req = self.tmp / "request.txt"
         req.write_text("Please add multiplication to calc.\n")
         out = self.orch("init", str(self.tmp / "plans"), "--title", "Add mul", "--workspace", f"code={self.ws}",
-                        "--request-file", str(req))
+                        "--request-file", str(req), "--kind", kind)
         self.wf = Path(out.splitlines()[0])
+
+    def add_research_item(self, agent: str = "codebase-researcher", title: str = "calc module map",
+                          questions: Tuple[str, ...] = ("Where is calc defined, and what does it export?",),
+                          done_when: str = "The planner knows which file gains mul.",
+                          extra: Tuple[str, ...] = (), expect: Optional[int] = 0) -> str:
+        """Register a research item; returns its id (or the CLI output when a refusal is expected)."""
+        qfile = self.tmp / f"questions-{time.time_ns()}.md"
+        qfile.write_text("".join(f"- {q}\n" for q in questions))
+        out = self.orch("research", "add", "--agent", agent, "--title", title, "--questions-file", str(qfile),
+                        "--done-when", done_when, *extra, expect=expect)
+        return out.split()[0] if expect == 0 else out
+
+    def approve_research(self, *items: str) -> Dict[str, Any]:
+        return self.agent(["pm-research-plan"], "project-manager",
+                          mutate=lambda f: f.update(approved=list(items), rejected=[]))
+
+    def research_phase(self) -> None:
+        item = self.add_research_item()
+        self.approve_research(item)
+        self.agent(["research", "--item", item], "codebase-researcher")
+        self.agent(["pm-research"], "project-manager")
 
     def write_plan(self, **task_overrides: Any) -> None:
         assert self.wf is not None
@@ -294,8 +336,7 @@ class Harness:
 
     def plan_to_approval(self) -> None:
         self.init()
-        self.agent(["research", "--topic", "calc module"], "codebase-researcher")
-        self.agent(["pm-research"], "project-manager")
+        self.research_phase()
         self.agent(["plan"], "planning-author", work=self.write_plan)
         self.agent(["test-plan"], "test-planner")
         self.agent(["plan-review"], "doc-reviewer")

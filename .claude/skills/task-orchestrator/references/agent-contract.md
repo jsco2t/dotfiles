@@ -51,9 +51,12 @@ recorded** and you will be resumed to fix it. Rules:
 
 | Field | Meaning |
 | --- | --- |
-| `status` | `complete` — you finished the stage. `needs_input` — you cannot finish without answers (list them in `questions` and in the report). `blocked` — the plan cannot be followed as written (list `deviations`). |
+| `status` | `complete` — you finished the stage. `needs_input` — you cannot finish without answers (list them in `questions` and in the report). `blocked` — the plan cannot be followed as written (list `deviations`). `interim` — the budget hook stopped you (§10) and you wrote an interim report. |
 | `verdict` | Gate stages (readiness, pm-*, verification, review, final-review, final-verification, plan-review): `pass` or `fail`. Work stages (work, fix, research, plan, test-plan, final-fix): `n/a`. |
-| `report` | Absolute path from the brief. Its file name ends in `.<your-agent-type>.md`. |
+| `report` | Absolute path from the brief. Its file name ends in `.<your-agent-type>.md`. For `interim`, the interim report's path (the `interim/` folder beside it, same name). |
+| `item` | research: the research item id from the brief. |
+| `approved`, `rejected` | pm-research-plan: the item ids you approved; `{"id", "reason"}` for each you rejected. |
+| `interim_agent`, `decision`, `grant_minutes` | pm-interim: the agent id under review; `continue`, `redirect`, or `split`; the extra active minutes (1–60). |
 | `criteria` | verification / final-verification: one entry per acceptance criterion id — `{"id": "AC1", "met": true, "evidence": "<concrete>"}`. `met` is a JSON boolean; evidence is never empty for a met criterion. |
 | `findings` | review / final-review: integer counts. `blocking` = findings with confidence ≥ 85 that must be fixed; `recorded` = non-blocking findings; `disputes_ruled` = author disputes you ruled on. |
 | `scan_digest` | pm-accept: the digest of the scan you adjudicated (from the brief). |
@@ -68,9 +71,14 @@ Booleans are JSON `true`/`false`; counts are integers; never leave `"pass | fail
 - Write your full report to the brief's report path, using the Write tool. Hooks allow you
   to write **only** files whose name ends in `.<your-agent-type>.md` inside the workflow
   directory (plus, for authors, files inside the declared workspaces).
-- Structure: a one-paragraph summary with the verdict first, then the substance (findings,
-  evidence, criteria table, what changed), then anything the next stage must know.
+- Structure: answer-first, as `~/.claude/output-styles/answer-first.md` defines it — the
+  verdict or answer first, then the substance (findings, evidence, criteria, what changed),
+  then anything the next stage must know. Every finding leads with its state, in complete
+  sentences; tables only for short, uniform values. **Reviewers always give each finding's
+  confidence score** (it decides blocking, and the human relies on it) — this overrides the
+  style's advice to drop scores.
 - Every claim cites evidence: `path:line`, a command and its result, a test name, a URL.
+- End with **Noticed, not investigated** when you saw anything outside your brief (§9).
 - Never edit `.orch/`, plan documents after approval, generated `index.md`/`status.md`
   files, `decisions.md`, or another agent's report.
 
@@ -118,8 +126,9 @@ interactive use ask questions; inside an agent:
 
 Subagents may run only these `orch` commands (hook-enforced):
 `status`, `evidence`, `gate run`, `wait`, `snapshot`, `task diff`, `task scan`, `task status`,
-`ledger`, `validate`, `plan-hash`, `where`. Everything else (notes, starting, accepting,
-failing tasks, rounds, loops, approvals) is the orchestrator's. No command may reference
+`ledger`, `validate`, `plan-hash`, `where`, `agents` (e.g. `agents <id> --calls` — an agent's
+tool-call log). Everything else (notes, starting, accepting, failing tasks, rounds, loops,
+approvals, research items, `agent continue`) is the orchestrator's. No command may reference
 `.orch/`.
 
 ```bash
@@ -141,3 +150,42 @@ Before you finish, check:
    changed only in-scope files).
 4. I did not weaken a test, an assertion, a criterion, or a finding to make progress.
 5. My result block matches my report, uses the brief's identity values, and is valid JSON.
+6. I did nothing my brief did not ask for; what I noticed outside it is recorded, not pursued.
+
+## 9. Scope: record, don't investigate
+
+Your brief — its questions, its task, its diff — is the whole job, and every brief carries
+the workflow's **non-goals** (for a documentation workflow: document what the code does;
+never fix, test, benchmark, security-review, or judge it). "Do everything my stage asked"
+means all of *that*, not everything nearby.
+
+When something outside it catches your eye — docs that disagree with the code, code that
+looks wrong, a risk, a gap — write **one line** under **Noticed, not investigated** in your
+report (what you saw, `file:line` or source) and move on. Re-verifying it, grading it,
+tracing its cause, or proposing a fix is investigation: do it only when your brief's own
+questions ask for it. The orchestrator surfaces these lines to the human; it never turns
+them into new work on its own.
+
+## 10. Time budgets, pausing, and interim reports
+
+Every roster agent's definition registers the budget hook, which sees each of your tool
+calls. It stops you:
+
+- **time** — when your active minutes reach your type's budget (researchers and liaisons:
+  30 per dispatch; your brief says so). The clock pauses while you are not running, and
+  the check happens at your next tool call, so you may run somewhat past it.
+- **pause** — when the human pauses the workflow, if you are a read-only role (authors
+  and planners finish their current pass).
+
+From then on every tool call except writing your interim report and handing back is
+refused. Do not work around it. Write the interim report to the path your brief's "If you
+are stopped" section gives — the `interim/` folder beside your report, same file name:
+what is done (with evidence), what remains and why, whether your scope grew and what led
+you there, and what you would do with more time (and how many minutes). Finish with your
+brief's result block, `"status": "interim"`, `"report"` set to the interim path.
+
+A time stop goes to the project-manager, which decides `continue`, `redirect` (only what it
+names), or `split` (finish the answered part; the rest becomes separate research). You are
+resumed with its decision and a grant of minutes. After a pause you are resumed when the
+human resumes the workflow. Either way, you then finish normally — your full report at the
+brief's original path, `"status": "complete"`.

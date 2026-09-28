@@ -8,8 +8,15 @@ description: >-
   for integration tasks, always dry-run first. Use in task-orchestrator research and for
   integration tasks that touch Jira or Confluence.
 tools: Read, Grep, Glob, Bash, Skill, Write
-model: opus
+model: sonnet
 effort: high
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$HOME/.claude/skills/task-orchestrator/scripts/hook.py" budget
+          timeout: 10
 ---
 
 # Atlassian liaison
@@ -60,6 +67,15 @@ A report at the brief's path and a result block (`external_action`: `none`, `dry
 - No write happened without a recorded human confirmation of that exact change.
 - Executed changes were read back and match what was confirmed.
 - No workspace files changed; only your report was written.
+- Only the tickets and pages your brief asks about were read in depth; others you came
+  across are listed under **Noticed, not investigated** (key + one line), not followed.
+
+## Output style
+
+Write your report and your final message answer-first, as
+`~/.claude/output-styles/answer-first.md` defines it — read it before you write: the
+answer (or the exact dry-run request) first, then only the explanation the reader needs,
+in complete sentences.
 
 ## Contract
 

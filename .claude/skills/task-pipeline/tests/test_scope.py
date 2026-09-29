@@ -3,6 +3,7 @@ the human confirms it."""
 from __future__ import annotations
 
 import unittest
+from datetime import date
 
 from harness import Harness
 
@@ -27,6 +28,56 @@ class RosterSuggestTest(unittest.TestCase):
         out = self.h.tp("roster", "suggest", "--kinds", "code", wf=False).out
         self.assertIn("test-author", out)
         self.assertIn("code-author", out)
+
+
+class InitTest(unittest.TestCase):
+    """The location the human names is a parent: the workflow always creates, and owns, its
+    own `<date>-<slug>` folder beneath it."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.loc = self.h.root / "planning"
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def init(self, title: str, *extra: str, expect: int = 0, loc=None):
+        return self.h.tp("init", str(loc or self.loc), "--title", title, "--request-file", str(self.h.request),
+                         *extra, expect=expect, wf=False)
+
+    def test_init_creates_a_dated_slugged_folder_it_owns(self) -> None:
+        out = self.init("Stratum KB: v1.0 (draft)!").out
+        wf = self.loc.resolve() / f"{date.today().isoformat()}-stratum-kb-v1-0-draft"   # tp reports resolved paths
+        self.assertEqual(out.splitlines()[0], f"workflow: {wf}")
+        self.assertTrue((wf / ".tp" / "state.json").exists())
+        self.assertTrue((wf / "request.md").exists())
+        self.assertFalse((self.loc / ".tp").exists())             # the location itself is untouched
+        self.assertIn(f"-w {wf}", out)                           # every later command uses the new folder
+
+    def test_the_same_title_on_the_same_day_gets_its_own_folder(self) -> None:
+        first = self.init("Calc KB").out.splitlines()[0]
+        second = self.init("Calc KB").out.splitlines()[0]
+        self.assertNotEqual(first, second)
+        self.assertTrue(second.endswith("-calc-kb-2"))
+
+    def test_the_old_w_form_still_creates_the_sub_folder(self) -> None:
+        out = self.h.tp("-w", str(self.loc), "init", "--title", "Calc KB", "--request-file", str(self.h.request),
+                        wf=False).out
+        self.assertIn(f"{date.today().isoformat()}-calc-kb", out.splitlines()[0])
+        self.assertFalse((self.loc / ".tp").exists())
+
+    def test_a_missing_location_is_created(self) -> None:
+        self.init("Calc KB", loc=self.h.root / "new" / "deeper")
+        self.assertEqual(len(list((self.h.root / "new" / "deeper").iterdir())), 1)
+
+    def test_a_workflow_folder_is_not_a_location(self) -> None:
+        wf = self.init("Calc KB").out.splitlines()[0].split("workflow: ", 1)[1]
+        self.assertIn("workflow", self.init("Another", loc=wf, expect=2).text)
+
+    def test_long_titles_make_short_slugs(self) -> None:
+        wf = self.init("A " + "very long title " * 12).out.splitlines()[0]
+        self.assertLessEqual(len(wf.rsplit("/", 1)[1]), len("2026-09-29-") + 48)
+        self.assertFalse(wf.endswith("-"))
 
 
 class ScopeCheckTest(unittest.TestCase):

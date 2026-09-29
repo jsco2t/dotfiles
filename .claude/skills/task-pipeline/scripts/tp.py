@@ -10,6 +10,7 @@ import json
 import re
 import shutil
 import sys
+from datetime import date
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -21,18 +22,36 @@ from pipeline import scope as scopemod  # noqa: E402
 from pipeline.common import TPError, Workflow, now_iso  # noqa: E402
 
 
-def cmd_init(wf: Workflow, args: argparse.Namespace) -> str:
-    if wf.exists():
-        raise TPError(f"{wf.root} already holds a workflow — `tp -w {wf.root} status`.")
+def slugify(title: str, limit: int = 48) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    if len(slug) > limit:
+        slug = slug[:limit].rsplit("-", 1)[0] if "-" in slug[:limit] else slug[:limit]
+    return slug or "workflow"
+
+
+def cmd_init(location: Path, args: argparse.Namespace) -> str:
+    """The location the human names is a parent: the workflow creates and owns
+    `<location>/<YYYY-MM-DD>-<slug>` beneath it, and every later command uses that folder."""
+    location = location.expanduser().resolve()
+    if Workflow(location).exists():
+        raise TPError(f"{location} is itself a workflow folder; give the location it should be created under "
+                      f"(its parent, {location.parent}), or `tp -w {location} status` to continue it.")
     if not Path(args.request_file).is_file():
         raise TPError(f"{args.request_file} does not exist: save the human's request there first.")
-    wf.meta.mkdir(parents=True, exist_ok=True)
+    base = f"{date.today().isoformat()}-{slugify(args.title)}"
+    root, n = location / base, 1
+    while root.exists():
+        n += 1
+        root = location / f"{base}-{n}"
+    wf = Workflow(root)
+    wf.meta.mkdir(parents=True)
     shutil.copyfile(args.request_file, wf.root / "request.md")
     state = {"version": 1, "title": args.title, "phase": "SCOPING", "created": now_iso(),
              "budget_minutes": args.budget, "tasks": {}, "recon": {}, "in_flight": {}}
     wf.save(state)
-    wf.event("init", title=args.title)
-    return (f"workflow created at {wf.root} (SCOPING).\n"
+    wf.event("init", title=args.title, location=str(location))
+    return (f"workflow: {wf.root}\n"
+            f"Created under {location} (SCOPING). Use `-w {wf.root}` for every later command.\n"
             f"Next: `tp -w {wf.root} survey <repo> --name <ws>` for each source repo, then draft scope.json.")
 
 
@@ -68,7 +87,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("-w", "--workflow", help="the workflow directory")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("init", help="create a workflow (SCOPING)")
+    s = sub.add_parser("init", help="create a workflow in its own <date>-<slug> folder under a location (SCOPING)")
+    s.add_argument("location", nargs="?", help="where the human wants planning documents; the workflow gets "
+                   "its own sub-folder here (-w is accepted as the location too)")
     s.add_argument("--title", required=True)
     s.add_argument("--request-file", required=True, help="the human's request, verbatim")
     s.add_argument("--budget", type=int, help="minutes for the whole job, planning included")
@@ -210,12 +231,15 @@ def dispatch(args: argparse.Namespace) -> str:
         return cmd_check_docs(args)
     if args.cmd == "schema":
         return json.dumps(schemas.SCHEMAS[args.name], indent=1)
+    if args.cmd == "init":
+        location = args.location or args.workflow
+        if not location:
+            raise TPError("`tp init <location>` needs the location the human named for planning documents.")
+        return cmd_init(Path(location), args)
     if not args.workflow:
         raise TPError(f"`tp {args.cmd}` needs -w <workflow dir>.")
     wf = Workflow(Path(args.workflow))
     c = args.cmd
-    if c == "init":
-        return cmd_init(wf, args)
     if c == "status":
         return run.cmd_status(wf, args.json)
     if c == "next":

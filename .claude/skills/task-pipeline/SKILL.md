@@ -6,7 +6,7 @@ description: >
   manager, at most three sub-agents at a time, scripted gates, and structured-file hand-offs.
   Scope and a research budget are agreed with the human first; research runs in small, strictly
   scoped items; review runs once, in bulk, at the end. Invoked explicitly.
-argument-hint: "<workflow dir> <request> | resume <workflow dir> | halt (or hault) | status <workflow dir>"
+argument-hint: "<location for planning docs> <request> | resume <workflow dir> | halt (or hault) | status <workflow dir>"
 disable-model-invocation: true
 ---
 
@@ -39,8 +39,10 @@ word-split a variable). **`tp next` always says what to do next** — run it aft
 
 ## Stage 1 — Scope and research budget (one round with the human)
 
-1. The first argument is the workflow directory; if missing, ask. Save the request verbatim to a
-   file, then `tp init --title "<title>" --request-file <file> [--budget <minutes>]`.
+1. The first argument is the **location** for planning documents; if missing, ask. Save the
+   request verbatim to a file, then run `python3 ~/.claude/skills/task-pipeline/scripts/tp.py init
+   <location> --title "<title>" --request-file <file> [--budget <minutes>]`. It always creates the
+   workflow's own `<location>/<date>-<slug>/` folder and prints it: that is `-w` from then on.
 2. **Size it yourself first**, in ten minutes or less and with no agents: `tp survey <repo> --name
    <ws>` per repository, and `tp survey-issue jira:KEY` or `gh:owner/repo#N` for a named issue or
    epic (it needs network access to that host). It prints children, thin issues, links, and a

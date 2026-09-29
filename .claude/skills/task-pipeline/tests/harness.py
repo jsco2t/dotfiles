@@ -139,10 +139,12 @@ class Harness:
     # --- lifecycle shortcuts ----------------------------------------------
 
     def init(self, budget: Optional[int] = None) -> None:
-        args = ["init", "--title", "Calc KB", "--request-file", str(self.request)]
+        """`tp init <location>` creates the workflow's own folder under the location; adopt it."""
+        args = ["init", str(self.root / "plans"), "--title", "Calc KB", "--request-file", str(self.request)]
         if budget is not None:
             args += ["--budget", str(budget)]
-        self.tp(*args)
+        out = self.tp(*args, wf=False).out
+        self.wf = Path(out.splitlines()[0].split("workflow: ", 1)[1])
 
     def confirmed(self, **scope_over: Any) -> None:
         self.init()

@@ -2,6 +2,7 @@
 implementation observed passing (green), without the tests being weakened."""
 from __future__ import annotations
 
+import json
 import unittest
 
 from harness import Harness, deep, git
@@ -88,6 +89,24 @@ class CodeFlowTest(unittest.TestCase):
         out = self.h.tp("record", "T01").out
         self.assertIn("tests changed", out)
         self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
+
+    def test_code_review_gets_the_change_against_the_approval_baseline(self) -> None:
+        base = git(self.app, "rev-parse", "HEAD").strip()
+        scope = dict(self.scope, review="final", participants=CODE["participants"] + [
+            {"agent": "correctness-reviewer", "role": "reviewer", "why": "Checks mul's edge cases."}])
+        self.h.approved(plan=self.plan, **scope)
+        self.write_tests()
+        self.h.tp("record", "T01")
+        self.h.tp("dispatch", "T01")
+        (self.app / "calc.py").write_text("def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n")
+        self.h.result("T01", "impl", changed=["calc.py"])
+        self.h.tp("record", "T01")
+        self.h.tp("accept", "T01", "--note", "ok")
+        self.h.tp("dispatch", "B1/correctness-reviewer")
+        changes = json.loads((self.h.wf / "runs" / "B1" / "changes.json").read_text())
+        self.assertEqual(sorted(changes["files"]), ["app:calc.py", "app:test_calc.py"])
+        self.assertIn(base, changes["diff"]["app"])
+        self.assertIn("test_calc.py", changes["untracked"]["app"])
 
     def test_failing_implementation_is_not_green(self) -> None:
         self.approve()

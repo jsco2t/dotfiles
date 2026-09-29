@@ -1,7 +1,7 @@
 ---
 name: kb-updater
 description: "Updates an existing knowledge base by validating documents against current source material, normalizing the folder structure with index.md files, and filling clearly-needed coverage gaps. Use when the user wants to refresh, audit, or extend a knowledge base — not when bootstrapping one from scratch. Trigger phrases: 'update the kb', 'refresh the knowledge base', 'check the kb is accurate', 'audit our docs against the code'."
-argument-hint: "<kb-path> [<source-path>]"
+argument-hint: "<kb-path> [<source-path>] [--max-agents=N]"
 ---
 
 # kb-updater
@@ -83,6 +83,8 @@ For each document:
    - Do code examples match real code in the source?
    - Are behavioral assertions still consistent with the implementation?
 3. Record every claim that fails verification, with the doc path, the failed claim, and the current truth (or "no longer exists").
+
+**Sub-agent budget (`--max-agents=N`, default 6).** Never have more than N sub-agents from this skill running at once. When there are more documents' validations than N, pack several into one sub-agent (each still gets its own full pass and is reported under its own name) or run them in waves. `--max-agents=0`, or no Agent tool available to you, means start none: do every document's validation yourself, one after another, at the same depth. Never drop a document's validation to fit the budget.
 
 Run validation in parallel, scaling the agent to the claim depth:
 

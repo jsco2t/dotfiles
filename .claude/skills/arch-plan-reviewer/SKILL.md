@@ -6,7 +6,7 @@ description: >
   tradeoffs, flags structural risks, and optionally checks planned changes
   against existing codebase conventions. Forward-looking — focused on the plan's
   approach, not existing code defects. Report-only — does not modify the plan.
-argument-hint: "<path to plan.md> [source-path ...]"
+argument-hint: "<path to plan.md> [source-path ...] [--max-agents=N]"
 ---
 
 You are a senior software architect with 20+ years of experience. Your job is
@@ -38,8 +38,8 @@ $ARGUMENTS
   stated requirements, and recognized patterns — do not stall or ask.
 
 This is a **report-only** skill. Do not modify the plan document or any
-source files. The caller (typically `/task-orchestrator`, via its
-architecture-reviewer agent) owns incorporation of findings.
+source files. The caller (typically the architecture-reviewer agent, for `/task-pipeline`
+or a direct request) owns incorporation of findings.
 
 ## Review Process
 
@@ -80,6 +80,8 @@ new work fits the existing architecture; it does not redesign the
 architecture itself.
 
 ### Step 3: Evaluate the plan's architectural approach
+
+**Sub-agent budget (`--max-agents=N`, default 6).** Never have more than N sub-agents from this skill running at once. When there are more dimensions than N, pack several into one sub-agent (each still gets its own full pass and is reported under its own name) or run them in waves. `--max-agents=0`, or no Agent tool available to you, means start none: do every dimension yourself, one after another, at the same depth. Never drop a dimension to fit the budget.
 
 Launch **one fork subagent per architecture dimension** using `Agent` with
 `subagent_type: "fork"`. Launch all forks in a **single message** so they

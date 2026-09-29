@@ -8,10 +8,11 @@ from typing import Any, Dict, List, Optional
 
 from .common import limit, style_core
 
-HEADER = ("This dispatch comes from /task-pipeline. This brief is your complete contract: it replaces "
-          "the task-orchestrator contract, the `orch-result` block, and any report path your definition "
-          "names. Do not use the Agent tool or any skill that dispatches sub-agents — apply your skill's "
-          "method yourself, in one pass. {box}")
+HEADER = ("This dispatch comes from /task-pipeline. This brief is your complete contract: it replaces any "
+          "result format or report path your definition names. Do not use the Agent tool: the pipeline "
+          "runs at most 3 agents and you are one of them. "
+          "When you load a skill that can start sub-agents, pass it `--max-agents=0` and apply its lenses "
+          "yourself, one after another. {box}")
 
 RESULT_SCHEMA = ('{{"task": "{tid}", "step": "{step}", "status": "done | blocked | needs_input", '
                  '"summary": "<= 80 words, answer-first", "changed": ["<paths relative to the workspace>"], '
@@ -20,12 +21,32 @@ RESULT_SCHEMA = ('{{"task": "{tid}", "step": "{step}", "status": "done | blocked
 
 REVIEW_SCHEMA = ('{{"task": "{tid}", "verdict": "pass | changes", "findings": [{{"id": "F1", '
                  '"state": "wrong | missing | unclear | broken | gap | weak | cosmetic", "blocking": true, '
-                 '"where": "path:line", "issue": "<complete sentence: what is wrong and what a reader would observe>", '
+                 '"confidence": 90, "where": "path:line", "issue":"<complete sentence: what is wrong and what a reader would observe>", '
                  '"fix": "<what would make it right>"}}], "noticed": []}}')
 
-RECON_SCHEMA = ('{"answers": [{"q": "<the question>", "a": "<the answer>", "evidence": ["path or URL"]}], '
-                '"areas": [{"name": "...", "paths": ["..."], "size": "<files / lines>", "note": "..."}], '
-                '"unknowns": ["<what you could not establish>"]}')
+RESEARCH_SCHEMA = ('{"answers": [{"q": "<the question>", "a": "<the answer>", "evidence": ["path:line, URL, or issue key"]}], '
+                   '"followups": [{"question": "<one narrow question you did not pursue>", "why": "<what you saw>", '
+                   '"agent": "<who could answer it>"}], "unknowns": ["<what you could not establish>"]')  # + areas + "}"
+MAP_AREAS = ', "areas": [{"name": "...", "paths": ["..."], "size": "<files / lines>", "note": "..."}]'
+
+BATCH_REVIEW_SCHEMA = ('{{"batch": "{bid}", "verdict": "pass | changes", "findings": [{{"id": "F1", '
+                       '"state": "wrong | missing | unclear | broken | gap | weak | cosmetic", "blocking": true, '
+                       '"confidence": 90, "where": "<workspace-relative path>:<line>", "task": "<T## if you know it>", '
+                       '"issue": "<complete sentence: what is wrong and what a reader or user would observe>", '
+                       '"fix": "<what would make it right>"}}], "noticed": []}}')
+
+VERIFY_SCHEMA = ('{{"batch": "{bid}", "verdict": "pass | changes", "findings": [<only findings still unresolved, '
+                 'or new problems the fixes introduced, same shape as your first review>]}}')
+
+PURPOSE_FRAMING = {
+    "map": "Map how the work divides — areas, paths, sizes — so the manager can split it into tasks. "
+           "Do not research or write the deliverable's content; each task researches its own area later.",
+    "requirements": "Extract what the named issues or pages require: acceptance criteria, constraints, "
+                    "decisions, and open questions, each with its source (issue key, page, or comment). "
+                    "Report what they say; do not design the solution.",
+    "investigate": "Establish how the one named thing works, with `path:line` evidence for every claim. "
+                   "Stay on that thing; do not survey its neighbours.",
+}
 
 
 def _handback(path: Path, schema: str) -> List[str]:
@@ -107,18 +128,54 @@ def review(task: Dict[str, Any], n: int, ctx: Dict[str, Any], result: Path) -> s
     return "\n".join(out + _handback(result, REVIEW_SCHEMA.format(tid=task["id"]))) + "\n"
 
 
-def recon(rid: str, item: Dict[str, Any], scope_md: Path, surveys: List[Path], result: Path) -> str:
-    box = (f"Time box: {limit('recon_minutes')} min, hard. This is planning recon: answer with a map (areas, "
-           "paths, sizes) that lets the manager split the work into tasks. Do not research or write the "
-           "deliverable's content — each task researches its own area later.")
-    out = [f"# /task-pipeline recon brief — {rid}", "", HEADER.format(box=box), "", "## Questions", ""]
+def research(rid: str, item: Dict[str, Any], scope_md: Path, surveys: List[Path], result: Path) -> str:
+    purpose = item.get("purpose", "map")
+    minutes = item.get("minutes", limit("research_item_minutes"))
+    box = f"Time box: {minutes} min, hard. Planning research ({purpose}): {PURPOSE_FRAMING[purpose]}"
+    out = [f"# /task-pipeline research brief — {rid}", "", HEADER.format(box=box), "", "## Questions", ""]
     out += [f"{i}. {q}" for i, q in enumerate(item["questions"], 1)]
-    out += ["", f"Done when: {item['done_when']}", "", "## Context", "", f"- Scope: `{scope_md}`"]
+    out += ["", f"Done when: {item['done_when']}", "",
+            "Answer these questions and nothing else. When you find something that needs more investigation, "
+            "do not investigate it: write it as one narrow question in `followups`, with what you saw. The "
+            "manager decides whether it becomes another research item.", "",
+            "## Context", "", f"- Scope: `{scope_md}`"]
     out += [f"- Survey already done (do not repeat it): `{s}`" for s in surveys]
     out += ["", _style()[0], "", style_core(), ""]
-    out += _handback(result, RECON_SCHEMA)
-    out.insert(-1, f"At most {limit('recon_output_bytes')} bytes; a larger file is refused.")
+    out += _handback(result, RESEARCH_SCHEMA + (MAP_AREAS if purpose == "map" else "") + "}")
+    out.insert(-1, f"At most {limit('research_output_bytes')} bytes; a larger file is refused.")
     return "\n".join(out) + "\n"
+
+
+def batch_review(bid: str, reviewer: str, tasks: List[Dict[str, Any]], ctx: Dict[str, Any], result: Path) -> str:
+    out = [f"# /task-pipeline review brief — {bid} · {reviewer}", "",
+           HEADER.format(box="Time box: about 20 min for the batch."), "", "## Review this batch as a whole", "",
+           f"Every task below is finished and accepted. Review them together, through your lens only, in one pass. "
+           f"The change, as a structured file: `{ctx['changes']}` (files, and the exact diff command for each "
+           "workspace under version control).", "", "Deliverables, by task:"]
+    for t in tasks:
+        out.append(f"- {t['id']} {t['title']}: " + ", ".join(f"`{p}`" for p in ctx["paths"][t["id"]]))
+        out += [f"  - done when: {a}" for a in t["acceptance"]]
+    out += ["", "Check claims against: " + "; ".join(f"`{s}`" for s in ctx["sources"]) + ".", "",
+            "Do not edit any file. Give each finding the workspace-relative path and line it is about, so the "
+            "pipeline can route it to the task that owns the file. A finding is blocking when the work is wrong, "
+            "misses a criterion, or would mislead or break things for its reader or user. `verdict` is `changes` "
+            "exactly when a finding is blocking. Verify each finding against the source before you report it. "
+            "Anything outside these deliverables is one line in `noticed`.", ""]
+    out += _style()
+    return "\n".join(out + _handback(result, BATCH_REVIEW_SCHEMA.format(bid=bid))) + "\n"
+
+
+def verify(bid: str, reviewer: str, findings: List[Dict[str, Any]], ctx: Dict[str, Any], result: Path,
+           same_agent: bool) -> str:
+    out = [f"# /task-pipeline verification brief — {bid} · {reviewer}", ""]
+    if not same_agent:
+        out += [HEADER.format(box="Time box: about 8 min."), ""]
+    out += ["## Verify the fixes", "",
+           "The authors have addressed the findings below that the manager accepted. For each one, check whether "
+           "it is resolved; do not start a new review. Report only findings that are still unresolved, and any new "
+           f"problem the fixes themselves introduced. The change: `{ctx['changes']}`. Do not edit any file.", ""]
+    out += [f"- {f['id']} ({f['state']}) at {f['where']}: {f['issue']}" for f in findings] + [""]
+    return "\n".join(out + _handback(result, VERIFY_SCHEMA.format(bid=bid))) + "\n"
 
 
 def prompt(brief: Path, result: Path) -> str:

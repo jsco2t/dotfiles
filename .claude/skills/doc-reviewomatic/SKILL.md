@@ -1,7 +1,7 @@
 ---
 name: doc-reviewomatic
 description: Multi-perspective documentation reviewer that works locally or on GitHub PRs. Reviews docs for accuracy, readability, grammar, and house style consistency. Three review sub-agents cover technical accuracy, language quality, and structural consistency. Can also scan a PR queue to find doc-only PRs for review.
-argument-hint: "[mode local|review|resolve|scan] [pr-ref] [--auto-comment] [--confidence=N]"
+argument-hint: "[mode local|review|resolve|scan] [pr-ref] [--auto-comment] [--confidence=N] [--max-agents=N]"
 ---
 
 # Doc Review-O-Matic
@@ -203,6 +203,8 @@ For each PR the user approves:
 3. **For `review` and `scan` modes (PR):** Also gather the raw diff lines (`ghtk pr diff <number>`) and extract the set of (file, line) pairs that are part of the diff. Pass this set to each reviewer with the instruction: **"Your findings MUST reference lines that appear in the diff. Do not flag issues on unchanged lines — even if adjacent prose should also change, your finding must be anchored to a line that was added or modified in this changeset."** This constraint is required because the GitHub Reviews API only accepts comments on diff-visible lines.
 
 ### Fan-out: grouping review lenses into sub-agents
+
+**Sub-agent budget (`--max-agents=N`).** The ceiling of 6 in this section is the default. When the arguments include `--max-agents=N`, N replaces 6 everywhere this skill caps sub-agents: never have more than N running from this review. `--max-agents=0`, or no Agent tool available to you, means start none: run every selected reviewer yourself, one after another, each at full depth, and report it exactly as a sub-agent would. A smaller budget packs more reviewers into each sub-agent; it never drops one.
 
 This review runs as parallel sub-agents, **capped at 6**. The default grouping is the three reviewers defined below — Technical Accuracy (A), Readability & Language (B), and Structure & Consistency (C) — each of which already bundles several responsibilities into one thread rather than fanning out per responsibility. Adapt to the change: skip a reviewer whose dimension the change doesn't touch (a pure typo fix may need only B), or, for a large change concentrated in one dimension, split that reviewer's responsibilities across up to the 6-sub-agent ceiling. Never exceed 6, and in `scan` mode apply the cap afresh to each PR.
 

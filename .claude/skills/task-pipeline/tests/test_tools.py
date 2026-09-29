@@ -3,9 +3,11 @@ the repository survey and the docs checker."""
 from __future__ import annotations
 
 import json
+import os
+import sys
 import unittest
 
-from harness import Harness, git
+from harness import SKILL, Harness, git
 
 
 class SurveyTest(unittest.TestCase):
@@ -50,6 +52,145 @@ class SurveyTest(unittest.TestCase):
         self.h.tp("survey", str(self.h.kb), "--name", "kb")
         data = json.loads((self.h.wf / "survey" / "kb.json").read_text())
         self.assertIsNone(data["git"])
+
+
+FAKE_JIRA = r'''
+import json, sys
+a = sys.argv[1:]
+thin = {"KUB-11": "Fix it.", "KUB-12": "x" * 900, "KUB-13": ""}
+if a[:2] == ["issue", "get"]:
+    key = a[2]
+    if key == "KUB-9":
+        print(json.dumps({"key": "KUB-9", "type": "Epic", "summary": "Papercuts", "status": "In Progress",
+                          "statusCategory": "In Progress", "labels": ["v1"], "description": "d" * 1200,
+                          "comments": [{"author": "a", "created": "2026-09-01", "text": "see page"}]}))
+    else:
+        print(json.dumps({"key": key, "type": "Bug", "summary": key, "status": "To Do", "statusCategory": "To Do",
+                          "description": thin[key], "labels": []}))
+elif a[:1] == ["search"]:
+    if "parent = KUB-9" not in a[1]:
+        print(json.dumps({"schema": 1, "issues": []}))
+    else:
+        issues = [{"key": k, "type": "Bug", "summary": k, "status": s, "statusCategory": s, "comments": c}
+                  for k, s, c in (("KUB-11", "To Do", []), ("KUB-12", "To Do", [{"text": "hi"}]),
+                                  ("KUB-13", "In Progress", []), ("KUB-14", "Done", []))]
+        print(json.dumps({"schema": 1, "issues": issues}))
+elif a[:2] == ["issue", "links"]:
+    print(json.dumps([{"title": "Design", "url": "https://x.atlassian.net/wiki/spaces/E/pages/123/Design"}]))
+else:
+    sys.exit(f"unexpected: {a}")
+'''
+
+FAKE_GHTK = r'''
+import json, sys
+a = sys.argv[1:]
+assert a[:3] == ["issue", "get", "12"], a
+print(json.dumps({"number": 12, "title": "Add retries", "state": "open", "author": "x", "labels": ["bug"],
+                  "isPullRequest": False, "body": "Needs #34 and KUB-9. See https://github.com/o/r/pull/56",
+                  "comments": [{"author": "y", "body": "+1"}]}))
+'''
+
+
+class IssueSurveyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.init()
+        for name, body in (("jira", FAKE_JIRA), ("ghtk", FAKE_GHTK)):
+            (self.h.root / f"fake_{name}.py").write_text(body)
+        os.environ["TP_JIRA"] = f"{sys.executable} {self.h.root / 'fake_jira.py'}"
+        os.environ["TP_GHTK"] = f"{sys.executable} {self.h.root / 'fake_ghtk.py'}"
+
+    def tearDown(self) -> None:
+        os.environ.pop("TP_JIRA", None)
+        os.environ.pop("TP_GHTK", None)
+        self.h.close()
+
+    def test_a_jira_epic_is_sized_without_an_agent(self) -> None:
+        out = self.h.tp("survey-issue", "jira:KUB-9").out
+        self.assertLess(len(out.splitlines()), 30)
+        data = json.loads((self.h.wf / "survey" / "issue-KUB-9.json").read_text())
+        self.assertEqual(data["key"], "KUB-9")
+        self.assertEqual(len(data["children"]), 4)
+        self.assertEqual(data["counts"]["open"], 3)
+        self.assertEqual(sorted(data["thin"]), ["KUB-11", "KUB-13"])    # too little written to research
+        self.assertEqual(data["links"][0]["title"], "Design")
+        self.assertIn("thin", out)
+        self.assertIn("KUB-11", out)
+        self.assertIn("starting point", out)
+
+    def test_a_github_issue_lists_what_it_references(self) -> None:
+        self.h.tp("survey-issue", "gh:o/r#12")
+        data = json.loads((self.h.wf / "survey" / "issue-o-r-12.json").read_text())
+        self.assertEqual(data["title"], "Add retries")
+        self.assertEqual(sorted(data["references"]), ["#34", "KUB-9", "https://github.com/o/r/pull/56"])
+
+    def test_an_unknown_source_is_refused(self) -> None:
+        self.assertIn("jira:", self.h.tp("survey-issue", "linear:ABC-1", expect=2).text)
+
+
+def _tool_use(name, **inp):
+    return {"type": "tool_use", "id": "t", "name": name, "input": inp}
+
+
+class FanoutCheckTest(unittest.TestCase):
+    """fanout_check.py reads an agent or session transcript and says how many sub-agents it
+    started, whether the loaded skill text carried the budget paragraph, and whether a budget held."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.script = SKILL / "scripts" / "fanout_check.py"
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def transcript(self, messages, extra_lines=()):
+        p = self.h.root / "t.jsonl"
+        lines = [json.dumps({"message": {"role": "assistant", "content": m}}) for m in messages]
+        p.write_text("\n".join(list(extra_lines) + lines) + "\n")
+        return p
+
+    def run_check(self, path, *args, expect=0):
+        import subprocess
+        res = subprocess.run([sys.executable, str(self.script), str(path), *args], capture_output=True, text=True)
+        self.assertEqual(res.returncode, expect, res.stdout + res.stderr)
+        return res.stdout
+
+    def test_counts_agent_calls_and_the_largest_parallel_batch(self) -> None:
+        p = self.transcript([[_tool_use("Skill", skill="doc-reviewer", args="x --max-agents=2")],
+                             [_tool_use("Agent", subagent_type="general-purpose"), _tool_use("Agent", subagent_type="Explore")],
+                             [_tool_use("Bash", command="ls")]],
+                            extra_lines=['{"note": "**Sub-agent budget (`--max-agents=N`, default 6)."}'])
+        out = self.run_check(p, "--max", "2")
+        self.assertIn("Agent calls: 2", out)
+        self.assertIn("largest parallel batch: 2", out)
+        self.assertIn("doc-reviewer", out)
+        self.assertIn("budget paragraph loaded: yes", out)
+        self.assertIn("within budget", out)
+
+    def test_a_budget_breach_fails(self) -> None:
+        p = self.transcript([[_tool_use("Agent"), _tool_use("Agent"), _tool_use("Agent")]])
+        self.assertIn("OVER BUDGET", self.run_check(p, "--max", "2", expect=1))
+
+    def test_since_counts_only_after_a_marker(self) -> None:
+        p = self.h.root / "s.jsonl"
+        early = json.dumps({"message": {"role": "assistant", "content": [_tool_use("Agent")]}})
+        marker = json.dumps({"message": {"role": "user", "content": "<command-name>/reviewomatic</command-name>"}})
+        late = json.dumps({"message": {"role": "assistant", "content": [_tool_use("Agent")]}})
+        p.write_text("\n".join([early, marker, late]) + "\n")
+        self.assertIn("Agent calls: 1", self.run_check(p, "--since", "/reviewomatic"))
+
+
+class SchemaTest(unittest.TestCase):
+    def test_every_schema_prints_as_valid_json(self) -> None:
+        h = Harness()
+        try:
+            for name in ("scope", "plan", "research", "result", "review"):
+                data = json.loads(h.tp("schema", name, wf=False).out)
+                self.assertIsInstance(data, dict, name)
+            self.assertIn("review_batches", h.tp("schema", "plan", wf=False).out)
+            self.assertIn("followups", h.tp("schema", "research", wf=False).out)
+        finally:
+            h.close()
 
 
 class DocsCheckTest(unittest.TestCase):

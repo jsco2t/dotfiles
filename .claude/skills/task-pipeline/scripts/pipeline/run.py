@@ -1,9 +1,9 @@
-"""Execution and recon: what runs next, dispatching a step, recording its hand-back, and
-every gate between steps — decided by this script, never by reading prose."""
+"""Execution: what runs next, dispatching a step, recording its hand-back, and every gate
+between steps — decided by this script, never by reading prose. Planning research lives in
+research.py and end-of-pipeline review in review.py; this module routes to them."""
 from __future__ import annotations
 
 import json
-import re
 import shlex
 import subprocess
 import sys
@@ -17,13 +17,16 @@ from .common import (TP_SCRIPT, TPError, Workflow, limit, load_json, minutes_sin
 
 DONE_STATES = ("accepted", "skipped")
 CHECK_TIMEOUT = 540
-BANNED_RECON = [
-    re.compile(r"\b(every|all)\s+(\w+\s+)?(files?|flags?|functions?|symbols?|packages?|commands?|fields?|"
-               r"endpoints?|lines?|options?|types?)\b", re.I),
-    re.compile(r"\bcomplete\s+(\w+\s+){0,2}(list|tree|inventory|reference|catalog(ue)?|walkthrough)\b", re.I),
-    re.compile(r"\bexhaustive(ly)?\b", re.I),
-    re.compile(r"\bend[- ]to[- ]end\b", re.I),
-]
+
+
+def _research():
+    from . import research
+    return research
+
+
+def _review():
+    from . import review
+    return review
 
 
 # --- state helpers ---------------------------------------------------------------------
@@ -118,28 +121,23 @@ def _action_for(tid: str, ts: Dict[str, Any], task: Dict[str, Any], scope: Dict[
     return act
 
 
-def actions(wf: Workflow, state: Dict[str, Any]) -> List[Dict[str, Any]]:
+def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> List[Dict[str, Any]]:
     phase = state["phase"]
+    if phase == "DONE":
+        return [{"action": "done"}]
+    if state.get("halt") and not ignore_halt:
+        if state["in_flight"]:
+            return [{"action": "halting", "ids": list(state["in_flight"])}]
+        return [{"action": "halted"}]
     if phase == "SCOPING":
         if state.get("scope_checked_sha") and state["scope_checked_sha"] == sha_file(wf.scope_json):
             return [{"action": "human", "why": "confirm the scope in scope.md"}]
         return [{"action": "scope"}]
     if phase == "PLANNING":
-        acts: List[Dict[str, Any]] = []
-        busy = [r for r, v in state["recon"].items() if v["status"] == "in_flight"]
         free = limit("max_in_flight") - len(state["in_flight"])
-        for rid, item in state["recon"].items():
-            if item["status"] == "pending" and free > 0:
-                acts.append({"action": "dispatch", "id": rid, "step": "recon", "agent": item["agent"],
-                             "agent_id": None, "model": None})
-                free -= 1
-        if busy:
-            acts.append({"action": "wait", "ids": busy})
-        return acts + [{"action": "plan"}]
+        return _research().actions(state, free) + [{"action": "plan"}]
     if phase == "AWAITING_APPROVAL":
         return [{"action": "human", "why": "approve or revise the plan in plan.md"}]
-    if phase == "DONE":
-        return [{"action": "done"}]
 
     plan, scope, tasks = _loaded(wf, state)
     acts = []
@@ -161,33 +159,34 @@ def actions(wf: Workflow, state: Dict[str, Any]) -> List[Dict[str, Any]]:
         if act:
             acts.append(act)
             free -= 1
+    review_acts = _review().actions(state, free)
+    acts += review_acts
     everything_done = all(ts["status"] in DONE_STATES for ts in state["tasks"].values())
-    if everything_done and not state["in_flight"] and not state.get("blocked"):
-        if _final_review_due(state, scope):
-            if free > 0:
-                acts.append({"action": "review", "id": "FINAL", "step": "review", "model": None, "agent_id": None,
-                             "agent": scopemod.participants(scope, "reviewer")[0]})
-        else:
-            acts.append({"action": "final"})
-    if not acts and state["in_flight"]:
+    if (everything_done and not state["in_flight"] and not state.get("blocked")
+            and not _review().open_sessions(state)):
+        acts.append({"action": "final"})
+    if not any(a["action"] in ("dispatch", "fix", "review", "final") for a in acts) and state["in_flight"]:
         acts.append({"action": "wait", "ids": list(state["in_flight"])})
     return acts
 
 
-def _final_review_due(state: Dict[str, Any], scope: Dict[str, Any]) -> bool:
-    return scope.get("review") in ("final", "both") and not state.get("final_review_done")
-
-
 GUIDE = {
-    "scope": "Draft scope.json (SKILL.md › Scoping), then `tp scope check`, then confirm it with the human.",
-    "plan": "Write plan.json (SKILL.md › Planning), `tp plan check`, then `tp plan submit`.",
+    "scope": "Draft scope.json (`tp schema scope`), then `tp scope check`, then confirm it with the human.",
+    "plan": "Write plan.json (`tp schema plan`), `tp plan check`, then `tp plan submit`.",
     "dispatch": "`tp dispatch {id}`, then send the call it prints.",
     "fix": "`tp dispatch {id}` (fix round), then send the call it prints.",
-    "review": "`tp dispatch {id}` (review), then send the call it prints.",
+    "review": "`tp dispatch {id}`, then send the call it prints.",
     "check": "Fact-check {id}: read the sample `tp record` printed (or `tp sample {id}`); then "
              "`tp accept {id} --note \"...\"` or `tp reject {id} --reason \"...\"`.",
+    "triage": "Triage {id}: `tp show {id} --part blocking`, check each against the source, then "
+              "`tp triage {id} --accept-all`, or `--dismiss F# --reason \"...\"` and/or `--assign F#=T##`.",
+    "followup": "Decide {id} ({why}): pursue it (`tp research add ... --from {id}`, within the budget) or "
+                "`tp research dismiss {id} --reason \"...\"`.",
     "human": "Stop and ask the human{about}: {why}. Record the answer with `tp resolve`.",
     "wait": "Wait for {ids} to hand back; end your turn if nothing else is actionable.",
+    "halting": "Halt requested: record {ids} as they hand back; dispatch nothing new.",
+    "halted": "Halted. Tell the human where work stopped (`halt.json`), then stop. `tp resume --answer \"...\"` "
+              "continues.",
     "final": "`tp final` — package checks and the report.",
     "done": "Report to the human from report.md.",
 }
@@ -205,6 +204,9 @@ def cmd_next(wf: Workflow, as_json: bool) -> str:
         return json.dumps({"phase": state["phase"], "actions": acts, "elapsed_min": round(elapsed, 1),
                            "budget_minutes": state.get("budget_minutes"), "warnings": warnings})
     out = [_headline(state)] + [f"WARNING: {w}" for w in warnings]
+    if state["phase"] == "PLANNING":
+        line = _research().summary(state, scopemod.load_scope(wf))
+        out += [line] if line else []
     for a in acts:
         what = a["action"]
         label = f"{what} {a.get('id', '')}".strip()
@@ -213,6 +215,10 @@ def cmd_next(wf: Workflow, as_json: bool) -> str:
         about = f" about {a['id']}" if a.get("id") else ""
         out.append(f"→ {label}: " + GUIDE[what].format(id=a.get("id", ""), why=a.get("why", ""), about=about,
                                                       ids=", ".join(a.get("ids", []))))
+    ready = [a["id"] for a in acts if a["action"] in ("dispatch", "fix", "review")]
+    if len(ready) > 1:
+        out.append(f"→ all at once: `tp dispatch {' '.join(ready)}` (one Bash call — never chain dispatches "
+                   "with separators), then send every printed call in one message.")
     return "\n".join(out)
 
 
@@ -257,7 +263,10 @@ def _context(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Di
     sources = []
     for s in task.get("sources", []):
         name, _, rel = str(s).partition(":")
-        sources.append(str(Path(wss[name]["path"]) / rel) if name in wss else s)
+        if name == "research":
+            sources.append(f"{wf.root / 'recon' / (rel + '.json')} (research findings: read `answers`)")
+        else:
+            sources.append(str(Path(wss[name]["path"]) / rel) if name in wss else s)
     return {
         "serves": "; ".join(f"{d} — {deliverables[d]['what']}" for d in task["serves"] if d in deliverables),
         "scope_md": wf.root / "scope.md",
@@ -272,10 +281,13 @@ def _context(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Di
 def cmd_dispatch(wf: Workflow, tid: str) -> str:
     with wf.locked():
         state = wf.load()
+        if state.get("halt"):
+            raise TPError("A halt was requested: nothing new starts. Record agents as they hand back; "
+                          "`tp resume --answer \"<the human's words>\"` continues.")
         if tid.startswith("R"):
-            return _dispatch_recon(wf, state, tid)
-        if tid == "FINAL":
-            return _dispatch_final_review(wf, state)
+            return _research().dispatch(wf, state, tid, _slots)
+        if "/" in tid:
+            return _review().dispatch(wf, state, tid)
         if state["phase"] != "EXECUTING":
             raise TPError(f"Tasks are dispatched while EXECUTING; the workflow is {state['phase']}.")
         plan, scope, tasks = _loaded(wf, state)
@@ -441,9 +453,9 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
     with wf.locked():
         state = wf.load()
         if tid.startswith("R"):
-            return _record_recon(wf, state, tid)
-        if tid == "FINAL":
-            return _record_final_review(wf, state, agent_id)
+            return _research().record(wf, state, tid)
+        if "/" in tid:
+            return _review().record(wf, state, tid, agent_id)
         plan, scope, tasks = _loaded(wf, state)
         fl = state["in_flight"].get(tid)
         if tid not in tasks or fl is None:
@@ -657,9 +669,8 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str) -> s
         if not tid:
             blocked = state.pop("blocked", None)
             if blocked is None:
-                raise TPError("Nothing is blocked at workflow level; pass --task for a task.")
-            if action == "accept":
-                state["final_review_done"] = True
+                raise TPError("Nothing is blocked at workflow level; pass --task for a task or --review for a "
+                              "review session.")
             wf.save(state)
             return "resolved — continue with `tp next`."
         ts = state["tasks"].get(tid)
@@ -672,7 +683,6 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str) -> s
             ts["extra_rounds"] += 1
             ts.update(status="needs_fix", fixing=_authoring_step(tasks[tid], scope), blocked=None,
                       findings=[f"Reopened by the human: {answer}"])
-            state["final_review_done"] = False
             state.pop("final_failed", None)
             wf.save(state)
             return f"{tid} reopened for a fix round. `tp next`."
@@ -713,56 +723,6 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str) -> s
 
 # --- final ----------------------------------------------------------------------------------
 
-def _dispatch_final_review(wf: Workflow, state: Dict[str, Any]) -> str:
-    plan, scope, tasks = _loaded(wf, state)
-    if not _final_review_due(state, scope) or not all(t["status"] in DONE_STATES for t in state["tasks"].values()):
-        raise TPError("The final review runs once every task is accepted, and only if the scope asks for it.")
-    _slots(state)
-    run = wf.run_dir("FINAL")
-    run.mkdir(parents=True, exist_ok=True)
-    n = state.get("final_reviews", 0) + 1
-    brief, result = run / f"brief-review-{n}.md", run / f"review-{n}.json"
-    pseudo = {"id": "FINAL", "title": plan["title"], "brief": "Review the whole package as one set: consistency "
-              "between deliverables, gaps against the scope's deliverables, and anything that would mislead a reader.",
-              "acceptance": [f"{d['id']}: {d['what']}" for d in scope["deliverables"]]}
-    paths = []
-    for t in tasks.values():
-        paths += [str(_ws(scope, t["workspace"]) / p) for p in t["paths"]]
-    ctx = {"write_paths": paths, "sources": [w["path"] for w in scopemod.workspaces(scope).values() if w["mode"] == "read"]}
-    if result.exists():
-        result.unlink()
-    brief.write_text(briefs.review(pseudo, n, ctx, result))
-    agent = scopemod.participants(scope, "reviewer")[0]
-    state["in_flight"]["FINAL"] = {"step": "review", "since": now_iso(), "agent": agent, "concurrent": []}
-    wf.save(state)
-    call = briefs.dispatch_line(agent, "final review", briefs.prompt(brief, result), None, None)
-    return f"DISPATCH FINAL · review · {agent}\nbrief: {brief}\nsend: {call}\nthen: tp record FINAL"
-
-
-def _record_final_review(wf: Workflow, state: Dict[str, Any], agent_id: Optional[str]) -> str:
-    if "FINAL" not in state["in_flight"]:
-        raise TPError("The final review is not in flight.")
-    n = state.get("final_reviews", 0) + 1
-    path = wf.run_dir("FINAL") / f"review-{n}.json"
-    data = load_json(path, "the final review")
-    errs = _validate_review(data, "FINAL")
-    if errs:
-        raise TPError(*[f"{path}: {e}" for e in errs])
-    del state["in_flight"]["FINAL"]
-    state["final_reviews"] = n
-    blocking = [f for f in data["findings"] if f["blocking"]]
-    if blocking:
-        state["blocked"] = {"kind": "final_review", "summary": f"the final review found {len(blocking)} blocking "
-                            f"problems ({path}) — the human decides: reopen tasks (`tp resolve --task T## --action "
-                            "reopen`) or accept as is (`tp resolve --action accept`)"}
-        out = "FINAL review: changes needed —\n" + "\n".join(f"  - {f['id']} at {f['where']}: {f['issue']}" for f in blocking)
-    else:
-        state["final_review_done"] = True
-        out = f"FINAL review passed ({len(data['findings'])} non-blocking notes). Next: `tp final`."
-    wf.save(state)
-    return out
-
-
 def cmd_final(wf: Workflow) -> str:
     with wf.locked():
         state = wf.load()
@@ -772,8 +732,9 @@ def cmd_final(wf: Workflow) -> str:
         open_ = [f"{t} ({ts['status']})" for t, ts in state["tasks"].items() if ts["status"] not in DONE_STATES]
         if open_ or state["in_flight"]:
             raise TPError(f"open tasks: {', '.join(open_ or list(state['in_flight']))}.")
-        if _final_review_due(state, scope):
-            raise TPError("the scope asks for a final review first: `tp dispatch FINAL`.")
+        reviews_open = _review().open_sessions(state)
+        if reviews_open:
+            raise TPError(f"review sessions still open: {', '.join(reviews_open)} — `tp next`.")
         failures: List[str] = []
         results: List[str] = []
         for name in plan.get("final_checks", []):
@@ -841,6 +802,12 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
     notes = [f"- {tid}: {ts['note']}" for tid, ts in state["tasks"].items() if ts.get("note")]
     if notes:
         out += ["", "## Manager fact-check notes", ""] + notes
+    review_lines = _review().report_lines(state)
+    if review_lines:
+        out += ["", "## Review", ""] + review_lines
+    research = _research().summary(state, scope)
+    if research:
+        out += ["", "## Research", "", f"- {research}"]
     out += ["", "## Final checks", ""] + ([f"- {r}" for r in results] or ["- none planned"])
     noticed = wf.noticed_items()
     if noticed:
@@ -883,92 +850,82 @@ def cmd_status(wf: Workflow, as_json: bool) -> str:
         out.append(f"  {status}: {', '.join(ids[:20])}" + (" …" if len(ids) > 20 else ""))
     if state.get("blocked"):
         out.append(f"BLOCKED: {state['blocked']['summary']}")
-    for rid, r in state.get("recon", {}).items():
-        out.append(f"  recon {rid}: {r['status']} ({r['agent']})")
+    if state.get("halt"):
+        out.append(f"HALT {'complete' if state['halt'].get('halted') else 'requested'}: {state['halt']['reason']}")
+    research = state.get("recon", {})
+    if research:
+        out.append("  research: " + ", ".join(f"{rid} {r['status']}" for rid, r in list(research.items())[:12]))
+    reviews = state.get("reviews", {})
+    if reviews:
+        out.append("  reviews: " + ", ".join(f"{sid} {s['status']}" for sid, s in reviews.items()))
     out.append(cmd_next(wf, False).splitlines()[-1])
     return "\n".join(out[:24])
 
 
-# --- recon ----------------------------------------------------------------------------------
+# --- halt and resume ------------------------------------------------------------------------
 
-def cmd_recon_add(wf: Workflow, rid: str, agent: str, questions_file: Path, done_when: str) -> str:
+def _halt_record(wf: Workflow, state: Dict[str, Any]) -> str:
+    """Once nothing is in flight after a halt request: record where the work stopped."""
+    halt = state["halt"]
+    halt["halted"] = halt.get("halted") or now_iso()
+    by_status: Dict[str, List[str]] = {}
+    for tid, ts in state["tasks"].items():
+        by_status.setdefault(ts["status"], []).append(tid)
+    record = {
+        "requested": halt["requested"], "halted": halt["halted"], "reason": halt["reason"], "phase": state["phase"],
+        "elapsed_min": round(minutes_since(state["created"]), 1), "budget_minutes": state.get("budget_minutes"),
+        "tasks": by_status,
+        "research": {rid: i["status"] for rid, i in state.get("recon", {}).items()},
+        "reviews": {sid: s["status"] for sid, s in state.get("reviews", {}).items()},
+        "next_on_resume": [{k: a[k] for k in ("action", "id", "step", "agent") if a.get(k)}
+                           for a in actions(wf, state, ignore_halt=True)],
+    }
+    (wf.root / "halt.json").write_text(json.dumps(record, indent=1))
+    wf.save(state)
+    wf.event("halted")
+    counts = ", ".join(f"{len(v)} {k}" for k, v in by_status.items())
+    nxt = "; ".join(f"{a['action']} {a.get('id', '')}".strip() for a in record["next_on_resume"][:6])
+    return (f"HALTED at a clean point — nothing in flight. Recorded in {wf.root / 'halt.json'}.\n"
+            f"{state['phase']}{' · ' + counts if counts else ''}. On resume: {nxt or 'nothing pending'}.\n"
+            "Tell the human; `tp resume --answer \"<their words>\"` continues.")
+
+
+def after_record(wf: Workflow, out: str) -> str:
+    """Called after every recorded hand-back: completes a pending halt once the last agent is in."""
+    state = wf.load()
+    if state.get("halt") and not state["in_flight"] and not state["halt"].get("halted"):
+        return out + "\n" + _halt_record(wf, state)
+    if state.get("halt") and state["in_flight"]:
+        return out + f"\nHalting: still waiting for {', '.join(state['in_flight'])}."
+    return out
+
+
+def cmd_halt(wf: Workflow, reason: str) -> str:
     with wf.locked():
         state = wf.load()
-        if state["phase"] != "PLANNING":
-            raise TPError(f"Recon happens only while PLANNING; the workflow is {state['phase']}.")
-        scope = scopemod.load_scope(wf)
-        errs = []
-        if not re.fullmatch(r"R\d+", rid) or rid in state["recon"]:
-            errs.append(f"recon id {rid!r} must be new and look like R1.")
-        if agent not in scopemod.participants(scope, "recon"):
-            errs.append(f"{agent} is not a confirmed recon participant in scope.json — ask the human first.")
-        questions = [q.strip() for q in Path(questions_file).read_text().splitlines() if q.strip()]
-        if not questions:
-            errs.append("no questions.")
-        if len(questions) > limit("max_recon_questions"):
-            errs.append(f"{len(questions)} questions; at most {limit('max_recon_questions')} per recon item — "
-                        "breadth comes from the survey, not bigger items.")
-        for i, q in enumerate(questions, 1):
-            if words(q) > 40:
-                errs.append(f"question {i} is {words(q)} words; keep it under 40.")
-            for pat in BANNED_RECON:
-                m = pat.search(q)
-                if m:
-                    errs.append(f"question {i} asks for content, not a map: \"{m.group(0)}\" — planning recon "
-                                "maps the work; the task that writes the content researches it.")
-        if len(state["recon"]) >= limit("max_recon_items"):
-            errs.append(f"already {len(state['recon'])} recon items; the limit is {limit('max_recon_items')}.")
-        if errs:
-            raise TPError(*errs)
-        state["recon"][rid] = {"agent": agent, "questions": questions, "done_when": done_when, "status": "pending"}
+        if state["phase"] == "DONE":
+            raise TPError("The workflow is DONE; there is nothing to halt.")
+        if state.get("halt"):
+            return f"Already halting (requested {state['halt']['requested']}). `tp next` shows what is left."
+        state["halt"] = {"requested": now_iso(), "reason": reason, "halted": None}
         wf.save(state)
-        wf.event("recon_add", id=rid, agent=agent)
-        return f"recon {rid} added. `tp dispatch {rid}` when ready (max {limit('max_in_flight')} agents at once)."
+        wf.decision("halt", reason)
+        wf.event("halt_requested")
+        if not state["in_flight"]:
+            return _halt_record(wf, state)
+        flying = ", ".join(f"{k} ({v['step']})" for k, v in state["in_flight"].items())
+        return (f"Halt requested. Nothing new will start. Let the agents in flight finish their current step — "
+                f"{flying} — and record each one as it hands back; the halt completes when the last is in.")
 
 
-def _dispatch_recon(wf: Workflow, state: Dict[str, Any], rid: str) -> str:
-    if state["phase"] != "PLANNING":
-        raise TPError(f"Recon happens only while PLANNING; the workflow is {state['phase']}.")
-    item = state["recon"].get(rid)
-    if item is None or item["status"] != "pending":
-        raise TPError(f"{rid} is not a pending recon item.")
-    _slots(state)
-    rdir = wf.root / "recon"
-    rdir.mkdir(exist_ok=True)
-    brief, result = rdir / f"{rid}.brief.md", rdir / f"{rid}.json"
-    if result.exists():
-        result.unlink()
-    surveys = sorted((wf.root / "survey").glob("*.json")) if (wf.root / "survey").exists() else []
-    brief.write_text(briefs.recon(rid, item, wf.root / "scope.md", surveys, result))
-    item["status"] = "in_flight"
-    state["in_flight"][rid] = {"step": "recon", "since": now_iso(), "agent": item["agent"], "concurrent": []}
-    wf.save(state)
-    wf.event("dispatch", id=rid, step="recon", agent=item["agent"])
-    call = briefs.dispatch_line(item["agent"], f"{rid} recon", briefs.prompt(brief, result), None, None)
-    return (f"DISPATCH {rid} · recon · {item['agent']} (time box {limit('recon_minutes')} min)\nbrief: {brief}\n"
-            f"send: {call}\nthen: tp record {rid}")
-
-
-def _record_recon(wf: Workflow, state: Dict[str, Any], rid: str) -> str:
-    item = state["recon"].get(rid)
-    if item is None or rid not in state["in_flight"]:
-        raise TPError(f"{rid} is not in flight.")
-    path = wf.root / "recon" / f"{rid}.json"
-    if not path.exists():
-        raise TPError(f"{path} is missing — the agent must write it.")
-    size = path.stat().st_size
-    if size > limit("recon_output_bytes"):
-        raise TPError(f"{path.name} is {size} bytes; the cap is {limit('recon_output_bytes')} — ask the same agent "
-                      "to cut it to the map (SendMessage), then record again.")
-    data = load_json(path, "recon output")
-    answers = data.get("answers") if isinstance(data, dict) else None
-    if not isinstance(answers, list) or not answers or not all(isinstance(a, dict) and a.get("a") for a in answers):
-        raise TPError(f"{path}: needs `answers`: a list of {{q, a, evidence}} objects.")
-    minutes = minutes_since(state["in_flight"][rid]["since"])
-    del state["in_flight"][rid]
-    item.update(status="done", minutes=round(minutes, 1))
-    wf.save(state)
-    wf.event("record", id=rid, step="recon", minutes=round(minutes, 1))
-    over = f" — over its {limit('recon_minutes')}-min box" if minutes > limit("recon_minutes") else ""
-    return (f"{rid} done in {minutes:.0f} min{over}: {len(answers)} answers, {len(data.get('areas', []))} areas, "
-            f"{len(data.get('unknowns', []))} unknowns. Read {path} and fact-check one answer before you rely on it.")
+def cmd_resume(wf: Workflow, answer: str) -> str:
+    with wf.locked():
+        state = wf.load()
+        halt = state.pop("halt", None)
+        if halt is None:
+            raise TPError("Nothing is halted.")
+        state.setdefault("halts", []).append(dict(halt, resumed=now_iso()))
+        wf.save(state)
+        wf.decision("resume", answer)
+        wf.event("resume")
+        return "resumed. Run `tp next`."

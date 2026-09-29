@@ -60,8 +60,8 @@ class PlanCheckTest(unittest.TestCase):
         self.assertIn("budget", text)
 
     def test_plan_that_cannot_finish_in_the_budget_is_refused(self) -> None:
-        # 20 tasks x 20 min over 2 lanes = 200 min > the 180-min budget.
-        tasks = [self.h.task(f"T{i:02d}", f"a{i}.md", estimate_min=20) for i in range(1, 21)]
+        # 30 tasks x 20 min over 3 lanes = 200 min > the 180-min budget.
+        tasks = [self.h.task(f"T{i:02d}", f"a{i}.md", estimate_min=20) for i in range(1, 31)]
         text = self.check(self.h.plan(tasks), expect=2).text
         self.assertIn("budget", text)
         self.assertIn("200", text)
@@ -94,9 +94,89 @@ class PlanCheckTest(unittest.TestCase):
         finally:
             h.close()
 
+    def test_unknown_research_source_is_refused(self) -> None:
+        plan = self.h.plan([self.h.task("T01", "a.md", sources=["research:R9"])])
+        self.assertIn("R9", self.check(plan, expect=2).text)
+
     def test_unknown_check_name_is_refused(self) -> None:
         plan = self.h.plan([self.h.task("T01", "a.md", checks=["lint"])])
         self.assertIn("lint", self.check(plan, expect=2).text)
+
+
+FINAL_REVIEW = dict(review="final", participants=[
+    {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},
+    {"agent": "doc-reviewer", "role": "reviewer", "why": "Reviews the finished KB for accuracy."}])
+
+
+class ReviewPlanTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.h = Harness()
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def check(self, plan, expect: int = 0, **scope):
+        self.h.confirmed(**scope)
+        self.h.write_json("plan.json", plan)
+        return self.h.tp("plan", "check", expect=expect)
+
+    def test_the_review_tail_counts_against_the_budget(self) -> None:
+        tasks = [self.h.task(f"T0{i}", f"a{i}.md") for i in range(1, 4)]
+        self.check(self.h.plan(tasks), budget_minutes=30)                      # 15 min of work: fits
+        h2 = Harness()
+        try:
+            h2.confirmed(budget_minutes=30, **FINAL_REVIEW)
+            h2.write_json("plan.json", h2.plan([h2.task(f"T0{i}", f"a{i}.md") for i in range(1, 4)]))
+            text = h2.tp("plan", "check", expect=2).text                      # + 28 min review tail: over
+            self.assertIn("review", text)
+            self.assertIn("budget", text)
+        finally:
+            h2.close()
+
+    def test_large_packages_are_split_into_review_batches(self) -> None:
+        tasks = [self.h.task(f"T{i:02d}", f"a{i}.md", estimate_min=5) for i in range(1, 13)]
+        self.assertIn("review_batches", self.check(self.h.plan(tasks), expect=2, **FINAL_REVIEW).text)
+
+    def test_a_review_session_is_sized_by_what_it_reviews(self) -> None:
+        # Measured live: one ~75-line document took a doc reviewer about 10 minutes, so four
+        # articles in one session exceed the 30-minute cap.
+        tasks = [self.h.task(f"T0{i}", f"a{i}.md", estimate_min=5) for i in range(1, 5)]
+        text = self.check(self.h.plan(tasks), expect=2, **FINAL_REVIEW).text
+        self.assertIn("40 min of review", text)
+        self.assertIn("review_batches", text)
+
+    def test_a_small_code_batch_fits_one_session(self) -> None:
+        h = Harness()
+        try:
+            app = h.root / "app"
+            app.mkdir()
+            h.confirmed(review="final", deliverables=[{"id": "D1", "kind": "code", "what": "four small fixes"}],
+                        workspaces=[{"name": "app", "path": str(app), "mode": "write"}],
+                        participants=[{"agent": "code-author", "role": "author", "why": "Implements the D1 fixes."},
+                                      {"agent": "correctness-reviewer", "role": "reviewer", "why": "Checks D1 edge cases."}])
+            tasks = [h.task(f"T0{i}", f"f{i}.py", agent="code-author", workspace="app", checks=[], sources=["app:."],
+                            test_cmd="true", tests_paths=[f"f{i}.py"], estimate_min=5) for i in range(1, 5)]
+            h.write_json("plan.json", h.plan(tasks, final_checks=[]))
+            h.tp("plan", "check")
+        finally:
+            h.close()
+
+    def test_every_task_is_in_exactly_one_batch(self) -> None:
+        tasks = [self.h.task(f"T0{i}", f"a{i}.md") for i in range(1, 4)]
+        bad = self.h.plan(tasks, review_batches=[{"id": "B1", "tasks": ["T01", "T02"]},
+                                                 {"id": "B2", "tasks": ["T02"]}])
+        text = self.check(bad, expect=2, **FINAL_REVIEW).text
+        self.assertIn("T02", text)
+        self.assertIn("T03", text)
+
+    def test_plan_md_shows_the_review_sessions_approval_covers(self) -> None:
+        tasks = [self.h.task(f"T0{i}", f"a{i}.md") for i in range(1, 5)]
+        plan = self.h.plan(tasks, review_batches=[{"id": "B1", "tasks": ["T01", "T02"]},
+                                                  {"id": "B2", "tasks": ["T03", "T04"]}])
+        self.check(plan, **FINAL_REVIEW)
+        md = (self.h.wf / "plan.md").read_text()
+        self.assertIn("2 batches × 1 reviewer = 2 review sessions", md)
+        self.assertIn("after every task is accepted", md)
 
 
 class ApprovalTest(unittest.TestCase):

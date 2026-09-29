@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pipeline import docscheck, run, survey  # noqa: E402
+from pipeline import docscheck, issuesurvey, research, review, run, schemas, survey  # noqa: E402
 from pipeline import plan as planmod  # noqa: E402
 from pipeline import scope as scopemod  # noqa: E402
 from pipeline.common import TPError, Workflow, now_iso  # noqa: E402
@@ -23,6 +24,8 @@ from pipeline.common import TPError, Workflow, now_iso  # noqa: E402
 def cmd_init(wf: Workflow, args: argparse.Namespace) -> str:
     if wf.exists():
         raise TPError(f"{wf.root} already holds a workflow — `tp -w {wf.root} status`.")
+    if not Path(args.request_file).is_file():
+        raise TPError(f"{args.request_file} does not exist: save the human's request there first.")
     wf.meta.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(args.request_file, wf.root / "request.md")
     state = {"version": 1, "title": args.title, "phase": "SCOPING", "created": now_iso(),
@@ -87,12 +90,49 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("what", choices=["check", "confirm"])
     s.add_argument("--answer", help="the human's confirmation, verbatim (confirm)")
 
-    s = sub.add_parser("recon", help="add a planning recon item")
-    s.add_argument("what", choices=["add"])
+    s = sub.add_parser("survey-issue", help="deterministic sizing of a Jira or GitHub issue (jira:KEY, gh:o/r#N)")
+    s.add_argument("ref")
+
+    for name in ("research", "recon"):  # recon: the name older workflows use
+        s = sub.add_parser(name, help="planning research inside the agreed budget")
+        rs = s.add_subparsers(dest="what", required=True)
+        a = rs.add_parser("add", help="add one small research item")
+        a.add_argument("id")
+        a.add_argument("--agent", required=True)
+        a.add_argument("--purpose", choices=None, default=None if name == "research" else "map",
+                       help="map | requirements | investigate")
+        a.add_argument("--questions-file", required=True, help="one question per line, at most 3")
+        a.add_argument("--done-when", required=True)
+        a.add_argument("--minutes", type=int, help="time box, at most 15 (default 15)")
+        a.add_argument("--from", dest="from_ref", help="the followup this item pursues, e.g. R1.F2")
+        e = rs.add_parser("extend", help="grow the research budget with the human's agreement")
+        e.add_argument("--minutes", type=int, required=True)
+        e.add_argument("--answer", required=True)
+        d = rs.add_parser("dismiss", help="decide a followup is not worth pursuing")
+        d.add_argument("ref")
+        d.add_argument("--reason", required=True)
+        d = rs.add_parser("drop", help="drop a research item that has not run")
+        d.add_argument("id")
+        d.add_argument("--reason", required=True)
+
+    s = sub.add_parser("show", help="print one part of a structured result (research, review session, task)")
     s.add_argument("id")
-    s.add_argument("--agent", required=True)
-    s.add_argument("--questions-file", required=True, help="one question per line, at most 3")
-    s.add_argument("--done-when", required=True)
+    s.add_argument("--part", help="research: answers|followups|unknowns|areas · review: blocking|findings")
+
+    s = sub.add_parser("triage", help="decide a review session's blocking findings")
+    s.add_argument("id", help="review session, e.g. B1/doc-reviewer")
+    s.add_argument("--accept-all", action="store_true")
+    s.add_argument("--dismiss", default="", help="comma-separated finding ids that are not real problems")
+    s.add_argument("--reason", help="why the dismissed findings are not real problems")
+    s.add_argument("--assign", action="append", default=[], help="F#=T## for a finding no task path matched")
+
+    s = sub.add_parser("halt", aliases=["hault"], help="stop at the next clean point and record where")
+    s.add_argument("--reason", default="halt requested by the human")
+    s = sub.add_parser("resume", help="continue after a halt")
+    s.add_argument("--answer", required=True)
+
+    s = sub.add_parser("schema", help="print an example of a workflow file")
+    s.add_argument("name", choices=["scope", "plan", "research", "result", "review"])
 
     s = sub.add_parser("plan", help="check or submit plan.json")
     s.add_argument("what", choices=["check", "submit"])
@@ -103,10 +143,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--feedback", required=True)
     s.add_argument("--scope", action="store_true", help="the scope itself changes (back to SCOPING)")
 
-    for name, helptext in (("dispatch", "write the brief for the next step and mark it in flight"),
-                           ("sample", "the fact-check sample for a task")):
-        s = sub.add_parser(name, help=helptext)
-        s.add_argument("id")
+    s = sub.add_parser("dispatch", help="write the brief for each id's next step and mark it in flight")
+    s.add_argument("ids", nargs="+", metavar="id")
+    s = sub.add_parser("sample", help="the fact-check sample for a task")
+    s.add_argument("id")
     s = sub.add_parser("record", help="record an agent's hand-back and run the gates")
     s.add_argument("id")
     s.add_argument("--agent-id", help="the agent's id, for fix rounds by the same agent")
@@ -121,6 +161,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--task")
     s = sub.add_parser("resolve", help="record the human's decision")
     s.add_argument("--task")
+    s.add_argument("--review", help="a blocked review session, e.g. B1/doc-reviewer")
     s.add_argument("--action", required=True, choices=["answer", "retry", "skip", "reopen", "accept"])
     s.add_argument("--answer", required=True)
     s = sub.add_parser("note", help="log something noticed outside the plan")
@@ -136,11 +177,39 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def cmd_survey_issue(wf: Workflow, ref: str) -> str:
+    wf.load()
+    source, key = issuesurvey.parse(ref)
+    data = issuesurvey.jira(key) if source == "jira" else issuesurvey.github(key)
+    out = wf.root / "survey" / ("issue-" + re.sub(r"[^\w-]+", "-", key).strip("-") + ".json")
+    out.parent.mkdir(exist_ok=True)
+    out.write_text(json.dumps(data, indent=1))
+    wf.event("survey_issue", ref=ref)
+    return issuesurvey.summary(data, out)
+
+
+def cmd_show(wf: Workflow, tid: str, part) -> str:
+    state = wf.load()
+    if "/" in tid:
+        return review.show(state, tid, part)
+    if tid.startswith("R"):
+        return research.show(wf, state, tid, part)
+    results = sorted(wf.run_dir(tid).glob("result-*.json"), key=lambda p: p.stat().st_mtime)
+    if not results:
+        raise TPError(f"{tid} has no result yet.")
+    data = json.loads(results[-1].read_text())
+    if part in ("noticed", "questions", "changed", "disputes"):
+        return "\n".join(map(str, data.get(part, []))) or "none."
+    return f"{tid} {data.get('step')} {data.get('status')}: {data.get('summary')}"
+
+
 def dispatch(args: argparse.Namespace) -> str:
     if args.cmd == "roster":
         return scopemod.cmd_suggest([k.strip() for k in args.kinds.split(",") if k.strip()])
     if args.cmd == "check-docs":
         return cmd_check_docs(args)
+    if args.cmd == "schema":
+        return json.dumps(schemas.SCHEMAS[args.name], indent=1)
     if not args.workflow:
         raise TPError(f"`tp {args.cmd}` needs -w <workflow dir>.")
     wf = Workflow(Path(args.workflow))
@@ -159,8 +228,26 @@ def dispatch(args: argparse.Namespace) -> str:
         if not args.answer:
             raise TPError("scope confirm needs --answer with the human's words.")
         return scopemod.cmd_confirm(wf, args.answer)
-    if c == "recon":
-        return run.cmd_recon_add(wf, args.id, args.agent, Path(args.questions_file), args.done_when)
+    if c == "survey-issue":
+        return cmd_survey_issue(wf, args.ref)
+    if c in ("research", "recon"):
+        if args.what == "add":
+            return research.cmd_add(wf, args.id, args.agent, args.purpose, Path(args.questions_file), args.done_when,
+                                    args.minutes, args.from_ref)
+        if args.what == "extend":
+            return research.cmd_extend(wf, args.minutes, args.answer)
+        if args.what == "dismiss":
+            return research.cmd_dismiss(wf, args.ref, args.reason)
+        return research.cmd_drop(wf, args.id, args.reason)
+    if c == "show":
+        return cmd_show(wf, args.id, args.part)
+    if c == "triage":
+        return review.cmd_triage(wf, args.id, args.accept_all, [x for x in args.dismiss.split(",") if x],
+                                 args.reason, args.assign)
+    if c in ("halt", "hault"):
+        return run.cmd_halt(wf, args.reason)
+    if c == "resume":
+        return run.cmd_resume(wf, args.answer)
     if c == "plan":
         return planmod.cmd_check(wf) if args.what == "check" else planmod.cmd_submit(wf)
     if c == "approve":
@@ -168,9 +255,17 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "revise":
         return planmod.cmd_revise(wf, args.feedback, args.scope)
     if c == "dispatch":
-        return run.cmd_dispatch(wf, args.id)
+        done = []
+        for tid in args.ids:
+            try:
+                done.append(run.cmd_dispatch(wf, tid))
+            except TPError as exc:  # the dispatches that succeeded stay in flight: their calls must still be sent
+                exc.done = "\n\n".join(done)
+                exc.lines = [f"{tid}: {ln}" for ln in exc.lines]
+                raise
+        return "\n\n".join(done)
     if c == "record":
-        return run.cmd_record(wf, args.id, args.agent_id)
+        return run.after_record(wf, run.cmd_record(wf, args.id, args.agent_id))
     if c == "sample":
         return run.cmd_sample(wf, args.id)
     if c == "accept":
@@ -180,6 +275,9 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "exception":
         return run.cmd_exception(wf, args.summary, args.task)
     if c == "resolve":
+        if args.review:
+            with wf.locked():
+                return review.resolve(wf, wf.load(), args.review, args.action, args.answer)
         return run.cmd_resolve(wf, args.task, args.action, args.answer)
     if c == "note":
         wf.load()
@@ -198,6 +296,8 @@ def main(argv=None) -> int:
         print(dispatch(args))
         return 0
     except TPError as exc:
+        if exc.done:
+            print(exc.done + "\n")
         for line in exc.lines:
             print(f"ERROR: {line}")
         return 2

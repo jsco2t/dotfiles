@@ -1,7 +1,7 @@
 ---
 name: comp-goreviewomatic
 description: Go code reviewer with 9 review personas (API Design & Schema Guardian, Architecture & Abstraction Guardian, Convention & Documentation Steward, Infrastructure Hardening Specialist, Integration & Deployment Reviewer, Language Specialist, Observability & Operability Reviewer, Security & Data Protection Reviewer, Systems Correctness Analyst) that works locally or on GitHub PRs. Reviews code, posts inline PR comments, and resolves its own prior comments. Can also scan a PR queue to find review-ready PRs.
-argument-hint: "[mode local|review|resolve|scan] [pr-ref] [--auto-comment] [--confidence=N]"
+argument-hint: "[mode local|review|resolve|scan] [pr-ref] [--auto-comment] [--confidence=N] [--max-agents=N]"
 ---
 
 # Composite Go Review-O-Matic
@@ -218,6 +218,8 @@ For each PR the user approves:
 **For `review` and `scan` modes (PR):** Also gather the raw diff lines (`ghtk pr diff <number>`) and extract the set of (file, line) pairs that are part of the diff. Pass this set to each reviewer with the instruction: **"Your findings MUST reference lines that appear in the diff. Do not flag issues on unchanged lines — even if adjacent code should also change, your finding must be anchored to a line that was added or modified in this changeset."** This constraint is required because the GitHub Reviews API only accepts comments on diff-visible lines.
 
 ### Fan-out: grouping review lenses into sub-agents
+
+**Sub-agent budget (`--max-agents=N`).** The ceiling of 6 in this section is the default. When the arguments include `--max-agents=N`, N replaces 6 everywhere this skill caps sub-agents: never have more than N running from this review. `--max-agents=0`, or no Agent tool available to you, means start none: run every selected lens yourself, one after another, each at full depth, and report it exactly as a sub-agent would. A smaller budget packs more lenss into each sub-agent; it never drops one.
 
 This review runs as parallel sub-agents. To keep it fast and token-efficient, **never launch more than 6 sub-agents**, and pack the review responsibilities into them — do **not** launch one sub-agent per responsibility or per persona.
 

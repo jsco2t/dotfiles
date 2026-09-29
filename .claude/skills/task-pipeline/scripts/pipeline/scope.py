@@ -1,15 +1,17 @@
-"""Scope: what will be delivered, who works on it, and the budget — checked, rendered,
-and frozen when the human confirms it."""
+"""Scope: what will be delivered, who works on it, the time budget, and the research budget —
+checked, rendered, and frozen when the human confirms it."""
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
 from .common import TPError, Workflow, catalog, limit, load_json, now_iso, sha_file
 
-REVIEW_MODES = ("none", "per-task", "final", "both")
+REVIEW_MODES = ("none", "final", "per-task", "both")
 WORK_ROLES = ("author", "tests", "reviewer")
+ROLE_ALIASES = {"recon": "research"}  # workflows created before research budgets called it recon
 
 
 def load_scope(wf: Workflow) -> Dict[str, Any]:
@@ -23,12 +25,26 @@ def deliverable_kinds(scope: Dict[str, Any]) -> Set[str]:
     return {str(d["kind"]) for d in scope.get("deliverables", []) if isinstance(d, dict) and d.get("kind")}
 
 
+def role_of(p: Dict[str, Any]) -> str:
+    role = str(p.get("role", ""))
+    return ROLE_ALIASES.get(role, role)
+
+
 def participants(scope: Dict[str, Any], role: str) -> List[str]:
-    return [p["agent"] for p in scope.get("participants", []) if isinstance(p, dict) and p.get("role") == role]
+    return [p["agent"] for p in scope.get("participants", []) if isinstance(p, dict) and role_of(p) == role]
 
 
 def workspaces(scope: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return {w["name"]: w for w in scope.get("workspaces", []) if isinstance(w, dict) and "name" in w}
+
+
+def research_budget(scope: Dict[str, Any]) -> int:
+    research = scope.get("research") or {}
+    return int(research.get("budget_minutes") or 0) if isinstance(research, dict) else 0
+
+
+def final_reviewers(scope: Dict[str, Any]) -> List[str]:
+    return participants(scope, "reviewer") if scope.get("review") in ("final", "both") else []
 
 
 def validate(scope: Dict[str, Any]) -> List[str]:
@@ -59,8 +75,8 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     has_write = False
     for w in scope["workspaces"]:
         name, path, mode = w.get("name", ""), w.get("path", ""), w.get("mode")
-        if not re.fullmatch(r"[a-z0-9_-]+", str(name)) or name in names:
-            errs.append(f"workspace name {name!r} must be unique, lowercase, [a-z0-9_-].")
+        if not re.fullmatch(r"[a-z0-9_-]+", str(name)) or name in names or name in ("research", "recon"):
+            errs.append(f"workspace name {name!r} must be unique, lowercase, [a-z0-9_-], and not 'research'.")
         names.add(name)
         if mode not in ("write", "read"):
             errs.append(f"workspace {name}: mode must be write or read.")
@@ -70,12 +86,10 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     if not has_write:
         errs.append("at least one workspace must be mode write (where deliverables go).")
 
-    work = 0
-    reviewers = 0
-    recon = 0
+    work = reviewers = 0
     seen: Set[str] = set()
     for p in scope["participants"]:
-        agent, role, why = p.get("agent", ""), p.get("role", ""), str(p.get("why", "")).strip()
+        agent, role, why = p.get("agent", ""), role_of(p), str(p.get("why", "")).strip()
         key = f"{agent}/{role}"
         if key in seen:
             errs.append(f"{agent} is listed twice as {role}.")
@@ -96,15 +110,11 @@ def validate(scope: Dict[str, Any]) -> List[str]:
             if not kinds & set(entry["kinds"]):
                 errs.append(f"{agent} ({role}) does not apply to {', '.join(sorted(kinds))} deliverables; "
                             f"it is for: {', '.join(entry['kinds'])}.")
-        else:
-            recon += 1
     if work > limit("max_participants"):
         errs.append(f"{work} participants (authors, tests, reviewers); the limit is "
                     f"{limit('max_participants')} — keep only agents with a direct bearing on the output.")
     if reviewers > limit("max_reviewers"):
-        errs.append(f"{reviewers} reviewers; the limit is {limit('max_reviewers')}.")
-    if recon > limit("max_recon_agents"):
-        errs.append(f"{recon} recon agents; the limit is {limit('max_recon_agents')}.")
+        errs.append(f"{reviewers} reviewers; the limit is {limit('max_reviewers')} — keep the lenses this change needs.")
 
     for kind in sorted(kinds):
         authors = [a for a in participants(scope, "author") if kind in agents.get(a, {}).get("kinds", [])]
@@ -114,7 +124,7 @@ def validate(scope: Dict[str, Any]) -> List[str]:
 
     mode = scope.get("review")
     if mode not in REVIEW_MODES:
-        errs.append(f"review must be one of {', '.join(REVIEW_MODES)}.")
+        errs.append(f"review must be one of {', '.join(REVIEW_MODES)} (final is the norm: bulk, at the end).")
     elif mode == "none" and reviewers:
         errs.append(f"review is 'none' but {', '.join(participants(scope, 'reviewer'))} is listed as a reviewer — "
                     "drop it or choose a review mode.")
@@ -124,6 +134,24 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     budget = scope.get("budget_minutes")
     if budget is not None and (not isinstance(budget, int) or not 15 <= budget <= 2880):
         errs.append("budget_minutes must be a whole number of minutes between 15 and 2880 (or null).")
+    research = scope.get("research")
+    rb = research_budget(scope)
+    researchers = participants(scope, "research")
+    if research is not None and (not isinstance(research, dict) or not isinstance(research.get("budget_minutes", 0), int)
+                                 or research.get("budget_minutes", 0) < 0):
+        errs.append("research must be {\"budget_minutes\": <agent-minutes>, \"why\": \"...\"}.")
+    elif researchers and not rb:
+        errs.append(f"{', '.join(researchers)} can only run inside a research budget agreed with the human "
+                    "(`research.budget_minutes`).")
+    elif rb and not researchers:
+        errs.append("a research budget needs at least one research participant.")
+    elif rb:
+        if len(str(research.get("why", "")).strip()) < 12:
+            errs.append("research.why must say what is unknown enough to need research.")
+        lanes = limit("max_in_flight")
+        if isinstance(budget, int) and math.ceil(rb / lanes) >= budget:
+            errs.append(f"a research budget of {rb} agent-min takes {math.ceil(rb / lanes)} of the {budget}-min "
+                        "budget on its own — shrink it or raise the budget.")
     for t in scope.get("terms", []):
         if not t.get("term") or not t.get("means"):
             errs.append("each term needs `term` and `means` (and ideally `not`).")
@@ -133,7 +161,10 @@ def validate(scope: Dict[str, Any]) -> List[str]:
 def render(scope: Dict[str, Any]) -> str:
     out = [f"# Scope — {scope['title']}", "", f"**Output:** {scope['output']}", ""]
     budget = scope.get("budget_minutes")
+    rb = research_budget(scope)
     out += [f"**Budget:** {budget} min, planning included." if budget else "**Budget:** none set.",
+            f"**Research budget:** {rb} agent-min — {scope['research'].get('why', '')}" if rb
+            else "**Research:** none — the work is specified well enough to plan directly.",
             f"**Review:** {scope['review']}.", "", "## Deliverables"]
     out += [f"- {d['id']} ({d['kind']}): {d['what']}" + (f" — in `{d['where']}`" if d.get("where") else "")
             for d in scope["deliverables"]]
@@ -144,7 +175,7 @@ def render(scope: Dict[str, Any]) -> str:
     if scope.get("non_goals"):
         out += ["", "## Non-goals"] + [f"- {g}" for g in scope["non_goals"]]
     out += ["", "## Participants"]
-    out += [f"- {p['agent']} ({p['role']}): {p['why']}" for p in scope["participants"]]
+    out += [f"- {p['agent']} ({role_of(p)}): {p['why']}" for p in scope["participants"]]
     out += ["", "## Workspaces"]
     out += [f"- {w['name']} ({w['mode']}): `{w['path']}`" for w in scope["workspaces"]]
     if scope.get("answers"):
@@ -167,8 +198,8 @@ def cmd_check(wf: Workflow) -> str:
     wf.save(state)
     wf.event("scope_check")
     return (f"scope ok — rendered {wf.root / 'scope.md'}.\n"
-            "Present it to the human and ask them to confirm (AskUserQuestion). On yes: "
-            "`tp scope confirm --answer \"<their words>\"`.")
+            "Present it to the human (including the research budget, or that there is none) and ask them to "
+            "confirm (AskUserQuestion). On yes: `tp scope confirm --answer \"<their words>\"`.")
 
 
 def cmd_confirm(wf: Workflow, answer: str) -> str:
@@ -200,8 +231,11 @@ def cmd_suggest(kinds: List[str]) -> str:
         if s.get("tests"):
             out.append(f"  {kind}: tests     {s['tests']} — {cat['agents'][s['tests']]['use']}")
         for agent in s.get("ask", []):
-            out.append(f"  {kind}: ask       {agent} (reviewer) — {cat['agents'][agent]['use']}; "
-                       "only if the human wants review beyond the scripted checks")
-    out.append("Recon: none by default — `tp survey` maps repository structure. Ask the human before "
-               "adding a recon agent, and only for a question the survey cannot answer.")
+            out.append(f"  {kind}: review?   {agent} — {cat['agents'][agent]['use']}")
+        for agent in s.get("research", []):
+            out.append(f"  {kind}: research? {agent} — {cat['agents'][agent]['use']}")
+    out.append("Reviewers run once, at the end, in bulk — choose only the lenses this change needs.")
+    out.append("Researchers run only with a research budget agreed with the human; a clear, small ask needs none. "
+               "Other research agents: " + ", ".join(sorted(a for a, e in cat["agents"].items()
+                                                              if "research" in e["roles"])) + ".")
     return "\n".join(out)

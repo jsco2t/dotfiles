@@ -17,6 +17,62 @@ BUILTIN_FINAL_CHECKS = {"docs-all": "links, citations, and index reachability ac
 REVIEW_MINUTES = 8
 
 
+def review_batches(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The end-of-pipeline review batches: the plan's, or one batch of every task."""
+    if not scopemod.final_reviewers(scope):
+        return []
+    return plan.get("review_batches") or [{"id": "B1", "tasks": [t["id"] for t in plan["tasks"]]}]
+
+
+def session_minutes(batch: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any]) -> int:
+    """How long one reviewer needs for a batch: review time grows with what it reviews."""
+    tasks = {t["id"]: t for t in plan["tasks"]}
+    return sum(limit("review_minutes_per_code_task") if tid in tasks and is_code(tasks[tid], scope)
+               else limit("review_minutes_per_doc_task") for tid in batch.get("tasks", []))
+
+
+def review_tail(plan: Dict[str, Any], scope: Dict[str, Any]) -> Tuple[int, int]:
+    """(review sessions, minutes they add after the last task): the sessions spread over the
+    lanes, then one verification session each."""
+    reviewers = len(scopemod.final_reviewers(scope))
+    lengths = [session_minutes(b, plan, scope) for b in review_batches(plan, scope) for _ in range(reviewers)]
+    if not lengths:
+        return 0, 0
+    lanes = limit("max_in_flight")
+    review = max(max(lengths), math.ceil(sum(lengths) / lanes))
+    return len(lengths), review + math.ceil(len(lengths) / lanes) * limit("verify_session_minutes")
+
+
+def _validate_batches(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
+    ids = [t.get("id") for t in plan["tasks"]]
+    if plan.get("review_batches") and not scopemod.final_reviewers(scope):
+        return ["review_batches need review 'final' in scope.json."]
+    batches = review_batches(plan, scope)
+    if not batches:
+        return []
+    errs = []
+    seen: Dict[str, str] = {}
+    for b in batches:
+        bid = str(b.get("id", ""))
+        if not re.fullmatch(r"B\d+", bid):
+            errs.append(f"review batch id {bid!r} must look like B1.")
+        for tid in b.get("tasks", []):
+            if tid not in ids:
+                errs.append(f"{bid}: unknown task {tid}.")
+            elif tid in seen:
+                errs.append(f"{tid} is in two review batches ({seen[tid]}, {bid}).")
+            seen[tid] = bid
+        minutes, cap = session_minutes(b, plan, scope), limit("max_review_session_minutes")
+        if len(b.get("tasks", [])) > limit("max_batch_tasks") or minutes > cap:
+            errs.append(f"{bid} needs about {minutes} min of review per reviewer ({len(b.get('tasks', []))} tasks); "
+                        f"one session is at most {cap} min and {limit('max_batch_tasks')} tasks — split the work "
+                        "into smaller review_batches.")
+    for tid in ids:
+        if tid not in seen:
+            errs.append(f"{tid} is in no review batch.")
+    return errs
+
+
 def load_plan(wf: Workflow) -> Dict[str, Any]:
     data = load_json(wf.plan_json, "the plan")
     if not isinstance(data, dict) or not isinstance(data.get("tasks"), list):
@@ -169,8 +225,12 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any])
             if pp.is_absolute() or ".." in pp.parts or not str(p).strip():
                 errs.append(f"{tid}: path {p} leaves the workspace; paths are relative to it.")
         for src in t.get("sources", []):
-            if ":" not in str(src) or str(src).split(":", 1)[0] not in wss:
-                errs.append(f"{tid}: source {src!r} must be `<workspace>:<path or glob>`.")
+            prefix, _, ref = str(src).partition(":")
+            if prefix == "research":
+                if state.get("recon", {}).get(ref, {}).get("status") != "done":
+                    errs.append(f"{tid}: source {src} is not an answered research item.")
+            elif not ref or prefix not in wss:
+                errs.append(f"{tid}: source {src!r} must be `<workspace>:<path or glob>` or `research:R#`.")
         if words(t.get("brief", "")) > limit("task_brief_words"):
             errs.append(f"{tid}: brief is {words(t['brief'])} words; the limit is {limit('task_brief_words')}.")
         if len(t.get("acceptance", [])) > limit("max_acceptance"):
@@ -222,19 +282,22 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any])
                         errs.append(f"{a} and {b} overlap on {pa} / {pb} — order them with depends_on "
                                     "or split the paths (parallel tasks must write disjoint files).")
 
+    errs += _validate_batches(plan, scope)
     budget = scope.get("budget_minutes")
     if budget:
-        spent = minutes_since(state.get("created"))
-        left = budget - spent
+        left = budget - minutes_since(state.get("created"))
         total = sum(lane_minutes(t, scope) for t in tasks.values())
         span, chain = critical_path(tasks, scope)
         lanes = limit("max_in_flight")
-        if span > left:
-            errs.append(f"critical path is {span} min ({' -> '.join(chain)}) but the budget leaves "
-                        f"{left:.0f} of {budget} min — shorten the chain.")
-        if math.ceil(total / lanes) > left:
-            errs.append(f"work totals {total} lane-min = {math.ceil(total / lanes)} min over {lanes} lanes, "
-                        f"but the budget leaves {left:.0f} of {budget} min — cut or merge tasks.")
+        work = math.ceil(total / lanes)
+        sessions, tail = review_tail(plan, scope)
+        if max(span, work) + tail > left:
+            what = (f"critical path is {span} min ({' -> '.join(chain)})" if span >= work
+                    else f"work totals {total} lane-min = {work} min over {lanes} lanes")
+            if tail:
+                what += f", plus a {tail}-min review tail ({sessions} review sessions and their verification)"
+            errs.append(f"{what}, but the budget leaves {left:.0f} of {budget} min — cut or merge tasks, "
+                        "or fewer review lenses.")
     return errs
 
 
@@ -243,9 +306,17 @@ def render(plan: Dict[str, Any], scope: Dict[str, Any], wf: Workflow) -> str:
     total = sum(lane_minutes(t, scope) for t in tasks.values())
     span, _ = critical_path(tasks, scope)
     lanes = limit("max_in_flight")
+    sessions, tail = review_tail(plan, scope)
     out = [f"# Plan — {plan['title']}", "", plan.get("summary", ""), "",
-           f"**{len(tasks)} tasks** · about {max(span, math.ceil(total / lanes))} min of execution on "
-           f"{lanes} lanes · budget {scope.get('budget_minutes') or 'none'} · scope: `scope.md`", "",
+           f"**{len(tasks)} tasks** · about {max(span, math.ceil(total / lanes)) + tail} min of execution on "
+           f"{lanes} lanes · budget {scope.get('budget_minutes') or 'none'} · scope: `scope.md`", ""]
+    if sessions:
+        nb, nr = len(review_batches(plan, scope)), len(scopemod.final_reviewers(scope))
+        out += [f"**Review:** {nb} batch{'es' if nb > 1 else ''} × {nr} reviewer{'s' if nr > 1 else ''} = "
+                f"{sessions} review session{'s' if sessions > 1 else ''} ({', '.join(scopemod.final_reviewers(scope))}), "
+                f"run together after every task is accepted, plus at most {sessions} verification "
+                f"session{'s' if sessions > 1 else ''} scoped to what they find (about {tail} min).", ""]
+    out += [
            "| Task | Title | Agent | Review | Est | After | Writes |", "|---|---|---|---|---|---|---|"]
     for t in tasks.values():
         rev = reviewer_for(t, scope) or "—"
@@ -264,8 +335,8 @@ def render(plan: Dict[str, Any], scope: Dict[str, Any], wf: Workflow) -> str:
             out.append(f"- Checks: {', '.join(checks)}")
     finals = plan.get("final_checks", [])
     out += ["", "## Final checks", ""] + ([f"- {c}" for c in finals] or ["- none"])
-    if scope.get("review") in ("final", "both"):
-        out.append(f"- whole-package review by {', '.join(scopemod.participants(scope, 'reviewer'))}")
+    for b in review_batches(plan, scope):
+        out.append(f"- review batch {b['id']}: {', '.join(b['tasks'])}")
     if plan.get("questions"):
         out += ["", "## Questions for the human (non-blocking)", ""] + [f"- {q}" for q in plan["questions"]]
     noticed = wf.noticed_items()
@@ -300,9 +371,17 @@ def cmd_submit(wf: Workflow) -> str:
     state = wf.load()
     if state["phase"] != "PLANNING":
         raise TPError(f"Only a PLANNING workflow can be submitted; it is {state['phase']}.")
-    busy = [r for r, v in state.get("recon", {}).items() if v["status"] == "in_flight"]
-    if busy:
-        raise TPError(f"recon still in flight: {', '.join(busy)} — record it first.")
+    unsettled = []
+    for rid, item in state.get("recon", {}).items():
+        if item["status"] in ("pending", "in_flight"):
+            unsettled.append(f"{rid} is {item['status'].replace('_', ' ')} — run and record it, or "
+                             f"`tp research drop {rid} --reason \"...\"`.")
+        for f in item.get("followups", []):
+            if f["status"] == "open":
+                unsettled.append(f"{f['id']} is undecided: `tp research add ... --from {f['id']}` or "
+                                 f"`tp research dismiss {f['id']} --reason \"...\"`.")
+    if unsettled:
+        raise TPError(*unsettled)
     plan, scope = _checked(wf, state)
     state["plan_submitted_sha"] = sha_file(wf.plan_json)
     state["phase"] = "AWAITING_APPROVAL"
@@ -337,6 +416,9 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
     for t in plan["tasks"]:
         state["tasks"].setdefault(t["id"], run.new_task_state())
     state["readonly_baseline"] = run.readonly_baseline(wf, scope)
+    from . import review  # end-of-pipeline review sessions and their diff baseline
+    state["write_baseline"] = review.write_baseline(scope)
+    state["reviews"] = review.new_reviews(plan, scope, state.get("reviews", {}))
     wf.save(state)
     wf.decision("plan approve", answer)
     wf.event("approve")

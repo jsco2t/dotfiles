@@ -25,6 +25,7 @@ class TPError(Exception):
     def __init__(self, *lines: str) -> None:
         super().__init__("\n".join(lines))
         self.lines = [ln for ln in lines if ln]
+        self.done = ""  # output of the steps that succeeded before the refusal, printed first
 
 
 def now_iso() -> str:
@@ -141,12 +142,12 @@ class Workflow:
             return []
         return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
 
-    def decision(self, what: str, text: str) -> None:
+    def decision(self, what: str, text: str, who: str = "human") -> None:
         path = self.root / "decisions.md"
         if not path.exists():
-            path.write_text("# Decisions\n\nEvery human answer and decision, verbatim, in order.\n\n")
+            path.write_text("# Decisions\n\nEvery human answer and every manager ruling, verbatim, in order.\n\n")
         with open(path, "a") as handle:
-            handle.write(f"- {now_iso()} · {what} · human: {text.strip()}\n")
+            handle.write(f"- {now_iso()} · {what} · {who}: {text.strip()}\n")
 
     def noticed(self, source: str, text: str) -> None:
         path = self.root / "noticed.md"

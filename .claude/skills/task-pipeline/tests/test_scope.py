@@ -16,10 +16,11 @@ class RosterSuggestTest(unittest.TestCase):
 
     def test_kb_suggestion_is_one_author_and_one_optional_reviewer(self) -> None:
         out = self.h.tp("roster", "suggest", "--kinds", "kb", wf=False).out
-        self.assertIn("kb-author", out)
+        self.assertIn("kb: author    kb-author", out)
         self.assertIn("doc-reviewer", out)
-        for absent in ("architecture-reviewer", "code-reviewer", "project-manager", "test-planner",
-                       "codebase-researcher"):
+        self.assertIn("only with a research budget", out)
+        for absent in ("architecture-reviewer", "code-reviewer", "security-reviewer", "project-manager",
+                       "test-planner"):
             self.assertNotIn(absent, out)
 
     def test_code_suggestion_is_test_forward(self) -> None:
@@ -68,12 +69,21 @@ class ScopeCheckTest(unittest.TestCase):
         self.assertIn("why", res.text)
 
     def test_participant_cap(self) -> None:
+        reviewers = ["code-reviewer", "correctness-reviewer", "security-reviewer", "api-compat-reviewer",
+                     "test-reviewer", "architecture-reviewer", "ux-reviewer"]
         many = [{"agent": a, "role": r, "why": "Needed for the code deliverable D1 here."}
-                for a, r in (("code-author", "author"), ("test-author", "tests"), ("code-reviewer", "reviewer"),
-                             ("test-reviewer", "reviewer"), ("ux-reviewer", "reviewer"))]
-        res = self.check(expect=2, review="per-task", participants=many,
+                for a, r in [("code-author", "author"), ("test-author", "tests")] + [(x, "reviewer") for x in reviewers]]
+        res = self.check(expect=2, review="final", participants=many,
                          deliverables=[{"id": "D1", "kind": "code", "what": "mul()", "where": "kb"}])
-        self.assertIn("participants", res.text)
+        self.assertIn("9 participants", res.text)
+        self.assertIn("7 reviewers", res.text)
+
+    def test_specific_reviewers_fit_within_the_caps(self) -> None:
+        picks = [("code-author", "author"), ("test-author", "tests"), ("correctness-reviewer", "reviewer"),
+                 ("security-reviewer", "reviewer"), ("test-reviewer", "reviewer")]
+        self.check(review="final", participants=[{"agent": a, "role": r, "why": "Needed for the D1 code change."}
+                                                 for a, r in picks],
+                   deliverables=[{"id": "D1", "kind": "code", "what": "mul()", "where": "kb"}])
 
     def test_every_deliverable_kind_needs_an_author(self) -> None:
         res = self.check(expect=2, review="per-task", participants=[
@@ -90,6 +100,27 @@ class ScopeCheckTest(unittest.TestCase):
     def test_a_review_mode_without_a_reviewer_is_refused(self) -> None:
         res = self.check(expect=2, review="per-task")
         self.assertIn("reviewer", res.text)
+
+    def test_research_needs_an_agreed_budget_and_a_researcher(self) -> None:
+        kb = {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."}
+        liaison = {"agent": "atlassian-liaison", "role": "research", "why": "Reads the epic's child issues for D1."}
+        self.assertIn("research budget", self.check(expect=2, participants=[kb, liaison]).text)
+        self.assertIn("research participant", self.check(
+            expect=2, participants=[kb], research={"budget_minutes": 45, "why": "Epic children are thin."}).text)
+        self.check(participants=[kb, liaison], research={"budget_minutes": 45, "why": "Epic children are thin."})
+        self.assertIn("Research budget:** 45 agent-min", (self.h.wf / "scope.md").read_text())
+
+    def test_research_budget_must_fit_the_whole_budget(self) -> None:
+        kb = {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."}
+        liaison = {"agent": "atlassian-liaison", "role": "research", "why": "Reads the epic's child issues for D1."}
+        res = self.check(expect=2, participants=[kb, liaison], budget_minutes=60,
+                         research={"budget_minutes": 400, "why": "Everything."})
+        self.assertIn("research budget", res.text)
+
+    def test_legacy_recon_role_still_reads_as_research(self) -> None:
+        self.check(participants=[{"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},
+                                 {"agent": "codebase-researcher", "role": "recon", "why": "Maps dash/ for D1."}],
+                   research={"budget_minutes": 15, "why": "dash/ is opaque to the survey."})
 
     def test_workspace_paths_must_exist(self) -> None:
         res = self.check(expect=2, workspaces=[{"name": "kb", "path": "/nonexistent/kb", "mode": "write"}])

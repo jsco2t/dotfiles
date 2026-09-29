@@ -1,0 +1,133 @@
+"""Scoping: a minimal, human-confirmed set of participants, and a scope that freezes once
+the human confirms it."""
+from __future__ import annotations
+
+import unittest
+
+from harness import Harness
+
+
+class RosterSuggestTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.h = Harness()
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def test_kb_suggestion_is_one_author_and_one_optional_reviewer(self) -> None:
+        out = self.h.tp("roster", "suggest", "--kinds", "kb", wf=False).out
+        self.assertIn("kb-author", out)
+        self.assertIn("doc-reviewer", out)
+        for absent in ("architecture-reviewer", "code-reviewer", "project-manager", "test-planner",
+                       "codebase-researcher"):
+            self.assertNotIn(absent, out)
+
+    def test_code_suggestion_is_test_forward(self) -> None:
+        out = self.h.tp("roster", "suggest", "--kinds", "code", wf=False).out
+        self.assertIn("test-author", out)
+        self.assertIn("code-author", out)
+
+
+class ScopeCheckTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.init()
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def check(self, expect: int = 0, **over):
+        self.h.write_json("scope.json", self.h.scope(**over))
+        return self.h.tp("scope", "check", expect=expect)
+
+    def test_valid_scope_renders_a_short_scope_md(self) -> None:
+        self.check()
+        md = (self.h.wf / "scope.md").read_text()
+        self.assertIn("kb-author", md)
+        self.assertIn("D1", md)
+        self.assertLess(len(md.encode()), 4000)
+
+    def test_architecture_review_of_documents_is_refused(self) -> None:
+        # Regression: the orchestrator planned an architecture review of internal documents.
+        res = self.check(expect=2, review="per-task", participants=[
+            {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},
+            {"agent": "architecture-reviewer", "role": "reviewer", "why": "Reviews the KB's structure."},
+        ])
+        self.assertIn("architecture-reviewer", res.text)
+        self.assertIn("kb", res.text)
+
+    def test_orchestrator_only_agents_are_refused(self) -> None:
+        res = self.check(expect=2, participants=[
+            {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},
+            {"agent": "project-manager", "role": "reviewer", "why": "Audits each stage transition."},
+        ])
+        self.assertIn("project-manager", res.text)
+
+    def test_every_participant_needs_a_reason(self) -> None:
+        res = self.check(expect=2, participants=[{"agent": "kb-author", "role": "author", "why": ""}])
+        self.assertIn("why", res.text)
+
+    def test_participant_cap(self) -> None:
+        many = [{"agent": a, "role": r, "why": "Needed for the code deliverable D1 here."}
+                for a, r in (("code-author", "author"), ("test-author", "tests"), ("code-reviewer", "reviewer"),
+                             ("test-reviewer", "reviewer"), ("ux-reviewer", "reviewer"))]
+        res = self.check(expect=2, review="per-task", participants=many,
+                         deliverables=[{"id": "D1", "kind": "code", "what": "mul()", "where": "kb"}])
+        self.assertIn("participants", res.text)
+
+    def test_every_deliverable_kind_needs_an_author(self) -> None:
+        res = self.check(expect=2, review="per-task", participants=[
+            {"agent": "doc-reviewer", "role": "reviewer", "why": "Checks the accuracy of the articles."}])
+        self.assertIn("author", res.text)
+
+    def test_a_reviewer_the_review_mode_never_uses_is_refused(self) -> None:
+        res = self.check(expect=2, review="none", participants=[
+            {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},
+            {"agent": "doc-reviewer", "role": "reviewer", "why": "Checks the accuracy of the articles."},
+        ])
+        self.assertIn("review", res.text)
+
+    def test_a_review_mode_without_a_reviewer_is_refused(self) -> None:
+        res = self.check(expect=2, review="per-task")
+        self.assertIn("reviewer", res.text)
+
+    def test_workspace_paths_must_exist(self) -> None:
+        res = self.check(expect=2, workspaces=[{"name": "kb", "path": "/nonexistent/kb", "mode": "write"}])
+        self.assertIn("/nonexistent/kb", res.text)
+
+
+class ScopeConfirmTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.init()
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def test_confirm_needs_a_checked_scope(self) -> None:
+        self.h.tp("scope", "confirm", "--answer", "ok", expect=2)
+
+    def test_confirm_moves_to_planning_and_logs_the_human_answer(self) -> None:
+        self.h.write_json("scope.json", self.h.scope())
+        self.h.tp("scope", "check")
+        self.h.tp("scope", "confirm", "--answer", "Looks right, go.")
+        self.assertEqual(self.h.state()["phase"], "PLANNING")
+        self.assertIn("Looks right, go.", (self.h.wf / "decisions.md").read_text())
+
+    def test_scope_is_frozen_after_confirmation(self) -> None:
+        # Regression: deliverables D2-D5 were added mid-research. After confirmation the
+        # scope cannot grow without the human.
+        self.h.write_json("scope.json", self.h.scope())
+        self.h.tp("scope", "check")
+        self.h.tp("scope", "confirm", "--answer", "ok")
+        grown = self.h.scope(deliverables=[
+            {"id": "D1", "kind": "kb", "what": "A KB", "where": "kb"},
+            {"id": "D2", "kind": "kb", "what": "Security finding records", "where": "kb"}])
+        self.h.write_json("scope.json", grown)
+        self.h.write_json("plan.json", self.h.plan())
+        res = self.h.tp("plan", "check", expect=2)
+        self.assertIn("scope.json changed after confirmation", res.text)
+
+
+if __name__ == "__main__":
+    unittest.main()

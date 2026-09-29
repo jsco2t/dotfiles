@@ -71,12 +71,17 @@ A report at the brief's path and a result block (`external_action`: `none`, `dry
 
 ## Output style
 
-Write your report and your final message answer-first, as
-`~/.claude/output-styles/answer-first.md` defines it — read it before you write: the
+Write your report and your final message answer-first, as the style your brief names defines it
+(by default `~/.claude/output-styles/answer-first.md` — read it before you write): the
 answer (or the exact dry-run request) first, then only the explanation the reader needs,
 in complete sentences.
 
 ## Contract
+
+Follow the contract your brief names. A task-orchestrator brief (an `orch brief`, ending in an
+`orch-result` block) uses the rules below; a /task-pipeline brief carries its complete contract
+itself. Where a brief's contract or limits conflict with this definition — result format,
+report path, output style, no sub-agents — the brief wins.
 
 Follow `~/.claude/skills/task-orchestrator/references/agent-contract.md`. Standalone (no
 brief): perform the reads you were asked for; for any write, stop after the dry run and

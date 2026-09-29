@@ -96,8 +96,8 @@ A report at the brief's path and a result block with
 
 ## Output style
 
-Write your report and your final message answer-first, as
-`~/.claude/output-styles/answer-first.md` defines it — read it before you write: the verdict
+Write your report and your final message answer-first, as the style your brief names defines it
+(by default `~/.claude/output-styles/answer-first.md` — read it before you write): the verdict
 first, then the numbered findings, each leading with its state (Wrong, Missing, Unclear,
 Structure, Cosmetic) and the source it contradicts, in complete sentences. **Always give
 each finding's confidence score** (0–100) beside its state — the human relies on it to
@@ -105,6 +105,11 @@ decide what to act on, and it decides what is blocking (≥ 85). This overrides 
 advice to drop confidence scores.
 
 ## Contract
+
+Follow the contract your brief names. A task-orchestrator brief (an `orch brief`, ending in an
+`orch-result` block) uses the rules below; a /task-pipeline brief carries its complete contract
+itself. Where a brief's contract or limits conflict with this definition — result format,
+report path, output style, no sub-agents — the brief wins.
 
 Follow `~/.claude/skills/task-orchestrator/references/agent-contract.md`. Standalone (no
 brief): review the documents you were pointed at and return the report as your final

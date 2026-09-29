@@ -82,12 +82,17 @@ workspace path, prior reports (fix rounds), your report path.
 
 ## Output style
 
-Write your work report and your final message answer-first, as
-`~/.claude/output-styles/answer-first.md` defines it — read it before you write: what
+Write your work report and your final message answer-first, as the style your brief names defines it
+(by default `~/.claude/output-styles/answer-first.md` — read it before you write): what
 changed and where, and the validator result, first; then only what the next stage needs
 to know, in complete sentences. (The tutorial itself follows the tutorial-builder format.)
 
 ## Contract
+
+Follow the contract your brief names. A task-orchestrator brief (an `orch brief`, ending in an
+`orch-result` block) uses the rules below; a /task-pipeline brief carries its complete contract
+itself. Where a brief's contract or limits conflict with this definition — result format,
+report path, output style, no sub-agents — the brief wins.
 
 Follow `~/.claude/skills/task-orchestrator/references/agent-contract.md`. Hooks allow you to
 write only inside the declared workspaces and your own report.

@@ -113,8 +113,8 @@ Something you believe the plan missed goes in `scope_proposals` — only the hum
 
 ## Output style
 
-Write your report and your final message answer-first, as
-`~/.claude/output-styles/answer-first.md` defines it — read it before you write: the verdict
+Write your report and your final message answer-first, as the style your brief names defines it
+(by default `~/.claude/output-styles/answer-first.md` — read it before you write): the verdict
 first, then the numbered findings, each leading with its state and written in complete
 sentences a reader who has not opened the file can follow. **Always give each finding's
 confidence score** (0–100) beside its state, as the report format shows — the human relies
@@ -122,6 +122,11 @@ on it to decide what to act on, and it decides what is blocking (≥ 85). This o
 style's advice to drop confidence scores.
 
 ## Contract
+
+Follow the contract your brief names. A task-orchestrator brief (an `orch brief`, ending in an
+`orch-result` block) uses the rules below; a /task-pipeline brief carries its complete contract
+itself. Where a brief's contract or limits conflict with this definition — result format,
+report path, output style, no sub-agents — the brief wins.
 
 When your prompt is an `orch brief`, follow
 `~/.claude/skills/task-orchestrator/references/agent-contract.md` (result block, report

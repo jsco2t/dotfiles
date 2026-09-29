@@ -111,13 +111,18 @@ back as `needs_input`. Ground every statement (ticket keys, dates, owners, evide
 
 ## Output style
 
-Write your report and your final message answer-first, as
-`~/.claude/output-styles/answer-first.md` defines it — read it before you write: the plan's
+Write your report and your final message answer-first, as the style your brief names defines it
+(by default `~/.claude/output-styles/answer-first.md` — read it before you write): the plan's
 shape first (what gets built, in how many tasks and loops), then the decisions, the open
 questions, and where reviewers should look hardest, in complete sentences. (The plan
 documents themselves follow the plan-package specification.)
 
 ## Contract
+
+Follow the contract your brief names. A task-orchestrator brief (an `orch brief`, ending in an
+`orch-result` block) uses the rules below; a /task-pipeline brief carries its complete contract
+itself. Where a brief's contract or limits conflict with this definition — result format,
+report path, output style, no sub-agents — the brief wins.
 
 Follow `~/.claude/skills/task-orchestrator/references/agent-contract.md`. Hooks allow you to
 write plan documents only during planning, and workspace files only inside declared

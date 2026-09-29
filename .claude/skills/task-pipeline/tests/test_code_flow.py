@@ -1,0 +1,104 @@
+"""Code tasks are test-forward: tests first and observed failing (red), then the
+implementation observed passing (green), without the tests being weakened."""
+from __future__ import annotations
+
+import unittest
+
+from harness import Harness, deep, git
+
+CODE = dict(
+    deliverables=[{"id": "D1", "kind": "code", "what": "calc gains mul()", "where": "app"}],
+    participants=[{"agent": "test-author", "role": "tests", "why": "Writes mul's tests first."},
+                  {"agent": "code-author", "role": "author", "why": "Implements mul to pass them."}],
+)
+
+TEST_PY = "import unittest\nfrom calc import mul\n\nclass T(unittest.TestCase):\n" \
+          "    def test_mul(self):\n        self.assertEqual(mul(2, 3), 6)\n"
+
+
+class CodeFlowTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.h = h = Harness()
+        self.app = h.root / "app"
+        self.app.mkdir()
+        (self.app / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+        git(self.app, "init", "-q", "-b", "main")
+        git(self.app, "add", "-A")
+        git(self.app, "commit", "-q", "-m", "init")
+        scope = dict(CODE, workspaces=[{"name": "app", "path": str(self.app), "mode": "write"}])
+        task = {"id": "T01", "title": "mul", "serves": ["D1"], "agent": "code-author", "workspace": "app",
+                "paths": ["calc.py", "test_calc.py"], "sources": ["app:calc.py"],
+                "brief": "Add mul(a, b) beside add.", "acceptance": ["mul(2, 3) == 6"],
+                "test_cmd": "python3 -m unittest -q test_calc", "tests_paths": ["test_calc.py"],
+                "checks": [], "estimate_min": 10, "depends_on": []}
+        self.plan = h.plan([task], final_checks=[])
+        self.scope = scope
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def approve(self, plan=None) -> None:
+        self.h.approved(plan=plan or self.plan, **self.scope)
+
+    def write_tests(self) -> None:
+        self.h.tp("dispatch", "T01")
+        (self.app / "test_calc.py").write_text(TEST_PY)
+        self.h.result("T01", "tests", changed=["test_calc.py"])
+
+    def test_code_task_without_a_test_command_is_refused(self) -> None:
+        plan = deep(self.plan)
+        del plan["tasks"][0]["test_cmd"]
+        self.h.confirmed(**self.scope)
+        self.h.write_json("plan.json", plan)
+        self.assertIn("test_cmd", self.h.tp("plan", "check", expect=2).text)
+
+    def test_red_then_green(self) -> None:
+        self.approve()
+        act = self.h.next()["actions"][0]
+        self.assertEqual((act["step"], act["agent"]), ("tests", "test-author"))
+        self.write_tests()
+        out = self.h.tp("record", "T01", "--agent-id", "ta-1").out
+        self.assertIn("red", out)
+        act = self.h.next()["actions"][0]
+        self.assertEqual((act["step"], act["agent"]), ("impl", "code-author"))
+        self.h.tp("dispatch", "T01")
+        (self.app / "calc.py").write_text("def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n")
+        self.h.result("T01", "impl", changed=["calc.py"])
+        out = self.h.tp("record", "T01", "--agent-id", "ca-1").out
+        self.assertIn("green", out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_check")
+
+    def test_tests_that_already_pass_are_not_red(self) -> None:
+        self.approve()
+        self.h.tp("dispatch", "T01")
+        (self.app / "test_calc.py").write_text("import unittest\n\nclass T(unittest.TestCase):\n"
+                                               "    def test_nothing(self):\n        pass\n")
+        self.h.result("T01", "tests", changed=["test_calc.py"])
+        self.assertIn("not red", self.h.tp("record", "T01").out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
+
+    def test_weakening_the_tests_during_implementation_is_caught(self) -> None:
+        self.approve()
+        self.write_tests()
+        self.h.tp("record", "T01")
+        self.h.tp("dispatch", "T01")
+        (self.app / "test_calc.py").write_text("import unittest\n\nclass T(unittest.TestCase):\n"
+                                               "    def test_mul(self):\n        pass\n")
+        self.h.result("T01", "impl", changed=["test_calc.py"])
+        out = self.h.tp("record", "T01").out
+        self.assertIn("tests changed", out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
+
+    def test_failing_implementation_is_not_green(self) -> None:
+        self.approve()
+        self.write_tests()
+        self.h.tp("record", "T01")
+        self.h.tp("dispatch", "T01")
+        (self.app / "calc.py").write_text("def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a + b\n")
+        self.h.result("T01", "impl", changed=["calc.py"])
+        self.assertIn("not green", self.h.tp("record", "T01").out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
+
+
+if __name__ == "__main__":
+    unittest.main()

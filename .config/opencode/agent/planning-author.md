@@ -44,7 +44,7 @@ work item small and objectively checkable, every open question surfaced for a pe
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): the document's
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): the document's
 shape first (what it covers and how many items), then the decisions and open questions. The
 document itself follows its skill's structure.
 

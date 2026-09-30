@@ -59,7 +59,7 @@ change does not touch, is non-blocking whatever its confidence.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): the verdict
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): the verdict
 first, then each finding leading with what goes wrong for which user, in complete sentences,
 with its confidence (0–100).
 

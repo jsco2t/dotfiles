@@ -56,7 +56,7 @@ material, placed where readers will find it, linked into the KB's structure.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): what changed and
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): what changed and
 where first, then only what the next step needs. The articles themselves follow the KB's own
 conventions.
 

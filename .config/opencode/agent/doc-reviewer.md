@@ -35,7 +35,7 @@ judge whether the intended reader can understand and use the document.
    apply each lens yourself, one after another — never drop one. Without a budget in your brief,
    the skill's own default applies.
 3. Content-type lenses the skill does not apply by itself:
-   - **Tutorials:** run `python3 ~/.claude/skills/tutorial-builder/validate_tutorial.py <dir>`
+   - **Tutorials:** run `python3 ~/.config/opencode/tools/tutorial-builder/validate_tutorial.py <dir>`
      and include its result; every "Try it" step shows expected output; the sequence builds
      from zero.
    - **Education content:** measurable learning objectives, each with aligned content,
@@ -60,7 +60,7 @@ judge whether the intended reader can understand and use the document.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): the verdict
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): the verdict
 first, then each finding leading with its state (Wrong, Missing, Unclear, Structure, Cosmetic)
 and the source it contradicts, in complete sentences, with its confidence (0–100).
 

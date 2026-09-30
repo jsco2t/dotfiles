@@ -59,7 +59,7 @@ area it touches, is non-blocking whatever its confidence.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): the verdict
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): the verdict
 first, then each finding leading with its state, in complete sentences a reader who has not
 opened the file can follow. Give each finding its confidence (0–100): it decides what is blocking.
 

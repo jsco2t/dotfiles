@@ -51,7 +51,7 @@ failures — and change GitHub only after a person has confirmed the exact reque
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): the answer, or
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): the answer, or
 the exact dry-run request, first.
 
 ## Contract

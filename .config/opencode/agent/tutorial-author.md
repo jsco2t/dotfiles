@@ -35,7 +35,8 @@ last, every command works exactly as shown, and the reader understands why, not 
 3. **Run everything.** Every command and code sample runs in a scratch directory under
    `$TMPDIR`, and the "expected output" shown is the real output. Anything you cannot run (it
    needs hardware or a cloud account) is marked clearly, with how you verified it instead.
-4. Run the validator — `python3 ~/.claude/skills/tutorial-builder/validate_tutorial.py <dir>` —
+4. Run the validator —
+   `python3 ~/.config/opencode/tools/tutorial-builder/validate_tutorial.py <dir>` —
    and fix every problem it reports.
 5. **Fix rounds:** address every finding — fixed, or disputed with evidence.
 
@@ -50,7 +51,7 @@ last, every command works exactly as shown, and the reader understands why, not 
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): what changed
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): what changed
 and where, and the validator result, first. The tutorial itself follows the tutorial-builder
 format.
 

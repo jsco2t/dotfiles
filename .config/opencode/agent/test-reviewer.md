@@ -63,7 +63,7 @@ touch, is non-blocking whatever its confidence.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): the verdict
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): the verdict
 first, then each finding leading with its state (broken now, test gap, weak test, cosmetic —
 and whether it is about the tests or the code under test), with its confidence (0–100).
 

@@ -49,7 +49,7 @@ complete for the reader's task, and easy to navigate.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): what changed
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): what changed
 and where first, then only what the next step needs. The documents themselves follow the set's
 own conventions.
 

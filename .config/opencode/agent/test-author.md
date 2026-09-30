@@ -50,7 +50,7 @@ driven by — and proven by — tests that would catch a regression.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): what you wrote
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): what you wrote
 and what the red run showed first, then one line per test on why its failure (or pass) is the
 expected one.
 

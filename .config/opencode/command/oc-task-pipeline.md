@@ -14,11 +14,25 @@ stop only where the human must decide. `tp.py` holds the state, enforces the rul
 is next.
 
 ```bash
-python3 ~/.claude/skills/task-pipeline/scripts/tp.py -w <workflow dir> <command>
+python3 ~/.config/opencode/tools/task-pipeline/scripts/tp.py -w <workflow dir> <command>
 ```
 
 `tp <command>` below means exactly that line; spell it out in every Bash call (zsh does not
 word-split a variable). **`tp next` always says what to do next** — run it after every step.
+
+## Messaging: fresh dispatch, resume, record
+
+Every `task` call is synchronous: when it returns, that agent is done.
+
+- **Fresh dispatch** — send the literal `task(subagent_type=…, prompt=…)` line tp.py printed,
+  with the brief path from the same line. One call per agent, all in one message.
+- **Resume** — to tell a finished agent something (a trim request, a fix, an answer), send a new
+  `task` call with `task_id` set to the earlier call's id and the message as `prompt`: OpenCode
+  continues that same agent session with its context intact. tp.py prints resume lines in exactly
+  this shape whenever a same-agent send is needed.
+- **Record with `--agent-id` every time** — `tp record <id> --agent-id <the task call's id>`.
+  tp.py stores it and echoes it back in every later resume line. If the call's id is unavailable,
+  say so in the resume prompt instead of leaving the instruction undone.
 
 ## Parse the arguments: `$ARGUMENTS`
 
@@ -50,41 +64,17 @@ Then run the manager loop below from Stage 1.
 4. **The approved plan is the contract.** Outside it: `tp note "<one line>"`; blocking:
    `tp exception --summary "..."` and a question.
 5. **Script before judgment.** If a command can decide it, a command decides it.
-6. **Answer-first** (`~/.claude/output-styles/answer-first-core.md` if deployed; otherwise verdict
-   first, then detail, in complete sentences) for everything you write.
+6. **Answer-first** (`~/.config/opencode/output-styles/answer-first-core.md`; its core is inlined
+   into every brief) for everything you write.
 7. **Never write deliverables or agents' result files.** You fact-check and route.
-
-## When tp.py says "SendMessage"
-
-`tp.py` was written for Claude Code, where the manager can message a finished subagent with
-`SendMessage`. OpenCode has no `SendMessage`; its equivalent is a **new `task` call with
-`task_id`** set to the earlier call's id — OpenCode resumes the same subagent session with its
-context intact. Translate every messaging instruction tp.py prints this way:
-
-- `SendMessage(to="<id>", message="<msg>")` → one `task` call with `task_id: "<id>"` and
-  `prompt: "<msg>"`. It is synchronous: when it returns, the agent is done, so continue with the
-  `tp …` command tp.py printed after the send line.
-- **Record with `--agent-id` every time** — `tp record <id> --agent-id <the task call's id>` for
-  research and execute steps alike. tp.py stores it and echoes it back in every later "send:"
-  line, so a later resume stays possible. If the call's id is unavailable, say so in the resume
-  prompt instead of leaving tp.py's instruction undone.
-- **Oversized result** (`… is N bytes; the cap is 8000 — ask the same agent to cut it…`) → do not
-  re-dispatch from scratch. Resume the agent with `task_id` and: "Your result file <path> is N
-  bytes; the cap is 8000. Rewrite it to answer only what the questions need — keep the schema,
-  drop prose and redundant evidence." Then `tp record <id> --agent-id …` again.
-- **Invalid result file** ("Ask the same agent to fix the file (SendMessage)") → the same resume,
-  passing the validation errors verbatim.
-- **`tp resolve --task <id> --action answer`** prints `SendMessage(to=…, message=…)` for a blocked
-  agent → resume that agent with `task_id` and the message, then `tp record <id>`.
-- `TaskStop` does not exist in OpenCode either: keep to the note-and-exception rule in Stage 5.
 
 ## When tp.py rejects research questions
 
-`tp research add` enforces hard caps (`research.py`): at most **3 questions per item**, each
-**under 40 words** (whitespace-split — every absolute path in the question eats the count), and
-`map`/`requirements` questions may not ask for content (`all/every files|lines|…`, `exhaustive`,
-`end-to-end`). `research add` fails with all problems at once, so fix every question before
-re-running. When the questions will not fit:
+`tp research add` enforces hard caps: at most **3 questions per item**, each **under 40 words**
+(whitespace-split — every absolute path in the question eats the count), and `map`/`requirements`
+questions may not ask for content (`all/every files|lines|…`, `exhaustive`, `end-to-end`).
+`research add` fails with all problems at once, so fix every question before re-running. When the
+questions will not fit:
 
 - **Split into more items, never into compound questions.** The script's own rule: more questions
   means more items, not bigger ones. One narrow ask per question, more `R<n>` items, each with its
@@ -104,9 +94,9 @@ re-running. When the questions will not fit:
 ## Stage 1 — Scope and research budget (one round with the human)
 
 1. Save the request verbatim to a file, then run `python3
-   ~/.claude/skills/task-pipeline/scripts/tp.py init <location> --title "<title>" --request-file
-   <file> [--budget <minutes>]`. It creates the workflow's own `<location>/<date>-<slug>/` folder
-   and prints it: that is `-w` from then on.
+   ~/.config/opencode/tools/task-pipeline/scripts/tp.py init <location> --title "<title>"
+   --request-file <file> [--budget <minutes>]`. It creates the workflow's own
+   `<location>/<date>-<slug>/` folder and prints it: that is `-w` from then on.
 2. **Size it yourself first**, in ten minutes or less and with no agents: `tp survey <repo> --name
    <ws>` per repository, and `tp survey-issue jira:KEY` or `gh:owner/repo#N` for a named issue or
    epic. It prints children, thin issues, links, and a starting-point research estimate.
@@ -128,10 +118,8 @@ re-running. When the questions will not fit:
   `map`, `requirements`, or `investigate`. Many small items beat one big one.
   `tp research add R1 --agent <a> --purpose <p> --questions-file <f> --done-when "..." [--minutes N]`.
   If `research add` rejects the questions, see *When tp.py rejects research questions*.
-- `tp dispatch R1 R2 R3`, then send one `task` call per id with the brief file it printed. The
-  `task` tool is **synchronous** in OpenCode: when a call returns, the agent is done — `tp record
-  <id> --agent-id <the task call's id>` immediately (see *When tp.py says "SendMessage"*). Fact-check one answer
-  per item.
+- `tp dispatch R1 R2 R3`, then send one `task` call per id with the brief file it printed, and
+  `tp record <id> --agent-id <the task call's id>` as each returns. Fact-check one answer per item.
 - **Followups** come back in the result; decide each: `tp research add … --from R1.F2`, or
   `tp research dismiss R1.F2 --reason "..."`. Submit refuses while any is undecided.
 - Out of budget → ask the human, then `tp research extend --minutes N --answer "..."`.
@@ -164,9 +152,8 @@ Loop on `tp next`:
   result file parts you need), then `tp record <id> --agent-id <the task call's id>`.
 - **check** → fact-check the printed sample (does each cited line say what the sentence claims?
   for code, read the diff), then `tp accept <id> --note "..."` or `tp reject <id> --reason "..."`.
-  A rejected task is a fix round: re-dispatch the same subagent (resume it with `task_id`, per
-  *When tp.py says "SendMessage"*) and pass `--agent-id` to `tp
-  record` with the task tool call's id if one is available.
+  A rejected task is a fix round: `tp dispatch <id>` prints a resume line — send it, record with
+  `--agent-id` again.
 - **triage** (after the end-of-pipeline review) → `tp show <id> --part blocking`, verify each
   against the source, then `tp triage <id> --accept-all`, or `--dismiss F# --reason "..."` and
   `--assign F#=T##`. Accepted findings go to the owning authors; one verification follows.
@@ -174,8 +161,8 @@ Loop on `tp next`:
   `tp resolve [--task <id> | --review <id>] --action … --answer "..."`. A needs_input question
   that scope, plan, or decisions already settle, answer yourself.
 - **wait** → end your turn; the human's next message re-invokes you.
-- **An agent far past its estimate** → OpenCode has no TaskStop; note it, raise
-  `tp exception --task <id> --summary "..."`, and ask the human before discarding its work.
+- **An agent far past its estimate** → OpenCode has no way to stop a running `task` call: note it,
+  raise `tp exception --task <id> --summary "..."`, and ask the human before discarding its work.
 
 ## Stage 6 — Final
 
@@ -195,5 +182,5 @@ Committing and pushing are the human's call.
   resolving.
 - **Status mode** → `tp status`, present answer-first, stop.
 - Unattended runs need no permission prompts: keep the workflow and write workspaces
-  sandbox-writable, and allow `Bash(python3 ~/.claude/skills/task-pipeline/scripts/tp.py:*)` in
-  `permission`.
+  sandbox-writable, and allow
+  `Bash(python3 ~/.config/opencode/tools/task-pipeline/scripts/tp.py:*)` in `permission`.

@@ -44,7 +44,7 @@ objectives say, and the assessments prove it.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): what changed
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): what changed
 and where first, then the objective → content → practice → assessment alignment. The material
 itself follows the task's format.
 

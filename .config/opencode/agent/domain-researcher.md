@@ -55,7 +55,7 @@ enough that a planner can build on them without re-checking.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): each answer
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): each answer
 first, with its confidence, then only the sources and trade-offs the reader needs.
 
 ## Contract

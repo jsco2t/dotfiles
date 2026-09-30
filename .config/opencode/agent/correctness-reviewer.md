@@ -42,7 +42,7 @@ and say exactly when it happens.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): each finding
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): each finding
 leads with what goes wrong, for which input or condition.
 
 ## Contract

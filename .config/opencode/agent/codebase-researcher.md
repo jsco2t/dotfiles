@@ -65,7 +65,7 @@ Confluence references use `/atlassian-toolkit`; for GitHub use `/github-toolkit`
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): each answer
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): each answer
 first, then only the evidence the reader needs.
 
 ## Contract

@@ -44,7 +44,7 @@ and they fail for the right reason.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write).
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write).
 
 ## Contract
 

@@ -43,7 +43,7 @@ hostile until proven otherwise; when in doubt, the code should fail closed.
 ## Output style
 
 Write answer-first, as the style your brief names defines it
-(by default `~/.claude/output-styles/answer-first.md` — read it before you write): each finding
+(by default `~/.config/opencode/output-styles/answer-first.md` — read it before you write): each finding
 leads with what an attacker could do and under what condition.
 
 ## Contract

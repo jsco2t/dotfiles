@@ -2,7 +2,7 @@
   "env": {
     "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
     "CLAUDE_CODE_SUPPRESS_SESSION_ATTRIBUTION": "1",
-    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "7"
+    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "10"
   },
   "includeCoAuthoredBy": false,
   "permissions": {
@@ -19,7 +19,6 @@
       "Bash(cargo run *)",
       "Bash(python *)",
       "Bash(pytest *)",
-      "Bash(pip install *)",
       "Bash(make *)",
       "Bash(mage *)",
       "Bash(grep *)",
@@ -43,23 +42,35 @@
       "Bash(less:*)",
       "Bash(tree:*)",
       "Bash(python3 */.claude/skills/copilot-fixer/*)",
-      "Bash(gh:*)",
       "Bash(find:*)",
       "Bash(pre-commit:*)",
       "Bash(* ./mage *)",
-      "Bash(* go *)",
       "Bash(git diff:*)",
       "Bash(cargo:*)",
       "Bash(rustfmt:*)",
       "Bash(clippy:*)",
-      "Edit",
       "Read(~/Developer/sources/personal/notebook/**)",
       "Edit(~/Developer/sources/personal/notebook/projects/substrate/**)",
       "Edit(~/Developer/sources/personal/notebook/projects/fuzzball/**)",
-      "Bash(gh pr list)",
-      "Bash(gh pr view)",
-      "Bash(gh pr diff)",
-      "Bash(gh api)"
+      "Edit(~/Developer/sources/personal/notebook/**)",
+      "Bash(python3 ~/.claude/skills/task-pipeline/scripts/tp.py:*)",
+      "Bash(jira search:*)",
+      "Bash(jira issue get:*)",
+      "Bash(jira issue links:*)",
+      "Bash(jira issue comments:*)",
+      "Bash(jira issue history:*)",
+      "Bash(confluence page:*)",
+      "Bash(confluence search:*)",
+      "Bash(confluence descendants:*)",
+      "Bash(atlassian search:*)",
+      "Bash(ghtk pr get:*)",
+      "Bash(ghtk pr diff:*)",
+      "Bash(ghtk pr threads:*)",
+      "Bash(ghtk pr checks:*)",
+      "Bash(ghtk issue get:*)",
+      "Bash(ghtk commit prs:*)",
+      "Bash(ghtk workflow list:*)",
+      "Bash(ghtk workflow runs:*)"
     ],
     "deny": [
       "Read(.env*)",
@@ -85,7 +96,7 @@
     "ask": [
       "Bash(git commit:*)"
     ],
-    "defaultMode": "acceptEdits"
+    "defaultMode": "auto"
   },
   "model": "claude-opus-5-5",
   "skillOverrides": {
@@ -93,6 +104,15 @@
   },
   "hooks": {
     "PermissionRequest": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-nod evaluate"
+          }
+        ]
+      }
     ],
     "PreToolUse": [
       {
@@ -102,26 +122,6 @@
             "type": "command",
             "command": "~/.claude/hooks/allow-safe-pipes.sh",
             "timeout": 3
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$HOME/.claude/skills/ship-the-result/scripts/hook_pretool.py\"",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|Agent|Task|Workflow",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
-            "timeout": 10
           }
         ]
       }
@@ -134,69 +134,33 @@
             "type": "command",
             "command": "bash '/Users/jscott/.claude/hooks/herdr-agent-state.sh' session",
             "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
-            "timeout": 10
           }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
-            "timeout": 10
-          }
-        ]
+        "hooks": []
       }
     ],
     "UserPromptExpansion": [
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
-            "timeout": 10
-          }
-        ]
+        "hooks": []
       }
     ],
     "SubagentStart": [
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
-            "timeout": 10
-          }
-        ]
+        "hooks": []
       }
     ],
     "SubagentStop": [
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
-            "timeout": 20
-          }
-        ]
+        "hooks": []
       }
     ],
     "Stop": [
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$HOME/.claude/skills/task-orchestrator/scripts/hook.py\"",
-            "timeout": 30,
-            "statusMessage": "Checking task-orchestrator state"
-          }
-        ]
+        "hooks": []
       }
     ]
   },
@@ -250,7 +214,8 @@
       "crates.io",
       "*.crates.io",
       "docs.rs",
-      "*.docs.rs"
+      "*.docs.rs",
+      "*.atlassian.net"
     ]
   }
 }

@@ -78,6 +78,29 @@ context intact. Translate every messaging instruction tp.py prints this way:
   agent → resume that agent with `task_id` and the message, then `tp record <id>`.
 - `TaskStop` does not exist in OpenCode either: keep to the note-and-exception rule in Stage 5.
 
+## When tp.py rejects research questions
+
+`tp research add` enforces hard caps (`research.py`): at most **3 questions per item**, each
+**under 40 words** (whitespace-split — every absolute path in the question eats the count), and
+`map`/`requirements` questions may not ask for content (`all/every files|lines|…`, `exhaustive`,
+`end-to-end`). `research add` fails with all problems at once, so fix every question before
+re-running. When the questions will not fit:
+
+- **Split into more items, never into compound questions.** The script's own rule: more questions
+  means more items, not bigger ones. One narrow ask per question, more `R<n>` items, each with its
+  own agent and time box. If that overruns the research budget, ask the human and
+  `tp research extend --minutes N --answer "..."`.
+- **Move detail into a referenced file.** A question that genuinely needs rules, lists, or long
+  paths stays under 40 words by pointing at a file you wrote inside the workflow dir, e.g.
+  `Group the notes per the rules in <wf>/research/R1-q1.md; for each batch output its name, note
+  filenames, and dominant repo paths.` Then write `<wf>/research/R1-q1.md` with the full detail.
+  The agent reads files its questions reference as part of answering them. Such files are routing
+  material, not deliverables or result files — writing them does not break manager rule 7. Keep
+  each under ~1 page; the item's time box does not grow.
+- **Cut words honestly.** Drop articles and hedging, prefer repo-relative paths when the brief's
+  context makes the root unambiguous, and split a two-clause question into two items rather than
+  semicolon-chaining it.
+
 ## Stage 1 — Scope and research budget (one round with the human)
 
 1. Save the request verbatim to a file, then run `python3
@@ -103,7 +126,8 @@ context intact. Translate every messaging instruction tp.py prints this way:
 
 - Each item is one agent, at most 3 narrow questions, a box of 15 minutes or less, and a purpose:
   `map`, `requirements`, or `investigate`. Many small items beat one big one.
-  `tp research add R1 --agent <a> --purpose <p> --questions-file <f> --done-when "..." [--minutes N]`
+  `tp research add R1 --agent <a> --purpose <p> --questions-file <f> --done-when "..." [--minutes N]`.
+  If `research add` rejects the questions, see *When tp.py rejects research questions*.
 - `tp dispatch R1 R2 R3`, then send one `task` call per id with the brief file it printed. The
   `task` tool is **synchronous** in OpenCode: when a call returns, the agent is done — `tp record
   <id> --agent-id <the task call's id>` immediately (see *When tp.py says "SendMessage"*). Fact-check one answer

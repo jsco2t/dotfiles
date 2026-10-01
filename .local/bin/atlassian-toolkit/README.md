@@ -82,6 +82,13 @@ the file: `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
 - `--full` — untruncated Confluence body; on `issue history`, long values (e.g. description edits) in full.
 - `--help` — on every group and command.
 - Text inputs (`--description`, comment body) accept a literal string or `-` to read stdin.
+  Body-carrying write commands (`issue comment`, `issue worklog --comment`, `confluence
+  create/update/comment`) also take `--adf`: the text/stdin is then a raw ADF JSON document
+  (`{"type": "doc", "version": 1, "content": [...]}`) passed through verbatim — for headings,
+  bullet lists, and code marks that plain text wrapping cannot express. Plain text (no `--adf`)
+  wraps into ADF paragraphs only, and neither markdown nor Jira wiki markup is parsed, so `h2.`
+  or `{{…}}` would be stored literally. On `issue create`/`issue edit`, rich descriptions can
+  also go through `--field description=<ADF JSON>`.
 - `--field KEY=VALUE` (repeatable, `issue create`/`edit`) sets any raw Jira field; value is
   JSON-decoded when possible (e.g. `--field 'priority={"name":"High"}'`). On `issue history`, `--field NAME`
   is a filter instead: one field, by name or id (`status`, `"Fix Version"`, `customfield_10016`).

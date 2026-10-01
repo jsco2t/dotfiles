@@ -154,8 +154,11 @@ def _identifiers(sentence: str) -> Set[str]:
             if sep in token:
                 token = token.split(sep)[-1]
         token = token.split("=")[0].rstrip("()[]{}:,")
-        if len(token) > 2 and not token.isdigit():
-            names.add(token.lower())
+        if token.isdigit() or len(token) <= 2:
+            continue
+        if token.lower() in SOURCE_EXT or re.search(r":\d+(-\d+)?(,\d+(-\d+)?)*$", token):
+            continue  # a bare file extension or a cite-like span parse_cites rejected names no symbol
+        names.add(token.lower())
     return names
 
 
@@ -186,22 +189,64 @@ def resolve(path: str, repos: Dict[str, Path]) -> Tuple[Optional[Path], int]:
 
 
 DEF_RE = re.compile(r"^\s*(func|def|fn|pub fn|function|class|type|struct|impl|interface|const|var)\b|^\s*[\w.-]+:\s*$")
+FUNC_DEF_RE = re.compile(r"^\s*(func|def|fn|pub fn|function|class|type|struct|impl|interface)\b")
+DEF_SEARCH = 2000  # how far above a citation the definition enclosing it may sit
+MIN_FRAGMENT = 4  # shortest literal fragment of a composite token worth matching
+
+
+def _enclosing(src_lines: List[str], start: int) -> Optional[str]:
+    """The definition line enclosing the cited lines: the nearest func/def/class-style
+    definition above them. A label line (Go's `default:`, a YAML key) also encloses, but
+    a stronger definition further up wins — a label sits inside its function's body."""
+    label: Optional[str] = None
+    for i in range(min(start - 1, len(src_lines) - 1), max(-1, start - 1 - DEF_SEARCH), -1):
+        line = src_lines[i]
+        if FUNC_DEF_RE.match(line):
+            return line
+        if label is None and DEF_RE.match(line):
+            label = line
+    return label
+
+
+def _fragment_match(name: str, text: str) -> bool:
+    """Near-miss matching for composite tokens: wildcard/placeholder tokens (`bak-<ts>`,
+    `v<version>-<suffix>`, `etcdctl_snapshot_save`), mangled call spans (`base64url(hmac-sha256(payload`),
+    and snake/camel spellings the plain and separator-free comparisons missed. A placeholder
+    token matches when every literal fragment of MIN_FRAGMENT+ characters appears (any 3+
+    fragment when none qualifies); other composites match on any fragment of 5+ characters."""
+    parts = [p for p in re.split(r"[^a-z0-9]+", name) if p]
+    if len(parts) < 2:
+        return False
+    if re.search(r"[<*>]", name):  # a pattern with holes: its literal fragments must all appear
+        frags = [p for p in parts if len(p) >= MIN_FRAGMENT] or [p for p in parts if len(p) >= 3]
+        return bool(frags) and all(f in text for f in frags)
+    return any(len(p) >= MIN_FRAGMENT + 1 and p in text for p in parts)
 
 
 def supported(c: Citation, src_lines: List[str]) -> Tuple[bool, Set[str]]:
     """Whether a name the sentence mentions appears near the cited lines, or on the definition
-    that encloses them (a citation into a function's body supports a sentence about the function)."""
+    that encloses them (a citation into a function's body supports a sentence about the function).
+    Composite names also match near misses: separator-free spellings (maxReplicas vs max_replicas)
+    and, via _fragment_match, wildcard/placeholder tokens and mangled call spans."""
     names = _identifiers(c.sentence)
     if not names:
         return True, names
     lo = max(0, c.start - 1 - WINDOW)
     window = src_lines[lo:c.end + WINDOW]
-    for i in range(c.start - 1, max(-1, c.start - 400), -1):
-        if DEF_RE.match(src_lines[i]):
-            window = window + [src_lines[i]]
-            break
+    def_line = _enclosing(src_lines, c.start)
+    if def_line is not None:
+        window = window + [def_line]
     text = "\n".join(window).lower()
-    return any(name in text for name in names), names
+    squashed = text.replace("_", "").replace("-", "")
+    for name in names:
+        if name in text:
+            return True, names
+        flat = name.replace("_", "").replace("-", "")
+        if flat and flat in squashed:  # maxReplicas matches max_replicas and the reverse
+            return True, names
+        if _fragment_match(name, text):
+            return True, names
+    return False, names
 
 
 def doubtful(cites: List[Tuple[Citation, List[str]]]) -> List[Tuple[Citation, Set[str]]]:

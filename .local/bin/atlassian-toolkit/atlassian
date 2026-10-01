@@ -440,6 +440,25 @@ def text_to_adf(text):
     return {"type": "doc", "version": 1, "content": content}
 
 
+def body_adf(text, as_adf=False):
+    """The ADF document for a write body: plain text wrapped, or an --adf JSON document verbatim.
+
+    With as_adf=True, `text` must be an ADF document ({"type": "doc", "version": 1, "content":
+    [...]}) as JSON; it is validated minimally and passed through unchanged, so writes can carry
+    headings, lists, and marks that text_to_adf cannot express. Additive: without the flag,
+    behavior is exactly text_to_adf.
+    """
+    if not as_adf:
+        return text_to_adf(text)
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as e:
+        die(EX_USAGE, f"--adf body must be a JSON ADF document: {e}")
+    if not (isinstance(doc, dict) and doc.get("type") == "doc" and isinstance(doc.get("content"), list)):
+        die(EX_USAGE, '--adf body must be an ADF document: {"type": "doc", "version": 1, "content": [...]}')
+    return doc
+
+
 def html_to_text(s):
     """Crude Confluence storage-format (XHTML) to plain text. Ugly but readable."""
     if not s:
@@ -738,7 +757,7 @@ def cmd_issue_edit(args):
 
 
 def cmd_issue_comment(args):
-    body = {"body": text_to_adf(read_maybe_stdin(args.body))}
+    body = {"body": body_adf(read_maybe_stdin(args.body), getattr(args, "adf", False))}
     if args.id:  # edit an existing comment
         res = api_request("PUT", f"/rest/api/{API}/issue/{args.key}/comment/{args.id}", body=body)
         if args.json:
@@ -833,7 +852,7 @@ def cmd_issue_worklog(args):
     started = parse_when(args.started) if args.started else datetime.now().astimezone()
     body = {"timeSpent": args.time, "started": jira_time(started)}
     if args.comment is not None:
-        body["comment"] = text_to_adf(read_maybe_stdin(args.comment))
+        body["comment"] = body_adf(read_maybe_stdin(args.comment), getattr(args, "adf", False))
     res = api_request("POST", f"/rest/api/{API}/issue/{args.key}/worklog", body=body)
     if args.json:
         return jdump(res)
@@ -959,7 +978,8 @@ def resolve_space_id(key):
 def cmd_conf_create(args):
     body_text = read_maybe_stdin(args.body) if args.body is not None else ""
     payload = {"spaceId": resolve_space_id(args.space), "status": "current", "title": args.title,
-               "body": {"representation": "atlas_doc_format", "value": json.dumps(text_to_adf(body_text))}}
+               "body": {"representation": "atlas_doc_format",
+                        "value": json.dumps(body_adf(body_text, getattr(args, "adf", False)))}}
     if args.parent:
         payload["parentId"] = str(args.parent)
     res = api_request("POST", "/wiki/api/v2/pages", body=payload)
@@ -975,7 +995,7 @@ def cmd_conf_update(args):
     version = ((cur.get("version") or {}).get("number") or 1) + 1
     title = args.title if args.title is not None else cur.get("title")
     if args.body is not None:  # replace body
-        value = json.dumps(text_to_adf(read_maybe_stdin(args.body)))
+        value = json.dumps(body_adf(read_maybe_stdin(args.body), getattr(args, "adf", False)))
     else:  # title-only change: preserve the existing body (v2 update requires body)
         value = (cur.get("body", {}).get("atlas_doc_format") or {}).get("value") or json.dumps(text_to_adf(""))
     payload = {"id": str(args.id), "status": "current", "title": title,
@@ -991,7 +1011,8 @@ def cmd_conf_comment(args):
     res = api_request("POST", "/wiki/api/v2/footer-comments",
                       body={"pageId": str(args.page),
                             "body": {"representation": "atlas_doc_format",
-                                     "value": json.dumps(text_to_adf(read_maybe_stdin(args.body)))}})
+                                     "value": json.dumps(body_adf(read_maybe_stdin(args.body),
+                                                                  getattr(args, "adf", False)))}})
     if args.json:
         return jdump(res)
     print(f"comment added to page {args.page} (id {res.get('id')})")
@@ -1143,6 +1164,9 @@ def add_jira_commands(jp):
     icm.add_argument("key")
     icm.add_argument("body", help="comment text, or '-' for stdin")
     icm.add_argument("--id", help="edit this existing comment id instead of adding a new one")
+    icm.add_argument("--adf", action="store_true",
+                     help="interpret body as a raw ADF JSON document instead of plain text "
+                          "(headings, lists, code marks)")
     icm.add_argument("--json", action="store_true")
     icm.set_defaults(func=cmd_issue_comment)
 
@@ -1181,6 +1205,8 @@ def add_jira_commands(jp):
     iw.add_argument("time", help="Jira duration, e.g. '1d 4h' or '3h 30m'")
     iw.add_argument("--started", help="when the work began (ISO 8601; default now; no offset = local time)")
     iw.add_argument("--comment", help="worklog comment text, or '-' for stdin")
+    iw.add_argument("--adf", action="store_true",
+                    help="interpret --comment as a raw ADF JSON document instead of plain text")
     iw.add_argument("--json", action="store_true")
     iw.set_defaults(func=cmd_issue_worklog)
 
@@ -1215,6 +1241,8 @@ def add_confluence_commands(cp):
     cc.add_argument("--space", required=True, help="space key (e.g. ENG) or numeric spaceId")
     cc.add_argument("--title", required=True)
     cc.add_argument("--body", help="page body text, or '-' for stdin")
+    cc.add_argument("--adf", action="store_true",
+                    help="interpret --body as a raw ADF JSON document instead of plain text")
     cc.add_argument("--parent", help="parent page id")
     cc.add_argument("--json", action="store_true")
     cc.set_defaults(func=cmd_conf_create)
@@ -1223,12 +1251,16 @@ def add_confluence_commands(cp):
     cu.add_argument("id", help="page id")
     cu.add_argument("--title")
     cu.add_argument("--body", help="new body text, or '-' for stdin")
+    cu.add_argument("--adf", action="store_true",
+                    help="interpret --body as a raw ADF JSON document instead of plain text")
     cu.add_argument("--json", action="store_true")
     cu.set_defaults(func=cmd_conf_update)
 
     cm = cp.add_parser("comment", help="add a footer comment to a page")
     cm.add_argument("page", help="page id")
     cm.add_argument("body", help="comment text, or '-' for stdin")
+    cm.add_argument("--adf", action="store_true",
+                    help="interpret body as a raw ADF JSON document instead of plain text")
     cm.add_argument("--json", action="store_true")
     cm.set_defaults(func=cmd_conf_comment)
 

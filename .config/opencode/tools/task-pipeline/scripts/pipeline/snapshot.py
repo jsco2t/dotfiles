@@ -65,6 +65,11 @@ def matches(rel: str, patterns: Iterable[str]) -> bool:
             return True
         if pat.endswith("/**") and (rel == pat[:-3] or rel.startswith(pat[:-2])):
             return True
+        # `**/x` also covers a root-level `x`: pathlib's ** only matches directories,
+        # but a task declaring "**/*.md" plainly means "every markdown file, including
+        # the root index" (seen live: kb/index.md FAILed as outside the task's paths).
+        if pat.startswith("**/") and fnmatch.fnmatchcase(rel, pat[3:]):
+            return True
     return False
 
 

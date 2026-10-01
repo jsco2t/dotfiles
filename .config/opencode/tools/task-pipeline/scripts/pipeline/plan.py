@@ -2,13 +2,16 @@
 catalog, and the time budget; rendered for the human; frozen once approved."""
 from __future__ import annotations
 
+import json
 import math
 import re
+from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import scope as scopemod
-from .common import TPError, Workflow, catalog, limit, load_json, minutes_since, now_iso, sha_file, words
+from .common import (TPError, Workflow, agent_minutes, catalog, limit, load_json, minutes_since, now_iso,
+                     sha_file, words)
 
 BUILTIN_TASK_CHECKS = {"docs": "every relative link resolves, and every code citation is written repo-relative "
                                "(`path/to/file.go:12`, `:12-20`) and points at a real line (a citation whose lines "
@@ -99,7 +102,7 @@ def reviewer_for(task: Dict[str, Any], scope: Dict[str, Any]) -> Optional[str]:
     kind = task_kind(task, scope)
     agents = catalog()["agents"]
     for agent in scopemod.participants(scope, "reviewer"):
-        if kind in agents[agent]["kinds"]:
+        if kind in scopemod.agent_kinds(agent, "reviewer"):
             return agent
     return None
 
@@ -146,6 +149,28 @@ def _ancestors(tasks: Dict[str, Dict[str, Any]]) -> Dict[str, Set[str]]:
     return memo
 
 
+def resolve_ref(ref: str, scope: Dict[str, Any], wf_root: Path) -> Optional[Path]:
+    """`wf:<path>` (inside the workflow folder) or `<workspace>:<path>` as a path; None if it is neither."""
+    prefix, _, rel = str(ref).partition(":")
+    pp = PurePosixPath(rel)
+    if not rel or pp.is_absolute() or ".." in pp.parts:
+        return None
+    if prefix == "wf":
+        return wf_root / rel
+    wss = scopemod.workspaces(scope)
+    return Path(wss[prefix]["path"]) / rel if prefix in wss else None
+
+
+def conventions(plan: Dict[str, Any], scope: Dict[str, Any], wf_root: Path) -> List[Path]:
+    """The files every brief starts from (plan `conventions`)."""
+    return [p for p in (resolve_ref(c, scope, wf_root) for c in plan.get("conventions", [])) if p is not None]
+
+
+def conventions_shas(plan: Dict[str, Any], scope: Dict[str, Any], wf_root: Path) -> Dict[str, Optional[str]]:
+    """Frozen with the plan at approval: a conventions file is part of every brief's contract."""
+    return {str(p): sha_file(p) for p in conventions(plan, scope, wf_root)}
+
+
 def lane_minutes(task: Dict[str, Any], scope: Dict[str, Any]) -> int:
     return int(task.get("estimate_min", 0)) + (REVIEW_MINUTES if reviewer_for(task, scope) else 0)
 
@@ -163,7 +188,8 @@ def critical_path(tasks: Dict[str, Dict[str, Any]], scope: Dict[str, Any]) -> Tu
     return max((longest(t) for t in tasks), default=(0, []))
 
 
-def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any]) -> List[str]:
+def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any], wf: Optional[Workflow] = None,
+             wf_root: Optional[Path] = None) -> List[str]:
     cat = catalog()
     errs: List[str] = []
     wss = scopemod.workspaces(scope)
@@ -185,7 +211,12 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any])
         if not isinstance(spec, dict) or not spec.get("cmd"):
             errs.append(f"check {name!r} needs a `cmd`.")
         elif spec.get("cwd") and spec["cwd"] not in wss:
-            errs.append(f"check {name!r}: cwd {spec['cwd']!r} is not a workspace.")
+            # A workspace name is the normal form, but a check may also pin an absolute
+            # directory (e.g. the task-pipeline repo's own tests dir, which is no
+            # workspace): accept any absolute path that exists.
+            cwd = spec["cwd"]
+            if not (Path(cwd).is_absolute() and Path(cwd).is_dir()):
+                errs.append(f"check {name!r}: cwd {cwd!r} is not a workspace or an absolute directory.")
     for name in plan.get("final_checks", []):
         if name not in BUILTIN_FINAL_CHECKS and name not in plan.get("checks", {}):
             errs.append(f"final check {name!r} is neither built in ({', '.join(BUILTIN_FINAL_CHECKS)}) "
@@ -213,7 +244,7 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any])
         if t.get("serves") and not unknown and kind is None:
             errs.append(f"{tid}: every deliverable a task serves must be of one kind.")
         agent = t.get("agent")
-        if agent and kind and (agent not in authors or kind not in cat["agents"].get(agent, {}).get("kinds", [])):
+        if agent and kind and (agent not in authors or kind not in scopemod.agent_kinds(agent, "author")):
             errs.append(f"{tid}: agent {agent} is not a confirmed author for {kind} in scope.json.")
         ws = wss.get(t.get("workspace", ""))
         if ws is None:
@@ -229,8 +260,13 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any])
             if prefix == "research":
                 if state.get("recon", {}).get(ref, {}).get("status") != "done":
                     errs.append(f"{tid}: source {src} is not an answered research item.")
+            elif prefix == "wf":
+                path = resolve_ref(src, scope, wf_root)
+                if path is None or not path.exists():
+                    errs.append(f"{tid}: source {src} is not a file or folder inside the workflow folder.")
             elif not ref or prefix not in wss:
-                errs.append(f"{tid}: source {src!r} must be `<workspace>:<path or glob>` or `research:R#`.")
+                errs.append(f"{tid}: source {src!r} must be `<workspace>:<path or glob>`, `wf:<path>`, or "
+                            "`research:R#`.")
         if words(t.get("brief", "")) > limit("task_brief_words"):
             errs.append(f"{tid}: brief is {words(t['brief'])} words; the limit is {limit('task_brief_words')}.")
         if len(t.get("acceptance", [])) > limit("max_acceptance"):
@@ -282,10 +318,15 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any])
                         errs.append(f"{a} and {b} overlap on {pa} / {pb} — order them with depends_on "
                                     "or split the paths (parallel tasks must write disjoint files).")
 
+    for ref in plan.get("conventions", []):
+        path = resolve_ref(ref, scope, wf_root or Path(".")) if wf_root else None
+        if path is None or not path.is_file():
+            errs.append(f"conventions {ref!r} must name an existing file as `wf:<path in the workflow folder>` "
+                        "or `<workspace>:<path>`.")
     errs += _validate_batches(plan, scope)
     budget = scope.get("budget_minutes")
     if budget:
-        left = budget - minutes_since(state.get("created"))
+        left = budget - (agent_minutes(wf, state) if wf else 0.0)
         total = sum(lane_minutes(t, scope) for t in tasks.values())
         span, chain = critical_path(tasks, scope)
         lanes = limit("max_in_flight")
@@ -351,7 +392,7 @@ def _checked(wf: Workflow, state: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[
                       "(`tp revise --scope --feedback \"<their words>\"`), or restore it.")
     scope = scopemod.load_scope(wf)
     plan = load_plan(wf)
-    errs = validate(plan, scope, state)
+    errs = validate(plan, scope, state, wf, wf.root)
     if errs:
         raise TPError(*errs)
     (wf.root / "plan.md").write_text(render(plan, scope, wf))
@@ -387,9 +428,13 @@ def cmd_submit(wf: Workflow) -> str:
     state["phase"] = "AWAITING_APPROVAL"
     state["submitted"] = now_iso()
     wf.save(state)
-    wf.event("plan_submit", planning_min=round(minutes_since(state["created"]), 1))
-    out = [f"submitted — {len(plan['tasks'])} tasks, planning took {minutes_since(state['created']):.0f} min.",
+    planning_spent = agent_minutes(wf, state)
+    wf.event("plan_submit", planning_min=round(planning_spent, 1))
+    out = [f"submitted — {len(plan['tasks'])} tasks, planning took {planning_spent:.0f} agent-min.",
            f"Plan for the human: {wf.root / 'plan.md'}"]
+    if plan.get("conventions"):
+        out = out[:6] + [f"**Conventions every brief starts from** (frozen with the plan): "
+                         + ", ".join(f"`{c}`" for c in plan["conventions"])] + out[6:]
     if plan.get("questions"):
         out += ["Questions to put to the human:"] + [f"  - {q}" for q in plan["questions"]]
     noticed = wf.noticed_items()
@@ -411,6 +456,7 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
     plan = load_plan(wf)
     scope = scopemod.load_scope(wf)
     state["plan_approved_sha"] = state["plan_submitted_sha"]
+    state["conventions_sha"] = conventions_shas(plan, scope, wf.root)
     state["phase"] = "EXECUTING"
     state["approved"] = now_iso()
     for t in plan["tasks"]:
@@ -441,3 +487,51 @@ def cmd_revise(wf: Workflow, feedback: str, to_scope: bool) -> str:
         return "back to SCOPING — edit scope.json, `tp scope check`, and have the human confirm it again."
     return ("back to PLANNING — edit plan.json from the feedback, `tp plan check`, `tp plan submit`. "
             "Accepted tasks stay accepted.")
+
+
+AMENDABLE_KEYS = {"paths", "test_cmd", "tests_paths", "checks", "estimate_min", "brief", "sources"}
+_DONE = ("accepted", "skipped")
+
+
+def cmd_amend(wf: Workflow, reason: str) -> str:
+    """Correct mechanical plan details while EXECUTING without a full approval round-trip:
+    per-task paths/test_cmd/checks/estimate/brief/sources only, and only for tasks with no
+    accepted work behind them. Any other change still needs `tp revise`."""
+    state = wf.load()
+    if state["phase"] != "EXECUTING":
+        raise TPError(f"amend applies while EXECUTING; the workflow is {state['phase']}.")
+    if sha_file(wf.plan_json) == state.get("plan_approved_sha"):
+        raise TPError("plan.json is unchanged from the approved plan; nothing to amend.")
+    plan = load_plan(wf)
+    scope = scopemod.load_scope(wf)
+    errs: List[str] = []
+    tasks = {t["id"]: t for t in plan["tasks"]}
+    approved = tasks
+    snap = wf.root / "plan.approved.json"
+    if snap.exists():
+        approved = {t["id"]: t for t in json.loads(snap.read_text())["tasks"]}
+    for tid, t in tasks.items():
+        if tid not in state["tasks"]:
+            errs.append(f"{tid} is not in the approved plan; adding tasks needs `tp revise`.")
+            continue
+        if state["tasks"][tid]["status"] not in _DONE:
+            continue
+        base = approved.get(tid, {})
+        changed = [k for k in AMENDABLE_KEYS if base and t.get(k) != base.get(k)]
+        if changed:
+            errs.append(f"{tid} is accepted; its {', '.join(changed)} cannot be amended — use `tp revise`.")
+    for tid in state["tasks"]:
+        if tid not in tasks:
+            errs.append(f"{tid} was removed from the plan; removing tasks needs `tp revise`.")
+    errs += validate(plan, scope, state, wf)
+    if errs:
+        raise TPError(*errs)
+    if not snap.exists():
+        snap.write_text(json.dumps({"tasks": plan["tasks"]}, indent=1))
+    state["plan_approved_sha"] = state["plan_submitted_sha"] = sha_file(wf.plan_json)
+    state["conventions_sha"] = conventions_shas(plan, scope, wf.root)
+    wf.save(state)
+    wf.decision("plan amend", reason)
+    wf.event("plan_amend", reason=reason)
+    return ("plan amended — the workflow stays EXECUTING. `tp next` for what runs; the amendment is "
+            "recorded in decisions.md.")

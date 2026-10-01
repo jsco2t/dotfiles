@@ -59,15 +59,34 @@ def _style() -> List[str]:
             "unless its own conventions differ)", "", style_core(), ""]
 
 
+def _conventions_line(ctx: Dict[str, Any]) -> List[str]:
+    if not ctx.get("conventions"):
+        return []
+    return ["", "Conventions every task followed (judge the work by them too): "
+            + "; ".join(f"`{c}`" for c in ctx["conventions"]) + "."]
+
+
+def _decisions(ctx: Dict[str, Any]) -> List[str]:
+    """Answers given during the run (question → answer): they settle those questions and win where
+    the brief is silent or says otherwise. Nothing when there are none."""
+    if not ctx.get("decisions"):
+        return []
+    return (["## Decisions made during the run", "",
+             "Each settles its question; follow it where it differs from anything else in this brief.", ""]
+            + [f"- {d}" for d in ctx["decisions"]] + [""])
+
+
 def _task_body(task: Dict[str, Any], ctx: Dict[str, Any]) -> List[str]:
     out = ["## Task", "", f"{task['title']}. {task['brief']}", "",
-           f"Serves: {ctx['serves']}. Full scope: `{ctx['scope_md']}`.", "", "## Write only", ""]
+           f"Serves: {ctx['serves']}. Full scope: `{ctx['scope_md']}`.", ""] + _decisions(ctx) + ["## Write only", ""]
     out += [f"- `{p}`" for p in ctx["write_paths"]]
     out += ["", "Any other change you think is needed: one line in `noticed`, never an edit."]
     if ctx["readonly"]:
         out += ["Read-only (never modify, build into, or leave files in): "
                 + "; ".join(f"`{p}`" for p in ctx["readonly"]) + "."]
-    out += ["", "## Start from", ""] + [f"- `{s}`" for s in ctx["sources"]]
+    out += ["", "## Start from", ""] + [f"- `{c}` (conventions for every task: read first)"
+                                        for c in ctx.get("conventions", [])]
+    out += [f"- `{s}`" for s in ctx["sources"]]
     out += ["", "Read anything in the read-only workspaces that an acceptance criterion needs (callers, "
             "tests, docs); the fence is on what you write, not on what you read."]
     out += ["", "## Done when", ""] + [f"- {a}" for a in task["acceptance"]]
@@ -107,7 +126,7 @@ def fix(task: Dict[str, Any], rnd: int, ctx: Dict[str, Any], findings: List[str]
     if not same_agent:
         out += _task_body(task, ctx) + _style()
     else:
-        out += ["Your task, paths, and style are unchanged from your first brief.", ""]
+        out += _decisions(ctx) + ["Your task, paths, and style are unchanged from your first brief.", ""]
     return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step="fix"))) + "\n"
 
 
@@ -117,9 +136,12 @@ def review(task: Dict[str, Any], n: int, ctx: Dict[str, Any], result: Path) -> s
            f"Task under review: {task['title']}. {task['brief']}", "", "Deliverables:"]
     out += [f"- `{p}`" for p in ctx["write_paths"]]
     out += ["", "Check claims against:"] + [f"- `{s}`" for s in ctx["sources"]]
+    out += _conventions_line(ctx)
     out += ["", "Acceptance criteria:"] + [f"- {a}" for a in task["acceptance"]]
     if ctx.get("disputes"):
         out += ["", f"Rule on the author's disputes in `{ctx['disputes']}`."]
+    if ctx.get("decisions"):
+        out += [""] + _decisions(ctx)[:-1]
     out += ["", "Do not edit any file. Judge only this task's deliverables against its criteria and sources; "
             "anything else is one line in `noticed`. A finding is blocking when the deliverable is wrong, "
             "misses a criterion, or would mislead its reader. `verdict` is `changes` exactly when a finding "
@@ -155,6 +177,9 @@ def batch_review(bid: str, reviewer: str, tasks: List[Dict[str, Any]], ctx: Dict
     for t in tasks:
         out.append(f"- {t['id']} {t['title']}: " + ", ".join(f"`{p}`" for p in ctx["paths"][t["id"]]))
         out += [f"  - done when: {a}" for a in t["acceptance"]]
+    if ctx.get("decisions"):
+        out += [""] + _decisions(ctx)[:-1]
+    out += _conventions_line(ctx)
     out += ["", "Check claims against: " + "; ".join(f"`{s}`" for s in ctx["sources"]) + ".", "",
             "Do not edit any file. Give each finding the workspace-relative path and line it is about, so the "
             "pipeline can route it to the task that owns the file. A finding is blocking when the work is wrong, "
@@ -174,6 +199,8 @@ def verify(bid: str, reviewer: str, findings: List[Dict[str, Any]], ctx: Dict[st
            "The authors have addressed the findings below that the manager accepted. For each one, check whether "
            "it is resolved; do not start a new review. Report only findings that are still unresolved, and any new "
            f"problem the fixes themselves introduced. The change: `{ctx['changes']}`. Do not edit any file.", ""]
+    if ctx.get("decisions"):
+        out += _decisions(ctx)
     out += [f"- {f['id']} ({f['state']}) at {f['where']}: {f['issue']}" for f in findings] + [""]
     return "\n".join(out + _handback(result, VERIFY_SCHEMA.format(bid=bid))) + "\n"
 

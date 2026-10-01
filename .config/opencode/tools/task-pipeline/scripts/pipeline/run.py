@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import briefs, docscheck, snapshot
 from . import plan as planmod
 from . import scope as scopemod
-from .common import (TP_SCRIPT, TPError, Workflow, limit, load_json, minutes_since, now_iso, sha_file, words)
+from .common import (TP_SCRIPT, TPError, Workflow, agent_minutes, limit, load_json, minutes_since, now_iso,
+                     sha_file, words)
 
 DONE_STATES = ("accepted", "skipped")
 CHECK_TIMEOUT = 540
@@ -75,6 +76,10 @@ def _loaded(wf: Workflow, state: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
                       "`tp revise --feedback \"<their words>\"`.")
     plan = planmod.load_plan(wf)
     scope = scopemod.load_scope(wf)
+    for path, sha in state.get("conventions_sha", {}).items():
+        if sha_file(Path(path)) != sha:
+            raise TPError(f"{Path(path).name} changed after approval: conventions are part of every brief's "
+                          "contract. Restore it. To change conventions, edit the plan and use `tp amend`.")
     return plan, scope, {t["id"]: t for t in plan["tasks"]}
 
 
@@ -195,15 +200,15 @@ GUIDE = {
 def cmd_next(wf: Workflow, as_json: bool) -> str:
     state = wf.load()
     acts = actions(wf, state)
-    elapsed = minutes_since(state["created"])
+    spent = agent_minutes(wf, state)
     warnings = []
-    if state["phase"] in ("SCOPING", "PLANNING") and elapsed > limit("planning_warn_minutes"):
-        warnings.append(f"Planning has taken {elapsed:.0f} min (target {limit('planning_warn_minutes')}): "
+    if state["phase"] in ("SCOPING", "PLANNING") and spent > limit("planning_warn_minutes"):
+        warnings.append(f"Planning has taken {spent:.0f} agent-min (target {limit('planning_warn_minutes')}): "
                         "submit what you have, with open questions for the human.")
     if as_json:
-        return json.dumps({"phase": state["phase"], "actions": acts, "elapsed_min": round(elapsed, 1),
+        return json.dumps({"phase": state["phase"], "actions": acts, "agent_minutes": round(spent, 1),
                            "budget_minutes": state.get("budget_minutes"), "warnings": warnings})
-    out = [_headline(state)] + [f"WARNING: {w}" for w in warnings]
+    out = [_headline(wf, state)] + [f"WARNING: {w}" for w in warnings]
     if state["phase"] == "PLANNING":
         line = _research().summary(state, scopemod.load_scope(wf))
         out += [line] if line else []
@@ -222,12 +227,12 @@ def cmd_next(wf: Workflow, as_json: bool) -> str:
     return "\n".join(out)
 
 
-def _headline(state: Dict[str, Any]) -> str:
+def _headline(wf: Workflow, state: Dict[str, Any]) -> str:
     tasks = state["tasks"]
     done = sum(ts["status"] in DONE_STATES for ts in tasks.values())
     flight = ", ".join(f"{k} ({v['step']}, {minutes_since(v['since']):.0f}m)" for k, v in state["in_flight"].items())
     budget = state.get("budget_minutes")
-    used = f"{minutes_since(state['created']):.0f}" + (f" of {budget}" if budget else "") + " min"
+    used = f"{agent_minutes(wf, state):.0f}" + (f" of {budget} agent-min" if budget else " agent-min")
     parts = [state["phase"], f"{done}/{len(tasks)} accepted" if tasks else None,
              f"in flight: {flight}" if flight else None, used]
     return " · ".join(p for p in parts if p)
@@ -253,7 +258,8 @@ def _expand(ws: Path, patterns: List[str]) -> List[Path]:
     return out
 
 
-def _context(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+def _context(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Dict[str, Any],
+             state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     wss = scopemod.workspaces(scope)
     ws = _ws(scope, task["workspace"])
     deliverables = {d["id"]: d for d in scope["deliverables"]}
@@ -265,6 +271,8 @@ def _context(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Di
         name, _, rel = str(s).partition(":")
         if name == "research":
             sources.append(f"{wf.root / 'recon' / (rel + '.json')} (research findings: read `answers`)")
+        elif name == "wf":
+            sources.append(str(wf.root / rel))
         else:
             sources.append(str(Path(wss[name]["path"]) / rel) if name in wss else s)
     return {
@@ -275,6 +283,8 @@ def _context(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Di
         "sources": sources or [str(ws)],
         "checks": checks,
         "tests_paths": [str(ws / p) for p in task.get("tests_paths", task["paths"])],
+        "decisions": decision_lines(state or wf.load(), [task["id"]]),
+        "conventions": [str(p) for p in planmod.conventions(plan, scope, wf.root)],
     }
 
 
@@ -302,7 +312,7 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
         _slots(state)
         step, run = act["step"], wf.run_dir(tid)
         run.mkdir(parents=True, exist_ok=True)
-        ctx = _context(wf, task, scope, plan)
+        ctx = _context(wf, task, scope, plan, state)
         if step == "review":
             n = ts["reviews"] + 1
             brief, result = run / f"brief-review-{n}.md", run / f"review-{n}.json"
@@ -403,7 +413,11 @@ def _task_checks(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan
                 failures.append(f"Check `docs` failed ({len(errors)} problems; log {log}): " + "; ".join(errors[:6]))
         else:
             spec = plan["checks"][name]
-            cwd = _ws(scope, spec["cwd"]) if spec.get("cwd") else ws
+            raw = spec.get("cwd")
+            if raw and Path(raw).is_absolute():
+                cwd = Path(raw)
+            else:
+                cwd = _ws(scope, raw) if raw else ws
             ok, tail = _run_cmd(_expand_cmd(spec["cmd"], task, scope), cwd, log)
             if not ok:
                 failures.append(f"Check `{name}` failed (log {log}): {tail}")
@@ -449,7 +463,8 @@ def _sample(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any]) -> str:
     return "\n".join(out)
 
 
-def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
+def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bool = False,
+               credit: float = 0.0) -> str:
     with wf.locked():
         state = wf.load()
         if tid.startswith("R"):
@@ -462,7 +477,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
             raise TPError(f"{tid} is not in flight (status {state['tasks'].get(tid, {}).get('status')}).")
         ts, task, step = state["tasks"][tid], tasks[tid], fl["step"]
         if step == "review":
-            return _record_review(wf, state, scope, tasks, tid, fl, agent_id)
+            return _record_review(wf, state, scope, tasks, tid, fl, agent_id, credit=credit)
         effective = ts["fixing"] if step == "fix" else step
         if agent_id:
             ts["agents"][effective] = agent_id
@@ -470,6 +485,18 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
         if not res_path.exists():
             raise TPError(f"{res_path} is missing — the agent must write it before you record.")
         data = load_json(res_path, "the agent's result")
+        if trim_summary and isinstance(data, dict) and words(data.get("summary", "")) > 80:
+            # A mechanical rejection (e.g. an 82-word summary) should not cost an agent
+            # round-trip: cut the summary to the limit and record what remains.
+            kept: List[str] = []
+            n = 0
+            for w in str(data["summary"]).split():
+                if n + len(w) + 1 > 78 and n >= 40:
+                    break
+                kept.append(w)
+                n += len(w) + 1
+            data["summary"] = " ".join(kept).rstrip(" .,;:") + "."
+            res_path.write_text(json.dumps(data, indent=1) + "\n")
         errs = _validate_result(data, tid, step)
         if errs:
             raise TPError(*[f"{res_path}: {e}" for e in errs],
@@ -478,6 +505,12 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
         for item in data.get("noticed", []):
             wf.noticed(tid, str(item))
         minutes = minutes_since(fl["since"])
+        wait = max(0.0, credit) if minutes > 0 else 0.0
+        wait = min(wait, minutes)  # a credit can never push the tally negative
+        minutes -= wait
+        if wait:
+            wf.event("credit", id=tid, minutes=round(wait, 1))
+        state["agent_minutes"] = round(agent_minutes(wf, state) + minutes, 1)
         if data["status"] != "done":
             del state["in_flight"][tid]
             ts["status"] = "blocked"
@@ -486,12 +519,14 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
                              "snap": fl["snap"]}
             wf.save(state)
             wf.event("record", id=tid, step=step, status=data["status"], minutes=round(minutes, 1))
-            return "\n".join([f"{tid} {data['status']} — answer from scope.md / plan.json / decisions.md if they "
+            return "\n".join([f"{tid} {data['status']}{' (credited ' + format(wait, '.0f') + ' min of human-wait)' if wait else ''} — answer from scope.md / plan.json / decisions.md if they "
                               "settle it; otherwise ask the human. Then `tp resolve --task "
                               f"{tid} --action answer --answer \"...\"`:"] + [f"  - {q}" for q in asks])
 
         findings: List[str] = []
         msgs: List[str] = []
+        if wait:
+            msgs.append(f"credited {wait:.0f} min of human-wait.")
         ws = _ws(scope, task["workspace"])
         changed = snapshot.diff(snapshot.load(Path(fl["snap"])), snapshot.take(ws, [wf.root]))
         allowed = list(task["paths"])
@@ -571,7 +606,7 @@ def _validate_review(data: Any, tid: str) -> List[str]:
 
 
 def _record_review(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], tasks: Dict[str, Dict[str, Any]],
-                   tid: str, fl: Dict[str, Any], agent_id: Optional[str]) -> str:
+                   tid: str, fl: Dict[str, Any], agent_id: Optional[str], credit: float = 0.0) -> str:
     ts, task = state["tasks"][tid], tasks[tid]
     n = ts["reviews"] + 1
     path = wf.run_dir(tid) / f"review-{n}.json"
@@ -604,7 +639,13 @@ def _record_review(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], t
         minor = len(data["findings"])
         out = f"{tid} review {n} passed ({minor} non-blocking notes in {path.name}).\n" + _sample(wf, task, scope)
     wf.save(state)
-    wf.event("record", id=tid, step="review", status=ts["status"], minutes=round(minutes_since(fl["since"]), 1))
+    review_minutes = minutes_since(fl["since"])
+    wait = min(max(0.0, credit), review_minutes)
+    review_minutes -= wait
+    if wait:
+        wf.event("credit", id=tid, minutes=round(wait, 1))
+    state["agent_minutes"] = round(agent_minutes(wf, state) + review_minutes, 1)
+    wf.event("record", id=tid, step="review", status=ts["status"], minutes=round(review_minutes, 1))
     return out
 
 
@@ -619,8 +660,9 @@ def cmd_accept(wf: Workflow, tid: str, note: str) -> str:
             raise TPError(f"{tid} is not awaiting your fact check (status {ts and ts['status']}).")
         ts.update(status="accepted", accepted=now_iso(), note=note)
         wf.save(state)
-        wf.event("accept", id=tid, minutes=round(minutes_since(ts["started"]), 1))
-        return f"accepted {tid} ({minutes_since(ts['started']):.0f} min, {ts['round']} fix rounds). Next: `tp next`."
+        task_min = sum(e.get("minutes", 0.0) for e in wf.events() if e["kind"] == "record" and e.get("id") == tid)
+        wf.event("accept", id=tid, minutes=round(task_min, 1))
+        return f"accepted {tid} ({task_min:.0f} agent-min, {ts['round']} fix rounds). Next: `tp next`."
 
 
 def cmd_reject(wf: Workflow, tid: str, reason: str) -> str:
@@ -663,15 +705,50 @@ def cmd_exception(wf: Workflow, summary: str, tid: Optional[str]) -> str:
         return "raised — stop and put it to the human; record their answer with `tp resolve`."
 
 
-def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str) -> str:
+def _keep_decision(holder: Dict[str, Any], question: str, answer: str, by: Optional[str] = None) -> None:
+    """Keep an answer with the question it settles on the task (or workflow) it settles, so every
+    later brief for that work quotes it; decisions.md alone never reaches an agent."""
+    holder.setdefault("decisions", []).append({"q": question, "a": answer, "by": by, "ts": now_iso()})
+
+
+def decision_lines(state: Dict[str, Any], tids: List[str]) -> List[str]:
+    """The decisions a brief for these tasks must carry: the workflow's, then each task's own."""
+    out = []
+    for prefix, holder in [("", state)] + [(f"{t}: ", state["tasks"].get(t, {})) for t in tids]:
+        for d in holder.get("decisions", []):
+            out.append(f"{prefix}{d['q']} → {d['a']}" + (f" ({d['by']})" if d.get("by") else ""))
+    return out
+
+
+def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str, exception: bool = False,
+                noticed: Optional[int] = None, by: Optional[str] = None) -> str:
+    if noticed is not None:
+        with wf.locked():
+            item = wf.noticed_resolve(noticed, answer)
+            if item is None:
+                raise TPError(f"no noticed item #{noticed}; `tp noticed` lists the open ones.")
+            wf.decision(f"resolve noticed #{noticed}", answer, who=by)
+            return f"noticed #{noticed} resolved — it no longer shows as open in submit output or the report."
+    if exception:
+        with wf.locked():
+            state = wf.load()
+            blocked = state.pop("blocked", None)
+            if blocked is None or blocked.get("kind") != "exception":
+                raise TPError("No workflow-level exception block to resolve (`tp exception --task` "
+                              "ones resolve per task).")
+            wf.decision("resolve workflow exception", answer, who=by)
+            _keep_decision(state, blocked["summary"], answer, by)
+            wf.save(state)
+            return "exception resolved — continue with `tp next`."
     with wf.locked():
         state = wf.load()
-        wf.decision(f"resolve {tid or 'workflow'} {action}", answer)
+        wf.decision(f"resolve {tid or 'workflow'} {action}", answer, who=by)
         if not tid:
             blocked = state.pop("blocked", None)
             if blocked is None:
                 raise TPError("Nothing is blocked at workflow level; pass --task for a task or --review for a "
                               "review session.")
+            _keep_decision(state, blocked["summary"], answer, by)
             wf.save(state)
             return "resolved — continue with `tp next`."
         ts = state["tasks"].get(tid)
@@ -684,6 +761,7 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str) -> s
             ts["extra_rounds"] += 1
             ts.update(status="needs_fix", fixing=_authoring_step(tasks[tid], scope), blocked=None,
                       findings=[f"Reopened by the human: {answer}"])
+            _keep_decision(ts, "task reopened", answer, by)
             state.pop("final_failed", None)
             wf.save(state)
             return f"{tid} reopened for a fix round. `tp next`."
@@ -693,9 +771,11 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str) -> s
         if action == "skip":
             ts.update(status="skipped", blocked=None, note=answer)
         elif action == "retry" and kind == "rounds":
+            _keep_decision(ts, ts["blocked"]["summary"], answer, by)
             ts["extra_rounds"] += 1
             ts.update(status="needs_fix", blocked=None)
         elif action == "answer" and kind == "input":
+            _keep_decision(ts, ts["blocked"]["summary"], answer, by)
             _slots(state)
             step = ts["blocked"]["step"]
             state["in_flight"][tid] = {"step": step, "since": now_iso(), "snap": ts["blocked"]["snap"],
@@ -713,11 +793,18 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str) -> s
                 f"(no agent id recorded — dispatch fresh with the brief and the answer) {json.dumps(msg)}"
             return f"{tid} back in flight.\nsend: {target}\nthen: tp record {tid}"
         elif action == "answer" and kind == "exception":
+            _keep_decision(ts, ts["blocked"]["summary"], answer, by)
             ts.update(status=ts["blocked"]["prior"], blocked=None)
+        elif action == "retry" and kind == "exception":
+            # A task-blocked exception over a stale check or count usually means: run the
+            # round again with the human's correction in hand.
+            _keep_decision(ts, ts["blocked"]["summary"], answer, by)
+            ts["extra_rounds"] += 1
+            ts.update(status="needs_fix", fixing=ts["blocked"].get("prior") or ts["fixing"], blocked=None)
         else:
             raise TPError(f"action {action!r} does not apply to a {kind} block; use "
                           + {"rounds": "retry or skip", "input": "answer or skip",
-                             "exception": "answer or skip"}[kind] + ".")
+                             "exception": "answer, retry, or skip"}[kind] + ".")
         wf.save(state)
         return f"{tid} resolved ({action}). `tp next`."
 
@@ -777,8 +864,13 @@ def cmd_final(wf: Workflow) -> str:
 
 def _task_rows(wf: Workflow, state: Dict[str, Any], tasks: Dict[str, Dict[str, Any]]) -> List[str]:
     rows = ["| Task | Title | Status | Min | Est | Fix rounds | Reviews |", "|---|---|---|---|---|---|---|"]
+    # per-task agent-minutes from the record events (wall-clock spans idle time between messages)
+    per_task: Dict[str, float] = {}
+    for e in wf.events():
+        if e["kind"] == "record" and "minutes" in e:
+            per_task[e.get("id", "?")] = per_task.get(e.get("id", "?"), 0.0) + e["minutes"]
     for tid, ts in state["tasks"].items():
-        mins = minutes_since(ts["started"], ts.get("accepted")) if ts["started"] else 0
+        mins = per_task.get(tid, 0.0)
         rows.append(f"| {tid} | {tasks[tid]['title'] if tid in tasks else '?'} | {ts['status']} | {mins:.0f} | "
                     f"{tasks.get(tid, {}).get('estimate_min', '?')} | {ts['round']} | {ts['reviews']} |")
     return rows
@@ -787,14 +879,13 @@ def _task_rows(wf: Workflow, state: Dict[str, Any], tasks: Dict[str, Dict[str, A
 def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any],
                results: List[str]) -> str:
     tasks = {t["id"]: t for t in plan["tasks"]}
-    planning = minutes_since(state["created"], state.get("approved"))
-    execution = minutes_since(state.get("approved"), state.get("done"))
+    spent = agent_minutes(wf, state)
     budget = scope.get("budget_minutes")
     out = [f"# Report — {plan['title']}", "",
            f"All {len(tasks)} tasks finished: {sum(ts['status'] == 'accepted' for ts in state['tasks'].values())} "
            f"accepted, {sum(ts['status'] == 'skipped' for ts in state['tasks'].values())} skipped by the human. "
-           f"Planning took {planning:.0f} min and execution {execution:.0f} min"
-           + (f", against a budget of {budget} min." if budget else "."), "", "## Deliverables", ""]
+           f"Agent-minutes spent: {spent:.0f}"
+           + (f", against a budget of {budget}." if budget else "."), "", "## Deliverables", ""]
     for d in scope["deliverables"]:
         served = [t for t in tasks.values() if d["id"] in t["serves"]]
         out.append(f"- {d['id']} — {d['what']}: " + ", ".join(
@@ -843,7 +934,7 @@ def cmd_status(wf: Workflow, as_json: bool) -> str:
                            "tasks": {t: v["status"] for t, v in state["tasks"].items()},
                            "in_flight": state["in_flight"], "blocked": state.get("blocked"),
                            "elapsed_min": round(minutes_since(state["created"]), 1)})
-    out = [f"{state['title']} — {_headline(state)}", f"dir: {wf.root}"]
+    out = [f"{state['title']} — {_headline(wf, state)}", f"dir: {wf.root}"]
     by: Dict[str, List[str]] = {}
     for tid, ts in state["tasks"].items():
         by.setdefault(ts["status"], []).append(tid)
@@ -874,7 +965,8 @@ def _halt_record(wf: Workflow, state: Dict[str, Any]) -> str:
         by_status.setdefault(ts["status"], []).append(tid)
     record = {
         "requested": halt["requested"], "halted": halt["halted"], "reason": halt["reason"], "phase": state["phase"],
-        "elapsed_min": round(minutes_since(state["created"]), 1), "budget_minutes": state.get("budget_minutes"),
+        "elapsed_min": round(minutes_since(state["created"]), 1), "agent_minutes": round(agent_minutes(wf, state), 1),
+        "budget_minutes": state.get("budget_minutes"),
         "tasks": by_status,
         "research": {rid: i["status"] for rid, i in state.get("recon", {}).items()},
         "reviews": {sid: s["status"] for sid, s in state.get("reviews", {}).items()},
@@ -930,3 +1022,26 @@ def cmd_resume(wf: Workflow, answer: str) -> str:
         wf.decision("resume", answer)
         wf.event("resume")
         return "resumed. Run `tp next`."
+
+
+def add_fix(wf: Workflow, state: Dict[str, Any], tid: str, findings: List[str], fixing: str) -> str:
+    """Send findings from outside the task's own steps (review triage, a reopen) to its author.
+    They join a fix round that has not been dispatched yet; otherwise they open a round of their
+    own that does not count against the task's cap. Refused while the task is in flight, not yet
+    authored, or blocked: rewriting its state then would pull it from under the agent or skip the
+    human."""
+    ts = state["tasks"][tid]
+    if tid in state["in_flight"]:
+        raise TPError(f"{tid} is in flight ({state['in_flight'][tid]['step']}); send it more fixes once it has "
+                      "handed back and been recorded.")
+    if ts["status"] in ("pending", "needs_impl", "blocked"):
+        raise TPError(f"{tid} is {ts['status']}; it takes fixes once it is authored and not waiting on the human.")
+    if ts["status"] == "needs_fix":
+        if ts.get("fixing") != fixing:
+            raise TPError(f"{tid}'s waiting fix round is for its {ts.get('fixing')} step; send these after it.")
+        ts["findings"] = list(ts.get("findings", [])) + findings
+        (wf.run_dir(tid) / f"findings-{ts['round']}.json").write_text(json.dumps(ts["findings"], indent=1))
+        return "\n".join([f"{tid}: added to fix round {ts['round']}, not dispatched yet:"]
+                         + [f"  - {f}" for f in findings])
+    ts["extra_rounds"] = ts.get("extra_rounds", 0) + 1
+    return _fail(wf, ts, tid, findings, fixing=fixing)

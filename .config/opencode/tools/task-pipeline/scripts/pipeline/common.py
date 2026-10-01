@@ -43,6 +43,15 @@ def minutes_since(ts: Optional[str], until: Optional[str] = None) -> float:
     return max(0.0, (end - parse_iso(ts)).total_seconds() / 60.0)
 
 
+def agent_minutes(wf: "Workflow", state: Dict[str, Any]) -> float:
+    """Agent-minutes actually spent: the sum of per-hand-back minutes the record gate logged.
+    Wall-clock since creation reads a conversation's idle time as work; this does not."""
+    if "agent_minutes" in state:
+        return float(state["agent_minutes"])
+    # Older workflows without the tally: derive it from the event log.
+    return float(sum(e.get("minutes", 0.0) for e in wf.events() if e["kind"] == "record"))
+
+
 def sha_file(path: Path) -> Optional[str]:
     if not path.exists():
         return None
@@ -142,12 +151,13 @@ class Workflow:
             return []
         return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
 
-    def decision(self, what: str, text: str, who: str = "human") -> None:
+    def decision(self, what: str, text: str, who: Optional[str] = "human") -> None:
+        """who=None records the decision without attributing it."""
         path = self.root / "decisions.md"
         if not path.exists():
             path.write_text("# Decisions\n\nEvery human answer and every manager ruling, verbatim, in order.\n\n")
         with open(path, "a") as handle:
-            handle.write(f"- {now_iso()} · {what} · {who}: {text.strip()}\n")
+            handle.write(f"- {now_iso()} · {what}{f' · {who}' if who else ''}: {text.strip()}\n")
 
     def noticed(self, source: str, text: str) -> None:
         path = self.root / "noticed.md"
@@ -158,7 +168,26 @@ class Workflow:
             handle.write(f"- ({source}) {text.strip()}\n")
 
     def noticed_items(self) -> List[str]:
+        """Open (unresolved) noticed items — resolved ones are struck through, not listed."""
         path = self.root / "noticed.md"
         if not path.exists():
             return []
-        return [ln[2:] for ln in path.read_text().splitlines() if ln.startswith("- ")]
+        return [ln[2:] for ln in path.read_text().splitlines()
+                if ln.startswith("- ") and "RESOLVED:" not in ln]
+
+    def noticed_resolve(self, n: int, answer: str) -> Optional[str]:
+        """Mark the nth open noticed item (1-based) settled: it is struck through with the
+        decision so reports stop presenting it as open. Returns the item text, or None
+        when there is no such item."""
+        path = self.root / "noticed.md"
+        if not path.exists():
+            return None
+        lines = path.read_text().splitlines()
+        idx = [i for i, ln in enumerate(lines) if ln.startswith("- ")]
+        if not 1 <= n <= len(idx):
+            return None
+        i = idx[n - 1]
+        item = lines[i][2:].strip()
+        lines[i] = f"- ~~{item}~~ RESOLVED: {answer.strip()}"
+        path.write_text("\n".join(lines) + "\n")
+        return item

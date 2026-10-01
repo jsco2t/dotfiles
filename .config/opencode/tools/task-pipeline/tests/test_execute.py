@@ -586,6 +586,474 @@ class StatusTest(unittest.TestCase):
         finally:
             h.close()
 
+    def test_star_star_glob_covers_root_level_files(self) -> None:
+        # Seen live, twice: a task declaring paths ["**/*.md"] that edits the root index.md was
+        # FAILed as "changed files outside this task's paths" — pathlib's ** does not match
+        # files at the root, so the record gate rejected exactly the files the brief asked for.
+        h = Harness()
+        try:
+            h.approved(plan=h.plan([h.task("T01", "**/*.md", checks=[],
+                                           brief="Write every article including the root index.")]))
+            h.tp("dispatch", "T01")
+            sub = h.kb / "sub"
+            sub.mkdir()
+            (sub / "a.md").write_text("A\n")
+            (h.kb / "index.md").write_text("# index\n")
+            h.result("T01", "author", changed=["sub/a.md", "index.md"])
+            out = h.tp("record", "T01", "--agent-id", "a1").out
+            self.assertNotIn("outside this task's paths", out)
+            self.assertIn("passed its checks", out)
+        finally:
+            h.close()
+
+    def test_star_star_glob_does_not_widen_to_other_files(self) -> None:
+        # The de-noising must not hide genuine scope violations: a root file NOT covered by the
+        # pattern's extension is still outside the task's paths.
+        h = Harness()
+        try:
+            h.approved(plan=h.plan([h.task("T01", "**/*.md", checks=[])]))
+            h.tp("dispatch", "T01")
+            (h.kb / "a.md").write_text("A\n")
+            (h.kb / "stray.txt").write_text("not markdown\n")
+            h.result("T01", "author", changed=["a.md", "stray.txt"])
+            out = h.tp("record", "T01", "--agent-id", "a1", expect=0).out
+            self.assertIn("outside this task's paths", out)
+            self.assertIn("stray.txt", out)
+        finally:
+            h.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrimSummaryTest(unittest.TestCase):
+    """A mechanical result rejection (over-long summary) costs an agent round-trip; the
+    manager may instead trim it on record — nothing else in the result may change."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.approved(plan=self.h.plan([self.h.task("T01", "a.md", checks=[])]))
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def test_trim_summary_records_instead_of_failing(self) -> None:
+        self.h.tp("dispatch", "T01")
+        (self.h.kb / "a.md").write_text("x\n")
+        long_summary = " ".join(f"word{i}" for i in range(120))
+        self.h.result("T01", "author", summary=long_summary, changed=["a.md"])
+        out = self.h.tp("record", "T01", "--agent-id", "a1", "--trim-summary").out
+        self.assertIn("passed its checks", out)
+        data = json.loads((self.h.run_dir("T01") / "result-author.json").read_text())
+        self.assertLessEqual(len(data["summary"].split()), 80)
+        self.assertEqual(data["changed"], ["a.md"])
+        self.assertEqual(data["status"], "done")
+
+    def test_without_trim_the_rejection_stands(self) -> None:
+        self.h.tp("dispatch", "T01")
+        (self.h.kb / "a.md").write_text("x\n")
+        self.h.result("T01", "author", summary="word " * 82, changed=["a.md"])
+        res = self.h.tp("record", "T01", "--agent-id", "a1", expect=2)
+        self.assertIn("summary is 82 words", res.text)
+        data = json.loads((self.h.run_dir("T01") / "result-author.json").read_text())
+        self.assertEqual(data["summary"], "word " * 82)
+
+
+class NoticedResolveTest(unittest.TestCase):
+    """Noticed items stay open until the human settles them; `tp resolve --noticed N`
+    records the decision and the item stops appearing in submit output and reports."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.confirmed()
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def test_resolved_item_leaves_the_open_list(self) -> None:
+        self.h.tp("note", "The README's build section is stale.")
+        self.h.tp("note", "An id may need reassignment on import.")
+        listed = self.h.tp("noticed").out
+        self.assertIn("README's build section", listed)
+        self.h.tp("resolve", "--noticed", "1", "--action", "answer",
+                  "--answer", "Checked against the code; it is correct.")
+        open_items = self.h.tp("noticed").out
+        self.assertNotIn("README's build section", open_items)
+        self.assertIn("id may need reassignment", open_items)
+        text = (self.h.wf / "noticed.md").read_text()
+        self.assertIn("RESOLVED: Checked against the code", text)
+
+    def test_resolved_item_does_not_block_submit_output(self) -> None:
+        self.h.tp("note", "A stale observation.")
+        self.h.tp("resolve", "--noticed", "1", "--action", "answer", "--answer", "settled")
+        self.h.write_json("plan.json", self.h.plan())
+        out = self.h.tp("plan", "submit").out
+        self.assertNotIn("A stale observation", out)
+
+    def test_bad_index_is_refused(self) -> None:
+        self.h.tp("resolve", "--noticed", "4", "--action", "answer", "--answer", "x", expect=2)
+
+
+class ExceptionResolveTest(unittest.TestCase):
+    """A workflow-level exception resolves with --exception instead of --task, so one
+    human decision does not need two command shapes."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.approved(plan=self.h.plan([self.h.task("T01", "a.md", checks=[])]))
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def test_workflow_exception_resolves_with_the_exception_flag(self) -> None:
+        self.h.tp("exception", "--summary", "the final check count is stale")
+        self.assertIn("BLOCKED", self.h.tp("status").out)
+        self.h.tp("resolve", "--exception", "--action", "answer", "--answer", "31 is correct; update the check")
+        out = self.h.tp("status").out
+        self.assertNotIn("BLOCKED", out)
+        self.assertNotIn("HALT", out)
+
+    def test_exception_flag_without_a_block_is_refused(self) -> None:
+        self.h.tp("resolve", "--exception", "--action", "answer", "--answer", "x", expect=2)
+
+
+class ExceptionRetryTest(unittest.TestCase):
+    """A task-level exception block accepts retry: the human's answer goes in the decision
+    log and the task returns to a fix round without a second resolve call."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.approved(plan=self.h.plan([self.h.task("T01", "a.md", checks=[])]))
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def _raise_task_exception(self) -> None:
+        self.h.tp("dispatch", "T01")
+        (self.h.kb / "a.md").write_text("x\n")
+        self.h.result("T01", "author", changed=["a.md"])
+        self.h.tp("record", "T01", "--agent-id", "a1")
+        self.h.tp("exception", "--summary", "final check count is stale", "--task", "T01")
+
+    def test_retry_returns_the_task_to_a_fix_round(self) -> None:
+        self._raise_task_exception()
+        self.h.tp("resolve", "--task", "T01", "--action", "retry", "--answer", "31 is correct")
+        st = self.h.state()["tasks"]["T01"]
+        self.assertEqual(st["status"], "needs_fix")
+        self.assertIsNone(st["blocked"])
+
+    def test_answer_still_works_for_an_exception_block(self) -> None:
+        self._raise_task_exception()
+        self.h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "no change needed")
+        self.assertIn(self.h.state()["tasks"]["T01"]["status"], ("needs_check", "accepted"))
+
+
+class HumanWaitCreditTest(unittest.TestCase):
+    """An agent blocked on a permission prompt or a human question does not do work while
+    it waits: the human's delay must not bill against the task's budget. The manager sees
+    the delay and credits it at record time — the meter is never responsible for the
+    human's response time. (40-min task, prompt at 20, human answers in 20: 20 min left.)"""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.approved(plan=self.h.plan([self.h.task("T01", "a.md", checks=[])]))
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def _dispatch_and_backdate(self, minutes: float) -> None:
+        import json as _json
+        from datetime import datetime, timedelta, timezone
+        self.h.tp("dispatch", "T01")
+        sp = self.h.wf / ".tp" / "state.json"
+        st = _json.loads(sp.read_text())
+        since = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        st["in_flight"]["T01"]["since"] = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        sp.write_text(_json.dumps(st))
+        (self.h.kb / "a.md").write_text("x\n")
+        self.h.result("T01", "author", changed=["a.md"])
+
+    def test_credit_deducts_the_human_wait(self) -> None:
+        # Simulate: dispatched 20 min ago, but the agent only worked ~0 min of that
+        # because a permission prompt sat waiting for the human.
+        self._dispatch_and_backdate(minutes=20)
+        out = self.h.tp("record", "T01", "--agent-id", "a1", "--credit", "20").out
+        self.assertIn("human-wait", out)
+        self.assertLessEqual(self.h.state()["agent_minutes"], 1.0)
+
+    def test_partial_credit_leaves_the_worked_minutes(self) -> None:
+        # 40-min window, 20 min waiting on the human: 20 billed, 20 left.
+        self._dispatch_and_backdate(minutes=40)
+        self.h.tp("record", "T01", "--agent-id", "a1", "--credit", "20")
+        spent = self.h.state()["agent_minutes"]
+        self.assertGreaterEqual(spent, 18.0)
+        self.assertLessEqual(spent, 22.0)
+
+    def test_without_credit_the_full_window_bills(self) -> None:
+        self._dispatch_and_backdate(minutes=20)
+        self.h.tp("record", "T01", "--agent-id", "a1")
+        self.assertGreaterEqual(self.h.state()["agent_minutes"], 19.0)
+
+    def test_credit_floors_at_zero_and_is_audited(self) -> None:
+        self._dispatch_and_backdate(minutes=20)
+        self.h.tp("record", "T01", "--agent-id", "a1", "--credit", "999")
+        self.assertEqual(self.h.state()["agent_minutes"], 0.0)
+        events = [json.loads(ln) for ln in (self.h.wf / ".tp" / "events.jsonl").read_text().splitlines()]
+        credits = [e for e in events if e["kind"] == "credit"]
+        self.assertEqual(len(credits), 1)
+        self.assertLessEqual(credits[0]["minutes"], 20.0)
+
+    def test_credit_needs_no_flag_and_defaults_to_zero(self) -> None:
+        self._dispatch_and_backdate(minutes=5)
+        self.h.tp("record", "T01", "--agent-id", "a1")
+        self.assertGreaterEqual(self.h.state()["agent_minutes"], 4.0)
+
+
+class DecisionsTravelTest(unittest.TestCase):
+    """Seen live twice: an answer given mid-run (the README must not be pinned; the final
+    check's count must change) reached later fix rounds only because the manager restated it
+    in resume prompts by hand. Decisions made during the run must travel: every later brief
+    for the work they settle quotes them, and they win over the brief where they differ."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.approved(plan=self.h.plan([
+            self.h.task("T01", "a.md", checks=[], reviewer="doc-reviewer",
+                        brief="Write the article at a.md. Pin its front matter like the index."),
+            self.h.task("T02", "b.md", depends_on=["T01"]),
+        ]), review="per-task",
+           participants=[{"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},
+                         {"agent": "doc-reviewer", "role": "reviewer", "why": "Reviews D1's KB articles."}])
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def test_task_answer_reaches_the_fix_round_brief(self) -> None:
+        # A rejected review opens a fix round; the answer given while blocked (needs_input)
+        # must appear in that fix brief and settle its question.
+        h = self.h
+        h.tp("dispatch", "T01")
+        h.result("T01", "author", status="blocked", summary="Stuck on the pin question",
+                 questions=["Should a.md carry a pin?"])
+        h.tp("record", "T01", "--agent-id", "a1")
+        h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "No pin: it is meta-documentation.")
+        # resolve --action answer resumes the author in flight: finish the author round
+        h.good_article("a.md")
+        h.result("T01", "author", changed=["a.md"])
+        h.tp("record", "T01", "--agent-id", "a1")
+        # task review with a blocking finding opens the fix round
+        h.tp("dispatch", "T01")
+        (h.run_dir("T01") / "review-1.json").write_text(json.dumps({"task": "T01", "verdict": "changes",
+            "findings": [{"id": "F1", "blocking": True, "where": "a.md:1", "state": "wrong",
+                          "issue": "the pin paragraph is wrong", "task": "T01"}]}))
+        h.tp("record", "T01", "--agent-id", "rev-1")
+        h.tp("dispatch", "T01")  # the fix round's brief is written at dispatch
+        brief = (h.run_dir("T01") / "brief-fix-1.md").read_text()
+        self.assertIn("No pin: it is meta-documentation", brief)
+        self.assertIn("Should a.md carry a pin?", brief)
+
+    def test_workflow_answer_reaches_every_brief(self) -> None:
+        h = self.h
+        h.tp("exception", "--summary", "the est column means estimate")
+        h.tp("resolve", "--exception", "--action", "answer", "--answer", "31 is correct; update the check.")
+        h.tp("dispatch", "T01")
+        brief = (h.run_dir("T01") / "brief-author-0.md").read_text()
+        self.assertIn("31 is correct", brief)
+
+    def test_decisions_win_over_the_brief(self) -> None:
+        h = self.h
+        h.tp("exception", "--summary", "brief says pin; human says unpinned")
+        h.tp("resolve", "--exception", "--action", "answer", "--answer", "a.md stays unpinned.")
+        h.tp("dispatch", "T01")
+        brief = (h.run_dir("T01") / "brief-author-0.md").read_text()
+        pin_pos, dec_pos = brief.find("Pin its front matter"), brief.find("a.md stays unpinned")
+        self.assertLess(pin_pos, dec_pos)  # the decision appears after, with precedence stated
+
+    def test_reviewer_brief_carries_the_decisions_too(self) -> None:
+        h = self.h
+        h.tp("dispatch", "T01")
+        h.good_article("a.md")
+        h.result("T01", "author", changed=["a.md"])
+        h.tp("record", "T01", "--agent-id", "a1")
+        h.tp("exception", "--summary", "flag style")
+        h.tp("resolve", "--exception", "--action", "answer", "--answer", "Tables beat prose for enums.")
+        h.tp("dispatch", "T01")  # the task review brief
+        brief = (h.run_dir("T01") / "brief-review-1.md").read_text()
+        self.assertIn("Tables beat prose for enums", brief)
+
+    def test_decisions_do_not_leak_between_tasks(self) -> None:
+        # A task-level decision stays on its task; the workflow-level context carries only
+        # workflow decisions. T02's brief must not quote T01's decision.
+        h = self.h
+        h.tp("dispatch", "T01")
+        h.result("T01", "author", status="blocked", summary="Stuck", questions=["T01-only question?"])
+        h.tp("record", "T01", "--agent-id", "a1")
+        h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "Only for T01.")
+        # The block resolves by resuming the author in flight; complete the round
+        h.good_article("a.md")
+        h.result("T01", "author", changed=["a.md"])
+        h.tp("record", "T01", "--agent-id", "a1")
+        # task review (per-task reviewer) with a blocking finding → T01 into a fix round
+        h.tp("dispatch", "T01")
+        (h.run_dir("T01") / "review-1.json").write_text(json.dumps({"task": "T01", "verdict": "changes",
+            "findings": [{"id": "F1", "blocking": True, "where": "a.md:1", "state": "wrong",
+                          "issue": "the pin paragraph contradicts the decision", "task": "T01"}]}))
+        h.tp("record", "T01", "--agent-id", "rev-1")
+        h.tp("dispatch", "T01")  # the fix brief
+        self.assertIn("Only for T01", (h.run_dir("T01") / "brief-fix-1.md").read_text())
+        # T02 (different task, no decisions of its own) must not see T01's decision
+        h.good_article("a.md")
+        h.result("T01", "fix", changed=["a.md"])
+        h.tp("record", "T01", "--agent-id", "a1")
+        h.tp("dispatch", "T01")  # review round 2 (verify the fix)
+        (h.run_dir("T01") / "review-2.json").write_text(json.dumps({"task": "T01", "verdict": "pass",
+                                                                    "findings": []}))
+        h.tp("record", "T01", "--agent-id", "rev-1")
+        h.tp("accept", "T01", "--note", "ok")
+        h.tp("dispatch", "T02")
+        self.assertNotIn("Only for T01", (h.run_dir("T02") / "brief-author-0.md").read_text())
+
+
+class ReviewEditsHeldTest(unittest.TestCase):
+    """Seen live: a reviewer session that blocked on unexpected file edits discarded its
+    blocking findings — the manager had to choose between losing them and hand-copying.
+    An edit block now holds the findings: clear (not the reviewer's) or accept --force (ship
+    without them) decide them; accept without --force refuses while findings are held."""
+
+    def setUp(self) -> None:
+        self.h = h = Harness()
+        plan = h.plan(review_batches=[{"id": "B1", "tasks": ["T01", "T02"]}])
+        plan["tasks"] = [t for t in plan["tasks"] if t["id"] != "T03"]  # the default plan's T03 leaves the batch
+        h.approved(plan=plan, **FINAL_REVIEW)
+        # finish every task so the batch review can dispatch
+        for tid, rel in (("T01", "architecture/overview.md"), ("T02", "build/guide.md")):
+            h.author(tid, rel)
+            h.tp("accept", tid, "--note", "ok")
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def _review_with_edits(self) -> None:
+        h = self.h
+        h.tp("dispatch", S1)
+        d = h.wf / "runs" / "B1"
+        (d / "doc-reviewer-1.json").write_text(json.dumps(
+            {"batch": "B1", "verdict": "changes",
+             "findings": [{"id": "F1", "blocking": True, "task": "T01", "state": "wrong",
+                           "where": "kb/architecture/overview.md:1", "issue": "the intro overstates the pin"}]}))
+        # a file nobody's task owns appears while the reviewer runs
+        (h.kb / "stray.md").write_text("stray\n")
+        h.tp("record", S1, "--agent-id", "rev-1")
+
+    def test_edit_block_holds_the_findings(self) -> None:
+        self._review_with_edits()
+        st = self.h.state()["reviews"]["B1/doc-reviewer"]
+        self.assertEqual(st["status"], "blocked")
+        self.assertEqual(st["block"], "edits")
+        self.assertEqual([f["id"] for f in st["findings"] if f["blocking"]], ["F1"])
+
+    def test_clear_resumes_the_findings(self) -> None:
+        self._review_with_edits()
+        out = self.h.tp("resolve", "--review", "B1/doc-reviewer", "--action", "clear",
+                        "--answer", "the stray file was the manager's check scratch").out
+        st = self.h.state()["reviews"]["B1/doc-reviewer"]
+        self.assertEqual(st["status"], "needs_triage")
+        self.assertIn("F1", out)
+
+    def test_accept_without_force_refuses_while_findings_are_held(self) -> None:
+        self._review_with_edits()
+        res = self.h.tp("resolve", "--review", "B1/doc-reviewer", "--action", "accept",
+                        "--answer", "ship it", expect=2)
+        self.assertIn("--force", res.text)
+
+    def test_accept_with_force_ships_and_records_the_decision(self) -> None:
+        self._review_with_edits()
+        self.h.tp("resolve", "--review", "B1/doc-reviewer", "--action", "accept", "--force",
+                  "--answer", "ship without F1 — the stray file is unrelated")
+        st = self.h.state()["reviews"]["B1/doc-reviewer"]
+        self.assertEqual(st["status"], "done")
+        self.assertIn("ship without F1", (self.h.wf / "decisions.md").read_text())
+
+
+class ByAttributionTest(unittest.TestCase):
+    """decisions.md records every resolve identically, so the live log could not tell a ruling
+    the human made from one the manager made interpreting them. `--by human|manager` attributes
+    it — and where it is left out, the record attributes nobody."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.approved(plan=self.h.plan([self.h.task("T01", "a.md", checks=[])]))
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def test_by_human_records_the_attribution(self) -> None:
+        self.h.tp("exception", "--summary", "the count is stale")
+        self.h.tp("resolve", "--exception", "--action", "answer", "--by", "human",
+                  "--answer", "31 is correct.")
+        text = (self.h.wf / "decisions.md").read_text()
+        self.assertIn("human: 31 is correct", text)
+
+    def test_by_manager_records_the_attribution(self) -> None:
+        self.h.tp("exception", "--summary", "the count is stale")
+        self.h.tp("resolve", "--exception", "--action", "answer", "--by", "manager",
+                  "--answer", "same count per the brief.")
+        self.assertIn("manager: same count", (self.h.wf / "decisions.md").read_text())
+
+    def test_without_by_nobody_is_attributed(self) -> None:
+        self.h.tp("exception", "--summary", "the count is stale")
+        self.h.tp("resolve", "--exception", "--action", "answer", "--answer", "fine as is.")
+        line = next(ln for ln in (self.h.wf / "decisions.md").read_text().splitlines() if "fine as is" in ln)
+        self.assertNotIn("human:", line)
+        self.assertNotIn("manager:", line)
+
+
+class ReviewReopenTest(unittest.TestCase):
+    """A done review session's dismissed or non-blocking findings are unreachable when the human
+    re-judges one later: reopen sends named findings back to their owning authors and puts the
+    session back into waiting_fixes for a verification round."""
+
+    def setUp(self) -> None:
+        self.h = h = Harness()
+        plan = h.plan(review_batches=[{"id": "B1", "tasks": ["T01", "T02"]}])
+        plan["tasks"] = [t for t in plan["tasks"] if t["id"] != "T03"]
+        h.approved(plan=plan, **FINAL_REVIEW)
+        for tid, rel in (("T01", "architecture/overview.md"), ("T02", "build/guide.md")):
+            h.author(tid, rel)
+            h.tp("accept", tid, "--note", "ok")
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def _done_session_with_a_dismissed_finding(self) -> None:
+        h = self.h
+        h.tp("dispatch", S1)
+        d = h.wf / "runs" / "B1"
+        (d / "doc-reviewer-1.json").write_text(json.dumps(
+            {"batch": "B1", "verdict": "changes",
+             "findings": [{"id": "F1", "blocking": True, "task": "T01", "state": "wrong",
+                           "where": "kb/architecture/overview.md:2", "issue": "the wording is loose"}]}))
+        h.tp("record", S1, "--agent-id", "rev-1")
+        h.tp("triage", S1, "--dismiss", "F1", "--reason", "cosmetic; the wording is fine")  # session done
+
+    def test_reopen_sends_findings_back_to_their_owners(self) -> None:
+        h = self.h
+        self._done_session_with_a_dismissed_finding()
+        if h.state()["reviews"][S1]["status"] != "done":
+            h.tp("triage", S1, "--accept-all")  # or dismiss all: settle to done
+            # --accept-all with no blocking findings: nothing accepted; session done
+        st = h.state()["reviews"][S1]
+        self.assertEqual(st["status"], "done")
+        h.tp("resolve", "--review", S1, "--action", "reopen", "--findings", "F1",
+             "--answer", "on reflection the wording matters — fix it")
+        st = h.state()["reviews"][S1]
+        self.assertEqual(st["status"], "waiting_fixes")
+        self.assertIn("T01", st["fix_tasks"])
+        ts = h.state()["tasks"]["T01"]
+        self.assertEqual(ts["status"], "needs_fix")
+
+    def test_reopen_needs_findings_and_a_done_session(self) -> None:
+        h = self.h
+        self._done_session_with_a_dismissed_finding()
+        h.tp("resolve", "--review", S1, "--action", "reopen", "--answer", "x", expect=2)

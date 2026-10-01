@@ -213,3 +213,39 @@ class ScopeConfirmTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RoleKindsTest(unittest.TestCase):
+    """The catalog's `kinds` is one list per agent; architecture-reviewer reviews code AND authors
+    an architecture review of an existing codebase (a research deliverable). `role_kinds` overrides
+    `kinds` per role so one agent can hold two; jira-reviewer reviews integration deliverables."""
+
+    def test_architecture_reviewer_authors_a_review_of_an_existing_codebase(self) -> None:
+        h = Harness()
+        try:
+            h.init()
+            scope = h.scope()
+            scope["deliverables"] = [{"id": "D1", "kind": "research", "what": "an architecture review"}]
+            scope["participants"] = [{"agent": "doc-author", "role": "author", "why": "D1 needs an author"},
+                                     {"agent": "architecture-reviewer", "role": "author",
+                                      "why": "D1 reviews the codebase architecture"}]
+            h.write_json("scope.json", scope)
+            out = h.tp("scope", "check", expect=0).out
+            self.assertNotIn("does not apply", out)
+        finally:
+            h.close()
+
+    def test_architecture_reviewer_still_never_reviews_documents_or_writes_code(self) -> None:
+        h = Harness()
+        try:
+            h.init()
+            scope = h.scope()
+            scope["deliverables"] = [{"id": "D1", "kind": "docs", "what": "a guide"}]
+            scope["participants"] = [{"agent": "doc-author", "role": "author", "why": "D1 needs an author"},
+                                     {"agent": "architecture-reviewer", "role": "reviewer",
+                                      "why": "D1 structure needs review"}]
+            h.write_json("scope.json", scope)
+            out = h.tp("scope", "check", expect=2).text
+            self.assertIn("does not apply", out)
+        finally:
+            h.close()

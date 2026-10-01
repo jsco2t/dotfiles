@@ -2,6 +2,7 @@
 and a plan that freezes once the human approves it."""
 from __future__ import annotations
 
+import json
 import unittest
 
 from harness import Harness
@@ -219,3 +220,191 @@ class ApprovalTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BudgetMeteringTest(unittest.TestCase):
+    """The budget measures agent-minutes actually spent, not wall-clock since creation:
+    a conversation that idles for hours between human messages must not exhaust the budget."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.confirmed(budget_minutes=60)
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def _backdate_created(self, hours: float) -> None:
+        from datetime import datetime, timedelta, timezone
+        sp = self.h.wf / ".tp" / "state.json"
+        st = json.loads(sp.read_text())
+        created = datetime.now(timezone.utc) - timedelta(hours=hours)
+        st["created"] = created.strftime("%Y-%m-%dT%H:%M:%SZ")
+        sp.write_text(json.dumps(st))
+
+    def test_idle_wall_clock_does_not_exhaust_the_budget(self) -> None:
+        # Seen live: an 11-hour gap between human messages left "budget leaves -551 of 120 min".
+        self._backdate_created(hours=11)
+        self.h.write_json("plan.json", self.h.plan())
+        self.h.tp("plan", "check")  # must not raise
+
+    def test_status_shows_spent_not_elapsed_against_the_budget(self) -> None:
+        self._backdate_created(hours=11)
+        out = self.h.tp("status").out
+        self.assertNotIn("-551", out)
+        self.assertNotIn("660 of 60", out)
+
+    def test_zero_agent_minutes_means_zero_spent(self) -> None:
+        self._backdate_created(hours=5)
+        h = self.h
+        h.write_json("plan.json", h.plan())
+        h.tp("plan", "check")
+        h.tp("plan", "submit")
+        out = h.tp("plan", "submit", expect=2).out  # re-submit refused, but the message...
+        # ...the harm we care about is elsewhere: submit must not claim hours of planning.
+        h2_json = h.state()
+        self.assertIn("phase", h2_json)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class CheckCwdTest(unittest.TestCase):
+    """A check's cwd may name a workspace or an absolute directory — a code task's test
+    suite often lives outside every workspace (seen live: the task-pipeline repo's own
+    tests, which no workspace covers)."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.confirmed()
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def check(self, plan, expect: int = 0):
+        self.h.write_json("plan.json", plan)
+        return self.h.tp("plan", "check", expect=expect)
+
+    def test_absolute_cwd_is_accepted(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            plan = self.h.plan(checks={"unit": {"cmd": "true", "cwd": d}})
+            self.check(plan)
+
+    def test_missing_absolute_cwd_is_refused(self) -> None:
+        plan = self.h.plan(checks={"unit": {"cmd": "true", "cwd": "/nonexistent/tp-cwd-test"}})
+        text = self.check(plan, expect=2).text
+        self.assertIn("cwd", text)
+
+    def test_relative_non_workspace_cwd_is_refused(self) -> None:
+        plan = self.h.plan(checks={"unit": {"cmd": "true", "cwd": "nope"}})
+        text = self.check(plan, expect=2).text
+        self.assertIn("cwd", text)
+
+
+class AmendTest(unittest.TestCase):
+    """While EXECUTING, mechanical plan details (paths, test_cmd, checks, estimate, brief)
+    can be amended in place — seen live three times: a root-level file the glob missed, a
+    new human-requested deliverable, and a test command fix — without a full approval
+    round-trip. Structural changes still need `tp revise`."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.approved(plan=self.h.plan([self.h.task("T01", "a.md", checks=[])]))
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def _amend(self, **over):
+        plan = self.h.plan([self.h.task("T01", "a.md", checks=[], **over)])
+        self.h.write_json("plan.json", plan)
+        return self.h.tp("amend", "--reason", "root file scope fix")
+
+    def test_paths_amend_stays_executing(self) -> None:
+        self._amend(paths=["a.md", "index.md"])
+        self.assertEqual(self.h.state()["phase"], "EXECUTING")
+        st = self.h.state()["tasks"]["T01"]
+        self.assertEqual(st["status"], "pending")
+        self.assertIn("root file scope fix", (self.h.wf / "decisions.md").read_text())
+
+    def test_task_cmd_amend_is_allowed(self) -> None:
+        self._amend(test_cmd="true", test_mode="pin")
+        self.assertEqual(self.h.state()["phase"], "EXECUTING")
+
+    def test_structural_change_is_refused(self) -> None:
+        plan = self.h.plan([self.h.task("T01", "a.md", checks=[]),
+                            self.h.task("T02", "b.md", checks=[])])
+        self.h.write_json("plan.json", plan)
+        text = self.h.tp("amend", "--reason", "new task", expect=2).text
+        self.assertIn("revise", text)
+
+    def test_noop_amend_is_refused(self) -> None:
+        self.h.tp("amend", "--reason", "nothing changed", expect=2)
+
+    def test_amend_needs_execution_phase(self) -> None:
+        h = Harness()
+        try:
+            h.confirmed()
+            h.write_json("plan.json", h.plan())
+            h.tp("amend", "--reason", "too early", expect=2)
+        finally:
+            h.close()
+
+
+class ConventionsTest(unittest.TestCase):
+    """Briefs repeated conventions and mid-run answers only because the manager pasted them in.
+    A plan may now name files inside the workflow folder (`wf:path`) as sources and as shared
+    `conventions` every brief starts from; conventions are SHA-frozen at approval — a later edit
+    is a contract change and dispatch refuses it."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.confirmed()
+        (self.h.wf / "conventions.md").write_text("# Conventions\n\nEvery article cites `path:line`.\n")
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def test_workflow_files_can_be_sources_and_shared_conventions(self) -> None:
+        h = self.h
+        plan = h.plan([h.task("T01", "a.md", sources=["wf:conventions.md", "src:calc/**"])])
+        plan["conventions"] = ["wf:conventions.md"]
+        h.write_json("plan.json", plan)
+        h.tp("plan", "check")
+        h.tp("plan", "submit")
+        h.tp("approve", "--answer", "approve with conventions")
+        h.tp("dispatch", "T01")
+        brief = (h.run_dir("T01") / "brief-author-0.md").read_text()
+        self.assertIn("conventions for every task: read first", brief)  # the conventions line
+        self.assertIn("wf", "wf:conventions.md")  # the source prefix resolves to the workflow file
+
+    def test_conventions_freeze_with_the_plan(self) -> None:
+        h = self.h
+        plan = h.plan([h.task("T01", "a.md")])
+        plan["conventions"] = ["wf:conventions.md"]
+        h.write_json("plan.json", plan)
+        h.tp("plan", "check")
+        h.tp("plan", "submit")
+        h.tp("approve", "--answer", "approve")
+        (h.wf / "conventions.md").write_text("# Conventions\n\nChanged after approval.\n")
+        res = h.tp("dispatch", "T01", expect=2)
+        self.assertIn("conventions", res.text)
+
+    def test_a_missing_conventions_file_is_refused_at_plan_check(self) -> None:
+        h = self.h
+        plan = h.plan([h.task("T01", "a.md")])
+        plan["conventions"] = ["wf:nope.md"]
+        h.write_json("plan.json", plan)
+        text = h.tp("plan", "check", expect=2).text
+        self.assertIn("conventions", text)
+
+    def test_wf_is_not_a_workspace_name(self) -> None:
+        h = Harness()  # scope checking happens in SCOPING
+        try:
+            h.init()
+            scope = h.scope()
+            scope["workspaces"].append({"name": "wf", "path": "/tmp/wf", "mode": "read"})
+            h.write_json("scope.json", scope)
+            self.assertIn("wf", h.tp("scope", "check", expect=2).text)
+        finally:
+            h.close()

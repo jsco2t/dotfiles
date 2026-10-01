@@ -309,5 +309,18 @@ class DocsCheckTest(unittest.TestCase):
         self.run_check("```\n[x](nope.md) `calc/nope.go:1`\n```\n")
 
 
+    def test_naming_the_cited_file_itself_is_not_a_claim_to_check(self) -> None:
+        # Seen live: `go.mod:30` was doubted because the sentence names `go.mod`, the heuristic
+        # took `mod` from it, and nothing near line 30 says "mod".
+        lines = ["module example.com/calc", ""] + ["// pinned"] * 27 + ["toolchain go1.22.0"]
+        (self.h.src / "go.mod").write_text("\n".join(lines) + "\n")
+        self.run_check("`go.mod` pins the toolchain (`go.mod:30`).\n", "--strict")
+        self.run_check("The pin lives in `go.mod` (`src:go.mod:30`).\n", "--strict")
+        res = self.run_check("`Multiply` is pinned in `go.mod` (`go.mod:30`).\n")
+        self.assertIn("multiply", res.text.lower())        # a real name the line lacks is still doubted
+        # the file name is the ONLY name: naming the cited file is not a claim about its lines
+        self.run_check("`go.mod` is the module manifest (`go.mod:30`).\n", "--strict")
+
+
 if __name__ == "__main__":
     unittest.main()

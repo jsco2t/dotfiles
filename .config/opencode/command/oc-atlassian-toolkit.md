@@ -46,3 +46,21 @@ Every group/command supports `--help`. One-time auth: `atlassian auth login`.
 - Writes (comments, edits, transitions, worklogs) change real tickets: show what you are about to
   write and get the user's confirmation first, unless the task text already explicitly approves it.
 - If auth or connectivity fails, run `atlassian doctor` and report the result answer-first.
+
+## Writing descriptions, comments, and page bodies: plain text or raw ADF — never wiki markup
+
+`--description`, comment text, and Confluence `--body` are wrapped into ADF **paragraphs only**.
+The CLI parses **neither markdown nor Jira wiki markup**: `h2. Heading`, `{{mono}}`, `*bold*`,
+`- bullets` are stored and displayed literally.
+
+- Flat text: pass plain text; blank lines separate paragraphs, single newlines become hard breaks.
+- Rich formatting (headings, bullets, inline code, links, bold): build an ADF document and pass it
+  via `--field description="$(cat desc.json)"` on `issue create`/`issue edit` (JSON-decoded;
+  overrides `--description`), or via `--adf` on `issue comment`, `issue worklog --comment`, and
+  `confluence create/update/comment` (the body/stdin is then the ADF JSON document verbatim).
+  Shapes: `heading` (with `attrs.level`), `paragraph`, `bulletList`→`listItem`→`paragraph`,
+  `hardBreak`, and text nodes with `"marks": [{"type": "code"}]` (also `strong`, `{"type":"link","attrs":{"href":...}}`).
+- Verify rich writes with `jira issue get <KEY> --raw --fields description`: it must show a `doc`
+  with `heading`/`bulletList` nodes and no literal `h2.` or `{{` inside text nodes. Markup strings
+  in text nodes mean the write was malformed — rewrite it.
+- Reference issue formatted this way: [KUB-378](https://ciqinc.atlassian.net/browse/KUB-378).

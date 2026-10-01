@@ -158,6 +158,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("plan", help="check or submit plan.json")
     s.add_argument("what", choices=["check", "submit"])
 
+    s = sub.add_parser("amend", help="amend mechanical plan details while EXECUTING (paths, test_cmd, checks, estimate, brief, sources)")
+    s.add_argument("--reason", required=True)
     s = sub.add_parser("approve", help="record the human's approval")
     s.add_argument("--answer", required=True)
     s = sub.add_parser("revise", help="record the human's revision request")
@@ -171,6 +173,13 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("record", help="record an agent's hand-back and run the gates")
     s.add_argument("id")
     s.add_argument("--agent-id", help="the agent's id, for fix rounds by the same agent")
+    s.add_argument("--credit", type=float, default=0.0, metavar="MIN",
+                   help="minutes the agent sat waiting on the human (a permission prompt or a "
+                        "question) while in flight: deduct them from the budget tally instead of "
+                        "billing the human's response time as agent work")
+    s.add_argument("--trim-summary", action="store_true",
+                   help="the summary is over the word limit: cut it to the limit instead of failing "
+                        "(manager fix for a mechanical rejection; nothing else in the result changes)")
     s = sub.add_parser("accept", help="accept a task after your fact check")
     s.add_argument("id")
     s.add_argument("--note", required=True)
@@ -183,8 +192,20 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("resolve", help="record the human's decision")
     s.add_argument("--task")
     s.add_argument("--review", help="a blocked review session, e.g. B1/doc-reviewer")
-    s.add_argument("--action", required=True, choices=["answer", "retry", "skip", "reopen", "accept"])
+    s.add_argument("--force", action="store_true",
+                   help="--review accept: ship although blocking findings are held")
+    s.add_argument("--by", choices=["human", "manager"],
+                   help="who decided; recorded in decisions.md and carried in later briefs")
+    s.add_argument("--findings", default="", help="--review reopen: comma-separated finding ids to send back")
+    s.add_argument("--assign", action="append", default=[],
+                   help="--review reopen: F#=T## for a finding no task path matches")
+    s.add_argument("--exception", action="store_true",
+                   help="resolve a workflow-level exception block (action: answer)")
+    s.add_argument("--noticed", type=int, metavar="N",
+                   help="resolve noticed item N (1-based, as listed by `tp noticed`) as settled")
+    s.add_argument("--action", required=True, choices=["answer", "retry", "skip", "reopen", "accept", "clear"])
     s.add_argument("--answer", required=True)
+    sub.add_parser("noticed", help="list the noticed, not-in-plan items")
     s = sub.add_parser("note", help="log something noticed outside the plan")
     s.add_argument("text")
     sub.add_parser("final", help="package checks and the report")
@@ -274,6 +295,8 @@ def dispatch(args: argparse.Namespace) -> str:
         return run.cmd_resume(wf, args.answer)
     if c == "plan":
         return planmod.cmd_check(wf) if args.what == "check" else planmod.cmd_submit(wf)
+    if c == "amend":
+        return planmod.cmd_amend(wf, args.reason)
     if c == "approve":
         return planmod.cmd_approve(wf, args.answer)
     if c == "revise":
@@ -289,7 +312,8 @@ def dispatch(args: argparse.Namespace) -> str:
                 raise
         return "\n\n".join(done)
     if c == "record":
-        return run.after_record(wf, run.cmd_record(wf, args.id, args.agent_id))
+        return run.after_record(wf, run.cmd_record(wf, args.id, args.agent_id,
+                                                   trim_summary=args.trim_summary, credit=args.credit))
     if c == "sample":
         return run.cmd_sample(wf, args.id)
     if c == "accept":
@@ -299,10 +323,24 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "exception":
         return run.cmd_exception(wf, args.summary, args.task)
     if c == "resolve":
+        if args.noticed is not None:
+            return run.cmd_resolve(wf, None, args.action, args.answer, noticed=args.noticed, by=args.by)
+        if args.exception:
+            return run.cmd_resolve(wf, None, "answer", args.answer, exception=True, by=args.by)
         if args.review:
             with wf.locked():
-                return review.resolve(wf, wf.load(), args.review, args.action, args.answer)
-        return run.cmd_resolve(wf, args.task, args.action, args.answer)
+                session = wf.load()
+                session.setdefault("reviews", {}).setdefault(args.review, {})["_reopen_fids"] = \
+                    [x for x in args.findings.split(",") if x]
+                session["reviews"][args.review]["_reopen_assign"] = list(args.assign)
+                return review.resolve(wf, session, args.review, args.action, args.answer,
+                                      by=args.by, force=args.force)
+        return run.cmd_resolve(wf, args.task, args.action, args.answer, by=args.by)
+    if c == "noticed":
+        items = wf.load() and wf.noticed_items()
+        if not items:
+            return "no open noticed items."
+        return "\n".join(f"{i}. {t}" for i, t in enumerate(items, 1))
     if c == "note":
         wf.load()
         wf.noticed("manager", args.text)

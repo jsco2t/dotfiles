@@ -30,6 +30,13 @@ def role_of(p: Dict[str, Any]) -> str:
     return ROLE_ALIASES.get(role, role)
 
 
+def agent_kinds(agent: str, role: str) -> List[str]:
+    """The deliverable kinds an agent takes in one role: its catalog `role_kinds` for that role when
+    set (architecture-reviewer reviews code but authors research), otherwise its `kinds`."""
+    entry = catalog()["agents"].get(agent, {})
+    return list(entry.get("role_kinds", {}).get(role, entry.get("kinds", [])))
+
+
 def participants(scope: Dict[str, Any], role: str) -> List[str]:
     return [p["agent"] for p in scope.get("participants", []) if isinstance(p, dict) and role_of(p) == role]
 
@@ -75,8 +82,8 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     has_write = False
     for w in scope["workspaces"]:
         name, path, mode = w.get("name", ""), w.get("path", ""), w.get("mode")
-        if not re.fullmatch(r"[a-z0-9_-]+", str(name)) or name in names or name in ("research", "recon"):
-            errs.append(f"workspace name {name!r} must be unique, lowercase, [a-z0-9_-], and not 'research'.")
+        if not re.fullmatch(r"[a-z0-9_-]+", str(name)) or name in names or name in ("research", "recon", "wf"):
+            errs.append(f"workspace name {name!r} must be unique, lowercase, [a-z0-9_-], and not 'research' or 'wf'.")
         names.add(name)
         if mode not in ("write", "read"):
             errs.append(f"workspace {name}: mode must be write or read.")
@@ -107,9 +114,9 @@ def validate(scope: Dict[str, Any]) -> List[str]:
         if role in WORK_ROLES:
             work += 1
             reviewers += role == "reviewer"
-            if not kinds & set(entry["kinds"]):
+            if not kinds & set(agent_kinds(agent, role)):
                 errs.append(f"{agent} ({role}) does not apply to {', '.join(sorted(kinds))} deliverables; "
-                            f"it is for: {', '.join(entry['kinds'])}.")
+                            f"as {role} it is for: {', '.join(agent_kinds(agent, role))}.")
     if work > limit("max_participants"):
         errs.append(f"{work} participants (authors, tests, reviewers); the limit is "
                     f"{limit('max_participants')} — keep only agents with a direct bearing on the output.")
@@ -117,7 +124,7 @@ def validate(scope: Dict[str, Any]) -> List[str]:
         errs.append(f"{reviewers} reviewers; the limit is {limit('max_reviewers')} — keep the lenses this change needs.")
 
     for kind in sorted(kinds):
-        authors = [a for a in participants(scope, "author") if kind in agents.get(a, {}).get("kinds", [])]
+        authors = [a for a in participants(scope, "author") if kind in agent_kinds(a, "author")]
         if not authors:
             who = ", ".join(d["id"] for d in scope["deliverables"] if d.get("kind") == kind)
             errs.append(f"no author participant for {kind} deliverables ({who}).")

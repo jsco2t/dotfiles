@@ -44,6 +44,22 @@ class ResearchTest(unittest.TestCase):
         text = self.add("R1", ["Give the complete CLI command tree with every flag."], expect=2).text
         self.assertIn("complete", text)
 
+    def test_verification_of_a_bounded_set_is_not_content(self) -> None:
+        # Regression, seen live: "does every cited file:line exist and support the claim?"
+        # was refused as content — but the citations are the input's own bounded set, not
+        # a codebase enumeration, and rewording to dodge the keyword heuristic cost a
+        # manager round-trip mid-scoping.
+        self.add("R1", ["Does every cited file:line reference exist and support the claim?"], 0,
+                 "codebase-researcher", "investigate")
+        self.add("R2", ["Do all listed commands still run on the current image?"], 0,
+                 "codebase-researcher", "investigate")
+
+    def test_an_open_set_enumeration_is_still_content_whatever_the_adjective(self) -> None:
+        # The guard keeps its teeth: a non-bounding adjective ("every Go file") still
+        # marks a codebase enumeration the task that writes the content researches.
+        text = self.add("R1", ["Does every Go file carry a license header?"], expect=2).text
+        self.assertIn("every Go file", text)
+
     def test_investigate_may_trace_one_named_flow_end_to_end(self) -> None:
         q = ["Trace how `stratum up` brings up the kubelet, end to end."]
         self.add("R1", q, 2, "codebase-researcher", "map")

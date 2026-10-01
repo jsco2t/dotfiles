@@ -19,6 +19,19 @@ from .common import (TP_SCRIPT, TPError, Workflow, agent_minutes, limit, load_js
 DONE_STATES = ("accepted", "skipped")
 CHECK_TIMEOUT = 540
 
+# Workflow-root paths the record and review gates never blame on an agent: tp.py itself
+# writes them during a round — dispatch briefs, snapshots, findings and the result files
+# every agent is mandated to produce under runs/, noticed.md appends made from a result's
+# own `noticed` list during record, and plan.json, plan.approved.json and decisions.md
+# rewritten by the manager's `tp amend` mid-flight. A workflow root that is also a task
+# workspace (e.g. a Jira-filing pipeline whose only local deliverables are small record
+# files) puts all of these inside the gate's diff. Plan tampering stays caught — harder —
+# by the approved-sha check in `_loaded` on every command; noticed.md and decisions.md are
+# tp-only by contract (see Workflow's docstring); report.md and halt.json are tp's edge
+# outputs, written only with nothing in flight.
+PIPELINE_OWNED = ("runs/**", "noticed.md", "decisions.md", "plan.json", "plan.approved.json",
+                  "report.md", "halt.json")
+
 
 def _research():
     from . import research
@@ -529,7 +542,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bo
             msgs.append(f"credited {wait:.0f} min of human-wait.")
         ws = _ws(scope, task["workspace"])
         changed = snapshot.diff(snapshot.load(Path(fl["snap"])), snapshot.take(ws, [wf.root]))
-        allowed = list(task["paths"])
+        allowed = list(task["paths"]) + list(PIPELINE_OWNED)
         for other in fl.get("concurrent", []):
             if other in tasks and tasks[other]["workspace"] == task["workspace"]:
                 allowed += tasks[other]["paths"]
@@ -621,7 +634,7 @@ def _record_review(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], t
         wf.noticed(f"{tid} review", str(item))
     ws = _ws(scope, task["workspace"])
     changed = snapshot.diff(snapshot.load(Path(fl["snap"])), snapshot.take(ws, [wf.root]))
-    allowed: List[str] = []
+    allowed: List[str] = list(PIPELINE_OWNED)   # tp's own writes; a reviewer edits nothing
     for other in fl.get("concurrent", []):
         if other in tasks and tasks[other]["workspace"] == task["workspace"]:
             allowed += tasks[other]["paths"]

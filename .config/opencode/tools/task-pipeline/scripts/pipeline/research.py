@@ -14,9 +14,17 @@ from . import scope as scopemod
 from .common import TPError, Workflow, limit, load_json, minutes_since, now_iso, words
 
 PURPOSES = ("map", "requirements", "investigate")
+# A bounding modifier ("every cited file", "all listed commands") names a set the input
+# already specifies, so the question verifies a bounded set — planning research's job.
+# Only an open-set enumeration of the codebase ("every file", "every Go file", "all
+# packages") is content the task that writes it must research. (Seen live: confirming a
+# review's file:line citations against the repo was refused as content.)
+_BOUNDED = (r"cited|referenced|listed|named|mentioned|linked|given|quoted|recorded|pinned|"
+            r"specified|declared|mirrored|copied")
+_ENUM_NOUNS = (r"files?|flags?|functions?|symbols?|packages?|commands?|fields?|"
+               r"endpoints?|lines?|options?|types?")
 _CONTENT = [
-    re.compile(r"\b(every|all)\s+(\w+\s+)?(files?|flags?|functions?|symbols?|packages?|commands?|fields?|"
-               r"endpoints?|lines?|options?|types?)\b", re.I),
+    re.compile(r"\b(every|all)\s+(?!(?:" + _BOUNDED + r")\s+)(\w+\s+)?(" + _ENUM_NOUNS + r")\b", re.I),
     re.compile(r"\bcomplete\s+(\w+\s+){0,2}(list|tree|inventory|reference|catalog(ue)?|walkthrough)\b", re.I),
     re.compile(r"\bexhaustive(ly)?\b", re.I),
 ]

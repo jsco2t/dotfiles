@@ -208,6 +208,165 @@ class RecordTest(unittest.TestCase):
         self.assertIn("never mentions mul", (self.h.run_dir("T01") / "brief-fix-1.md").read_text())
 
 
+class WfRootWorkspaceTest(unittest.TestCase):
+    """A task whose write workspace IS the workflow root — e.g. a Jira-filing pipeline
+    whose only local deliverables are small record files. The record and review gates
+    must blame an agent only for its own stray writes there, never for tp.py's own
+    bookkeeping: the briefs, snapshots and mandated result files under runs/, noticed.md
+    appends written from the result's own `noticed` list during record, or plan.json,
+    plan.approved.json and decisions.md rewritten by the manager's `tp amend` mid-flight.
+    (Seen live: every task of a 15-bug Jira filing took a spurious fix round 'reverting'
+    files its agent never touched, and all three review sessions blocked on their own
+    protocol artifacts.)"""
+
+    def setUp(self) -> None:
+        self.h = h = Harness()
+        h.init()   # sets h.wf; the workflow root is also the tasks' write workspace below
+        self._confirm(review="none", tasks=["T01", "T02"])
+
+    def _confirm(self, review, tasks, batches=None) -> None:
+        h = self.h
+        participants = [{"agent": "kb-author", "role": "author", "why": "Writes every record for D1."}]
+        if review != "none":
+            participants.append({"agent": "doc-reviewer", "role": "reviewer",
+                                  "why": "Reviews the records."})
+        h.write_json("scope.json", h.scope(
+            workspaces=[{"name": "flow", "path": str(h.wf), "mode": "write"},
+                        {"name": "src", "path": str(h.src), "mode": "read"}],
+            review=review, participants=participants))
+        h.tp("scope", "check")
+        h.tp("scope", "confirm", "--answer", "confirmed")
+        plan = h.plan(tasks=[h.task(t, f"out/{t.lower()}.md", workspace="flow", checks=[]) for t in tasks],
+                      **({"review_batches": batches} if batches else {}))
+        h.write_json("plan.json", plan)
+        h.tp("plan", "check")
+        h.tp("plan", "submit")
+        h.tp("approve", "--answer", "approve")
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def hand_back(self, tid: str, rel: str, noticed=()):
+        h = self.h
+        out = h.wf / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(f"# {tid}\n\n`Add` returns the sum (`calc/calc.go:5`).\n")
+        h.result(tid, "author", changed=[rel], noticed=list(noticed))
+        return h.tp("record", tid, "--agent-id", "a1")
+
+    def test_the_agents_own_result_file_and_noticed_list_are_not_blamed(self) -> None:
+        # runs/T01/result-author.json is the file the brief mandates; noticed.md is written
+        # by `tp record` itself, from this result's `noticed` list, before the gate diff.
+        h = self.h
+        h.tp("dispatch", "T01")
+        out = self.hand_back("T01", "out/t01.md", noticed=["calc has no tests."]).out
+        self.assertEqual(statuses(h)["T01"], "needs_check")
+        self.assertIn("calc has no tests.", (h.wf / "noticed.md").read_text())
+
+    def test_concurrent_dispatch_artifacts_are_not_blamed(self) -> None:
+        # Dispatching T02 while T01 works writes runs/T02/brief-*.md and snap-*.json
+        # after T01's baseline snapshot: tp's own artifacts, not T01's agent's edits.
+        h = self.h
+        h.tp("dispatch", "T01", "T02")
+        self.hand_back("T01", "out/t01.md")
+        self.assertEqual(statuses(h)["T01"], "needs_check")
+
+    def test_a_manager_amend_mid_flight_is_not_blamed_on_the_agent(self) -> None:
+        # `tp amend` rewrites plan.json, plan.approved.json and decisions.md while the
+        # task is in flight; the fix brief it spawned told the agent to revert them.
+        h = self.h
+        h.tp("dispatch", "T01")
+        plan = h.read_json("plan.json")
+        plan["tasks"][0]["brief"] += " Also note the build command."
+        h.write_json("plan.json", plan)
+        h.tp("amend", "--reason", "One more line in the brief.")
+        self.hand_back("T01", "out/t01.md")
+        self.assertEqual(statuses(h)["T01"], "needs_check")
+
+    def test_a_stray_agent_write_in_the_workspace_is_still_flagged(self) -> None:
+        # The gate keeps its teeth: an agent write no plan path covers still fails.
+        h = self.h
+        h.tp("dispatch", "T01")
+        (h.wf / "evil.md").write_text("not mine to write\n")
+        out = self.hand_back("T01", "out/t01.md").out
+        self.assertIn("evil.md", out)
+        self.assertEqual(statuses(h)["T01"], "needs_fix")
+
+
+class WfRootReviewTest(unittest.TestCase):
+    """Review gates where the task workspace is the workflow root: the session's own
+    protocol artifacts (its mandated result file under runs/, the dispatch's
+    changes.json, noticed.md written from the review's own `noticed` list) must not
+    read as the reviewer editing the deliverables. (Seen live: three review sessions
+    blocked with 'files changed while the reviewer worked' — every flagged file
+    tp's own.)"""
+
+    def _workflow(self, review: str, batches=None) -> Harness:
+        h = Harness()
+        h.init()
+        participants = [
+            {"agent": "kb-author", "role": "author", "why": "Writes every record for D1."},
+            {"agent": "doc-reviewer", "role": "reviewer", "why": "Reviews the records."}]
+        h.write_json("scope.json", h.scope(
+            review=review, participants=participants,
+            workspaces=[{"name": "flow", "path": str(h.wf), "mode": "write"},
+                        {"name": "src", "path": str(h.src), "mode": "read"}]))
+        h.tp("scope", "check")
+        h.tp("scope", "confirm", "--answer", "confirmed")
+        plan = h.plan(tasks=[h.task("T01", "out/t01.md", workspace="flow", checks=[])],
+                      **({"review_batches": batches} if batches else {}))
+        h.write_json("plan.json", plan)
+        h.tp("plan", "check")
+        h.tp("plan", "submit")
+        h.tp("approve", "--answer", "approve")
+        return h
+
+    def test_a_batch_session_records_clean_despite_its_own_protocol_files(self) -> None:
+        h = self._workflow("final", batches=[{"id": "B1", "tasks": ["T01"]}])
+        try:
+            h.tp("dispatch", "T01")
+            out = h.wf / "out" / "t01.md"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("# T01\n\n`Add` returns the sum (`calc/calc.go:5`).\n")
+            h.result("T01", "author", changed=["out/t01.md"])
+            h.tp("record", "T01", "--agent-id", "a1")
+            h.tp("accept", "T01", "--note", "ok")
+            h.tp("dispatch", "B1/doc-reviewer")
+            d = h.wf / "runs" / "B1"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "doc-reviewer-1.json").write_text(json.dumps(
+                {"batch": "B1", "verdict": "pass", "findings": [],
+                 "noticed": ["The out/ records lack an index."]}))
+            res = h.tp("record", "B1/doc-reviewer", "--agent-id", "rev-1").out
+            self.assertNotIn("files changed while the reviewer worked", res)
+            self.assertEqual(h.state()["reviews"]["B1/doc-reviewer"]["status"], "done")
+            self.assertIn("The out/ records lack an index.", (h.wf / "noticed.md").read_text())
+        finally:
+            h.close()
+
+    def test_a_per_task_review_step_records_clean(self) -> None:
+        h = self._workflow("per-task")
+        try:
+            h.tp("dispatch", "T01")
+            out = h.wf / "out" / "t01.md"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("# T01\n\n`Add` returns the sum (`calc/calc.go:5`).\n")
+            h.result("T01", "author", changed=["out/t01.md"])
+            h.tp("record", "T01", "--agent-id", "a1")
+            self.assertEqual(statuses(h)["T01"], "needs_review")
+            h.tp("dispatch", "T01")
+            d = h.run_dir("T01")
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "review-1.json").write_text(json.dumps(
+                {"task": "T01", "verdict": "pass", "findings": [],
+                 "noticed": ["The out/ records lack an index."]}))
+            res = h.tp("record", "T01", "--agent-id", "rev-1").out
+            self.assertNotIn("The reviewer changed", res)
+            self.assertEqual(statuses(h)["T01"], "needs_check")
+        finally:
+            h.close()
+
+
 class ReviewTest(unittest.TestCase):
     def setUp(self) -> None:
         self.h = Harness()

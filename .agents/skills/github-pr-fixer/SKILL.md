@@ -1,9 +1,11 @@
 ---
-name: copilot-fixer
-description: Triage GitHub Copilot review threads and failing PR checks, refute non-issues, fix valid issues, verify the combined changes, and update the PR. Use for Copilot review comments, PR review-bot feedback, or CI failures on a pull request.
+name: github-pr-fixer
+description: Triage PR review-bot comments (including GitHub Copilot threads), investigate broader PR pipeline failures such as failing CI checks and workflow failures, refute non-issues, fix valid issues, verify the combined changes, and update the PR. Use for review-bot feedback, Copilot review comments, or CI failures on a pull request.
 ---
 
-# Copilot Fixer
+# GitHub PR Fixer
+
+Investigates any failure or feedback in a pull request's pipeline — review-bot comments, failing CI checks, and workflow failures — fixes what is real, and updates the PR. Copilot review threads are one covered input, matched by author.
 
 ## Inputs
 
@@ -17,7 +19,7 @@ Uses the local GitHub toolkit (`ghtk`, stdlib-only, works in-sandbox). Full refe
 | Command | Purpose |
 |---------|---------|
 | `ghtk pr get [PR]` | Resolve URL, number, or current branch |
-| `ghtk pr threads PR [--author-substr copilot] [--unresolved-only]` | Fetch review threads (Copilot's, matched by author) |
+| `ghtk pr threads PR [--author-substr copilot] [--unresolved-only]` | Fetch review threads (filter by author, e.g. Copilot's) |
 | `ghtk pr reply THREAD --body "..."` (or `--body-file PATH`) | Reply to a thread |
 | `ghtk pr resolve THREAD` | Resolve a thread |
 | `ghtk pr checks PR [--failing-only] [--logs]` | Fetch checks and failed-job logs |
@@ -42,20 +44,20 @@ All emit JSON with `--json`.
 
 Run `ghtk pr get`. If resolution fails, stop and request a URL or number. Check out the PR branch (`gh pr checkout PR`, a local git operation) when fixes are authorized.
 
-Fetch unresolved Copilot threads and failing checks in parallel:
+Fetch unresolved review threads and failing checks in parallel. To limit threads to one bot's comments (for example Copilot's), filter by author:
 
 ```bash
 python3 "$HOME/.local/bin/github-toolkit/ghtk" pr threads PR --author-substr copilot --unresolved-only
 python3 "$HOME/.local/bin/github-toolkit/ghtk" pr checks PR --failing-only --logs
 ```
 
-If neither exists, report that the PR is clean and stop.
+Omit `--author-substr` to gather review-bot threads from all authors. If neither threads nor failing checks exist, report that the PR is clean and stop.
 
-### 2. Triage each thread
+### 2. Triage each item
 
 Read the referenced code, its callers or callees when relevant, tests, and project instructions (`AGENTS.md` first; `CLAUDE.md` only when a repository still uses it).
 
-Classify each thread:
+Classify each thread or failing check:
 
 - `VALID`: a demonstrated correctness, security, reliability, or repository-convention issue.
 - `NON-ISSUE`: the concern is already handled, misunderstands context, contradicts established behavior, concerns unchanged code without PR impact, or is only preference.
@@ -96,7 +98,7 @@ If no code changed, do not create an empty commit. If a fix still fails verifica
 ## Output Formatting
 
 ```markdown
-# Copilot Fixer Report: PR #[number]
+# GitHub PR Fixer Report: PR #[number]
 
 ## PR
 

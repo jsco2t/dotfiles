@@ -1,6 +1,6 @@
 ---
 name: new-drd
-description: "Create a Delivery Requirements Document (DRD) -- a lean, delivery-focused requirements doc for a scoped unit of work that will be implemented (often by an AI agent team via /task-orchestrator). Researches context from Jira, GitHub, Confluence, files, or free-text, then runs a probing Q&A to pin down the problem, the solution, and a traceable set of deliverables with completion criteria. Outputs a single file with a requirements-to-deliverables coverage matrix. Deliberately omits PRD fluff -- target-user personas, business justification, user scenarios -- in favor of what it takes to land the work."
+description: "Create a Delivery Requirements Document (DRD) -- a lean, delivery-focused requirements doc for a scoped unit of work that will be implemented (often by an AI agent team via /task-pipeline). Researches context from Jira, GitHub, Confluence, files, or free-text, then runs a probing Q&A to pin down the problem, the solution, and a traceable set of deliverables with completion criteria. Outputs a single file with a requirements-to-deliverables coverage matrix. Deliberately omits PRD fluff -- target-user personas, business justification, user scenarios -- in favor of what it takes to land the work."
 argument-hint: "<output-file-path> <context: description, URLs, Jira/GitHub issue links, or file paths>"
 ---
 
@@ -13,7 +13,7 @@ Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`
 read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
 (issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
 
-You are creating a **Delivery Requirements Document (DRD)** — a lean requirements document for a scoped **unit of work** that will be implemented, often by an AI agent team via `/task-orchestrator`. This is **not** a full product PRD. It deliberately omits target-user personas, business justification, and user scenarios outside the problem being solved. It captures exactly what a builder needs — the **problem**, the **solution**, the **specific deliverables**, and **how you know each one is done** — and nothing whose only job is to sell the work.
+You are creating a **Delivery Requirements Document (DRD)** — a lean requirements document for a scoped **unit of work** that will be implemented, often by an AI agent team via `/task-pipeline`. This is **not** a full product PRD. It deliberately omits target-user personas, business justification, and user scenarios outside the problem being solved. It captures exactly what a builder needs — the **problem**, the **solution**, the **specific deliverables**, and **how you know each one is done** — and nothing whose only job is to sell the work.
 
 The document's scope determines its framing:
 
@@ -347,7 +347,7 @@ Include only if sequencing matters — if everything can land together, say so i
 | 1 | [Unresolved question] | [What it blocks] | [Who answers] |
 
 ⚠ **If any Must-Have requirement lacks a deliverable, or any question above blocks
-implementation, this DRD is not ready for `/task-orchestrator`.** Say so plainly.
+implementation, this DRD is not ready for `/task-pipeline`.** Say so plainly.
 
 ---
 
@@ -432,7 +432,7 @@ The user's judgment overrides your research. Update the DRD to reflect their dec
 
 3. **This is a delivery doc, not a PRD.** No target-user personas, no business justification, no user scenarios outside the problem being solved, no adoption metrics. If a section would only sell the work or describe who benefits, cut it. Keep the problem, the solution, the deliverables, and the done-state.
 
-4. **Delivery-level, not engineering-level.** The DRD says WHAT to build and the SHAPE of the solution (§3) — not the file-level HOW. Do not include code, file-by-file change lists, or implementation detail; that is the builder's domain (e.g. `/task-orchestrator`'s plan).
+4. **Delivery-level, not engineering-level.** The DRD says WHAT to build and the SHAPE of the solution (§3) — not the file-level HOW. Do not include code, file-by-file change lists, or implementation detail; that is the builder's domain (e.g. `/task-pipeline`'s plan).
 
 5. **PRODUCT vs PROJECT is a content difference.** Scope drives the title's framing and whether the Existing-Context section (2A) applies. A PROJECT-scope DRD needs current-behavior, what-changes/what-stays, and backward-compatibility; a PRODUCT-scope one does not.
 

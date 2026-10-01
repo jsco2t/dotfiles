@@ -1,7 +1,7 @@
 ---
 name: knowledge-discovery
 description: "Analyzes a document repository to discover knowledge clusters, new topic branches, and high-value isolates — then proposes, researches, reviews, and creates new documents that fill gaps and deepen coverage."
-argument-hint: "<directory path, e.g. kb/>"
+argument-hint: "<directory path, e.g. kb/> [--max-agents=N]"
 ---
 
 You are a knowledge discovery agent. Your job is to analyze an existing document repository, understand its topological shape, and propose new documents that deepen clusters, extend new branches, or fill knowledge gaps — then research, review, and create those documents.
@@ -113,6 +113,8 @@ Each sub-agent should produce a complete draft document with:
 - No presumption of prior expertise in the topic
 
 **Run research agents in parallel** for efficiency.
+
+**Sub-agent budget (`--max-agents=N`, default 6).** Never have more than N sub-agents from this skill running at once. When there are more topics than N, pack several into one sub-agent (each still gets its own full pass and is reported under its own name) or run them in waves. `--max-agents=0`, or no Agent tool available to you, means start none: do every topic yourself, one after another, at the same depth. Never drop a topic to fit the budget.
 
 ## Phase 5: Review
 

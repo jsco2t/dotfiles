@@ -1,7 +1,7 @@
 ---
 name: reviewomatic
 description: Review router. Surveys the file types in a change and dispatches it to the right specialized reviewer skill(s) — doc-reviewomatic for documentation, comp-goreviewomatic for Go-only code, comp-reviewomatic for mixed or multi-language code. Never reviews the code or docs itself; it only decides who should review and hands off. Works locally or on GitHub PRs, in the same four modes (local, review, resolve, scan) as the reviewers it dispatches.
-argument-hint: "[mode local|review|resolve|scan] [pr-ref] [--auto-comment] [--confidence=N]"
+argument-hint: "[mode local|review|resolve|scan] [pr-ref] [--auto-comment] [--confidence=N] [--max-agents=N]"
 ---
 
 # Review-O-Matic Router
@@ -181,7 +181,7 @@ Let **code present** mean `G` or `C` is non-empty.
 
 ## Phase 3: Dispatch
 
-Invoke each chosen skill with the `Skill` tool. **Always forward the mode, PR reference, and flags explicitly** so the downstream skill runs without re-asking Phase 0 or re-discovering the PR. If two skills are chosen, run them **sequentially** (each fans out into its own sub-agents — running both at once overloads the context).
+Invoke each chosen skill with the `Skill` tool. **Always forward the mode, PR reference, and flags explicitly** — including `--max-agents=N` when given, which caps each downstream skill's sub-agents (`--max-agents=0`: none) so the downstream skill runs without re-asking Phase 0 or re-discovering the PR. If two skills are chosen, run them **sequentially** (each fans out into its own sub-agents — running both at once overloads the context).
 
 ### Local mode
 

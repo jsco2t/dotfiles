@@ -227,7 +227,10 @@ def record(wf: Workflow, state: Dict[str, Any], sid: str, agent_id: Optional[str
     edits = []
     for name, snap in fl.get("snaps", {}).items():
         changed = snapshot.diff(snapshot.load(Path(snap)), snapshot.take(run._ws(scope, name), [wf.root]))
-        edits += [f"{name}:{c}" for c in changed]
+        # tp's own writes under the workflow root (this session's mandated result file,
+        # the dispatch's artifacts, noticed.md appended from this review's own `noticed`
+        # list) are not the reviewer editing the deliverables; anything else is.
+        edits += [f"{name}:{c}" for c in changed if not snapshot.matches(c, run.PIPELINE_OWNED)]
     minutes = minutes_since(fl["since"])
     del state["in_flight"][sid]
     for f in data["findings"]:

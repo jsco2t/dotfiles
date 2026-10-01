@@ -248,6 +248,16 @@ class DocsCheckTest(unittest.TestCase):
         res = self.run_check("`Multiply` is here (`calc/big.go:3`, `calc/big.go:55`).\n")
         self.assertIn("may not support", res.text)
 
+    def test_naming_the_cited_file_itself_is_not_a_claim_to_check(self) -> None:
+        # Seen live: `go.mod:30` was doubted because the sentence names `go.mod`, the heuristic
+        # took `mod` from it, and nothing near line 30 says "mod".
+        lines = ["module example.com/calc", ""] + ["// pinned"] * 27 + ["toolchain go1.22.0"]
+        (self.h.src / "go.mod").write_text("\n".join(lines) + "\n")
+        self.run_check("`go.mod` pins the toolchain (`go.mod:30`).\n", "--strict")
+        self.run_check("The pin lives in `go.mod` (`src:go.mod:30`).\n", "--strict")
+        res = self.run_check("`Multiply` is pinned in `go.mod` (`go.mod:30`).\n")
+        self.assertIn("multiply", res.text.lower())        # a real name the line lacks is still doubted
+
     def test_a_citation_inside_the_named_function_supports_it(self) -> None:
         body = "".join(f"\tx{i} := {i}\n" for i in range(20))
         (self.h.src / "calc" / "long.go").write_text(f"package calc\n\nfunc Long() int {{\n{body}\treturn 0\n}}\n")

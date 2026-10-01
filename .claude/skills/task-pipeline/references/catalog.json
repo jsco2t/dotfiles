@@ -1,5 +1,5 @@
 {
-  "_comment": "Which agents /task-pipeline may use, in which role, for which deliverable kinds. tp.py enforces it. Agents not listed here are never used.",
+  "_comment": "Which agents /task-pipeline may use, in which role, for which deliverable kinds. tp.py enforces it. Agents not listed here are never used. `role_kinds` overrides `kinds` for one role.",
   "kinds": ["code", "kb", "docs", "tutorial", "education", "research", "pm", "integration"],
   "agents": {
     "code-author":           {"roles": ["author"],              "kinds": ["code"],        "use": "production code that makes the task's tests pass"},
@@ -21,7 +21,7 @@
     "security-reviewer":     {"roles": ["reviewer"],            "kinds": ["code"],        "use": "untrusted input, authorization, secrets, data exposure, and crypto in a code change"},
     "api-compat-reviewer":   {"roles": ["reviewer"],            "kinds": ["code"],        "use": "breaking changes to APIs, CLI flags, config keys, and serialized formats"},
     "test-reviewer":         {"roles": ["reviewer"],            "kinds": ["code"],        "use": "whether new tests prove the acceptance criteria and would catch a regression"},
-    "architecture-reviewer": {"roles": ["reviewer"],            "kinds": ["code"],        "use": "structure of a code change with real architectural impact; never documents"},
+    "architecture-reviewer": {"roles": ["reviewer", "author"],  "kinds": ["code"], "role_kinds": {"author": ["research"]}, "use": "reviewer: structure of a code change with real architectural impact, never documents; author: an architecture review of an existing codebase (/arch-reviewer --whole-repo)"},
     "ux-reviewer":           {"roles": ["reviewer"],            "kinds": ["code"],        "use": "a user-facing CLI/TUI/UI surface the change creates or alters"}
   },
   "suggest": {

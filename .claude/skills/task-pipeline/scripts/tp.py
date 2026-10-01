@@ -155,8 +155,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("schema", help="print an example of a workflow file")
     s.add_argument("name", choices=["scope", "plan", "research", "result", "review"])
 
-    s = sub.add_parser("plan", help="check or submit plan.json")
-    s.add_argument("what", choices=["check", "submit"])
+    s = sub.add_parser("plan", help="check or submit plan.json; amend it mid-run (plan-amend.json)")
+    s.add_argument("what", choices=["check", "submit", "amend"])
+    s.add_argument("--answer", help="amend: the human's agreement, verbatim (without it, amend only checks)")
 
     s = sub.add_parser("approve", help="record the human's approval")
     s.add_argument("--answer", required=True)
@@ -180,11 +181,16 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("exception", help="raise something only the human can decide")
     s.add_argument("--summary", required=True)
     s.add_argument("--task")
-    s = sub.add_parser("resolve", help="record the human's decision")
+    s = sub.add_parser("resolve", help="record a decision on a blocked task, review session, or workflow")
     s.add_argument("--task")
-    s.add_argument("--review", help="a blocked review session, e.g. B1/doc-reviewer")
-    s.add_argument("--action", required=True, choices=["answer", "retry", "skip", "reopen", "accept"])
+    s.add_argument("--review", help="a review session, e.g. B1/doc-reviewer")
+    s.add_argument("--action", required=True, choices=["answer", "retry", "skip", "reopen", "accept", "clear"])
     s.add_argument("--answer", required=True)
+    s.add_argument("--by", choices=["human", "manager"], help="who decided; recorded in decisions.md and the report")
+    s.add_argument("--findings", default="", help="--review reopen: comma-separated finding ids to send back")
+    s.add_argument("--assign", action="append", default=[], help="--review reopen: F#=T## for a finding no task "
+                   "path matches")
+    s.add_argument("--force", action="store_true", help="--review accept: ship although blocking findings are held")
     s = sub.add_parser("note", help="log something noticed outside the plan")
     s.add_argument("text")
     sub.add_parser("final", help="package checks and the report")
@@ -273,6 +279,8 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "resume":
         return run.cmd_resume(wf, args.answer)
     if c == "plan":
+        if args.what == "amend":
+            return planmod.cmd_amend(wf, args.answer)
         return planmod.cmd_check(wf) if args.what == "check" else planmod.cmd_submit(wf)
     if c == "approve":
         return planmod.cmd_approve(wf, args.answer)
@@ -301,8 +309,9 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "resolve":
         if args.review:
             with wf.locked():
-                return review.resolve(wf, wf.load(), args.review, args.action, args.answer)
-        return run.cmd_resolve(wf, args.task, args.action, args.answer)
+                return review.resolve(wf, wf.load(), args.review, args.action, args.answer, args.by, args.force,
+                                      [x for x in args.findings.split(",") if x], args.assign)
+        return run.cmd_resolve(wf, args.task, args.action, args.answer, args.by)
     if c == "note":
         wf.load()
         wf.noticed("manager", args.text)

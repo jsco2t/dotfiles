@@ -43,6 +43,61 @@ def minutes_since(ts: Optional[str], until: Optional[str] = None) -> float:
     return max(0.0, (end - parse_iso(ts)).total_seconds() / 60.0)
 
 
+def gap_minutes(start: Optional[str], end: Optional[str], gaps: List[List[Optional[str]]]) -> float:
+    """Minutes of [start, end] (end None: now) inside the union of `gaps` — [from, to] pairs, to None
+    for a gap still open. Overlapping gaps count once."""
+    if not start:
+        return 0.0
+    now = datetime.now(timezone.utc)
+    lo, hi = parse_iso(start), parse_iso(end) if end else now
+    spans = []
+    for a, b in gaps:
+        if a:
+            a_, b_ = max(parse_iso(a), lo), min(parse_iso(b) if b else now, hi)
+            if b_ > a_:
+                spans.append((a_, b_))
+    total, cur = 0.0, None
+    for a, b in sorted(spans):
+        if cur and a <= cur[1]:
+            cur = (cur[0], max(cur[1], b))
+            continue
+        if cur:
+            total += (cur[1] - cur[0]).total_seconds()
+        cur = (a, b)
+    if cur:
+        total += (cur[1] - cur[0]).total_seconds()
+    return total / 60.0
+
+
+def waiting_gaps(state: Dict[str, Any]) -> List[List[Optional[str]]]:
+    """Spans in which nothing ran and the work waited on the human: halts and blocks (kept by
+    Workflow.save), plus each halt's own record for workflows older than that."""
+    gaps = [list(g) for g in state.get("idle", [])]
+    if state.get("idle_since"):
+        gaps.append([state["idle_since"], None])
+    for h in state.get("halts", []) + ([state["halt"]] if state.get("halt") else []):
+        if h.get("halted"):
+            gaps.append([h["halted"], h.get("resumed")])
+    return gaps
+
+
+def _waiting_on_human(state: Dict[str, Any]) -> bool:
+    if state.get("phase") != "EXECUTING" or state.get("in_flight"):
+        return False
+    return bool(state.get("halt") or state.get("blocked")
+                or any(t.get("status") == "blocked" for t in state.get("tasks", {}).values())
+                or any(s.get("status") == "blocked" for s in state.get("reviews", {}).values()))
+
+
+def _tick_idle(state: Dict[str, Any]) -> None:
+    waiting, since = _waiting_on_human(state), state.get("idle_since")
+    if waiting and not since:
+        state["idle_since"] = now_iso()
+    elif since and not waiting:
+        state.setdefault("idle", []).append([since, now_iso()])
+        del state["idle_since"]
+
+
 def sha_file(path: Path) -> Optional[str]:
     if not path.exists():
         return None
@@ -116,6 +171,7 @@ class Workflow:
         return json.loads(self.state_path.read_text())
 
     def save(self, state: Dict[str, Any]) -> None:
+        _tick_idle(state)  # every state change opens or closes a span of waiting on the human
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
         os.replace(tmp, self.state_path)
@@ -142,12 +198,13 @@ class Workflow:
             return []
         return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
 
-    def decision(self, what: str, text: str, who: str = "human") -> None:
+    def decision(self, what: str, text: str, who: Optional[str] = "human") -> None:
+        """who=None records the decision without attributing it (`tp resolve` without --by)."""
         path = self.root / "decisions.md"
         if not path.exists():
             path.write_text("# Decisions\n\nEvery human answer and every manager ruling, verbatim, in order.\n\n")
         with open(path, "a") as handle:
-            handle.write(f"- {now_iso()} · {what} · {who}: {text.strip()}\n")
+            handle.write(f"- {now_iso()} · {what}{f' · {who}' if who else ''}: {text.strip()}\n")
 
     def noticed(self, source: str, text: str) -> None:
         path = self.root / "noticed.md"

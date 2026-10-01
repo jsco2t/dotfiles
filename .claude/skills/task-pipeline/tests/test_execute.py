@@ -3,7 +3,9 @@ anything off the plan is caught mechanically."""
 from __future__ import annotations
 
 import json
+import re
 import unittest
+from datetime import datetime, timedelta
 
 from harness import Harness
 
@@ -82,6 +84,66 @@ class DispatchTest(unittest.TestCase):
         # Seen live: a "Read" list was taken as a fence, and the article skipped its callers.
         self.assertIn("## Start from", brief)
         self.assertIn("anything in the read-only workspaces", brief)
+
+
+class ConventionsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.h = h = Harness()
+        h.confirmed(**FINAL_REVIEW)
+        (h.wf / "conventions.md").write_text("# Conventions\n\nOne note per root cause.\n")
+        h.write_json("plan.json", h.plan(conventions=["wf:conventions.md"]))
+        h.tp("plan", "check")
+        h.tp("plan", "submit")
+        h.tp("approve", "--answer", "approve")
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def test_conventions_reach_every_brief(self) -> None:
+        h = self.h
+        h.tp("dispatch", "T01")
+        conventions = str(h.wf / "conventions.md")
+        brief = (h.run_dir("T01") / "brief-author-0.md").read_text()
+        self.assertIn(conventions, brief.split("## Start from")[1].split("## Done when")[0])
+        h.author("T02", "build/guide.md")
+        h.good_article("architecture/overview.md")
+        h.result("T01", "author", changed=["architecture/overview.md"])
+        h.tp("record", "T01")
+        for tid in ("T01", "T02"):
+            h.tp("accept", tid, "--note", "ok")
+        h.tp("dispatch", "T03")
+        (h.kb / "index.md").write_text("# KB\n\n- [O](architecture/overview.md)\n- [B](build/guide.md)\n")
+        h.result("T03", "author", changed=["index.md"])
+        h.tp("record", "T03")
+        h.tp("accept", "T03", "--note", "ok")
+        h.tp("dispatch", "B1/doc-reviewer")
+        self.assertIn(conventions, (h.wf / "runs" / "B1" / "brief-doc-reviewer-1.md").read_text())
+
+    def test_conventions_freeze_with_the_plan(self) -> None:
+        (self.h.wf / "conventions.md").write_text("# Conventions\n\nAnything goes.\n")
+        self.assertIn("conventions.md changed", self.h.tp("next", expect=2).text)
+
+    def test_conventions_change_through_an_amendment_without_stopping_the_run(self) -> None:
+        # New conventions go in a new file the draft points at: the frozen one stays as it is, so
+        # agents in flight keep recording while the human considers the amendment.
+        h = self.h
+        h.tp("dispatch", "T01")
+        out = h.tp("plan", "amend").out
+        self.assertIn("new file", out)
+        (h.wf / "conventions-2.md").write_text("# Conventions\n\nOne note per finding.\n")
+        draft = json.loads((h.wf / "plan-amend.json").read_text())
+        draft["conventions"] = ["wf:conventions-2.md"]
+        (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        self.assertIn("conventions changed", h.tp("plan", "amend").out)
+        h.tp("next")
+        h.good_article("architecture/overview.md")
+        h.result("T01", "author", changed=["architecture/overview.md"])
+        h.tp("record", "T01")                                        # the run carries on meanwhile
+        h.tp("plan", "amend", "--answer", "Yes, one note per finding.")
+        h.tp("dispatch", "T02")
+        brief = (h.run_dir("T02") / "brief-author-0.md").read_text()
+        self.assertIn(str(h.wf / "conventions-2.md"), brief)
+        self.assertNotIn(str(h.wf / "conventions.md"), brief)
 
 
 class RecordTest(unittest.TestCase):
@@ -284,6 +346,44 @@ class ExceptionTest(unittest.TestCase):
         self.h.tp("resolve", "--action", "answer", "--answer", "Keep the original pin.")
         self.assertNotEqual(self.h.next()["actions"][0]["action"], "human")
 
+    def test_answers_reach_every_later_brief_for_their_task(self) -> None:
+        # Seen live: "One note per root cause" went to decisions.md only; the task's brief never
+        # carried it, so it reached the agent only through a hand-edited conventions file.
+        h = self.h
+        h.tp("exception", "--task", "T01", "--summary", "One note per finding, or per root cause?")
+        h.tp("resolve", "--task", "T01", "--action", "answer", "--by", "human", "--answer", "One note per root cause.")
+        h.tp("exception", "--summary", "Cite the pinned commit or main?")
+        h.tp("resolve", "--action", "answer", "--answer", "Cite the pinned commit.")
+        h.tp("dispatch", "T01", "T02")
+        t01 = (h.run_dir("T01") / "brief-author-0.md").read_text()
+        self.assertIn("One note per finding, or per root cause?", t01)
+        self.assertIn("One note per root cause.", t01)
+        self.assertIn("Cite the pinned commit.", t01)
+        t02 = (h.run_dir("T02") / "brief-author-0.md").read_text()
+        self.assertNotIn("One note per root cause.", t02)   # T01's own decision stays with T01
+        self.assertIn("Cite the pinned commit.", t02)
+        p = h.kb / "architecture" / "overview.md"
+        p.parent.mkdir(parents=True)
+        p.write_text("# Overview\n\nSee [missing](nope.md).\n")
+        h.result("T01", "author", changed=["architecture/overview.md"])
+        h.tp("record", "T01", "--agent-id", "a1")
+        h.tp("dispatch", "T01")                                 # a fix round to the same agent
+        self.assertIn("One note per root cause.", (h.run_dir("T01") / "brief-fix-1.md").read_text())
+
+    def test_an_answer_to_a_question_is_kept_for_later_briefs(self) -> None:
+        h = self.h
+        h.tp("dispatch", "T01")
+        h.result("T01", "author", status="needs_input", questions=["Is kb/ markdown only?"])
+        h.tp("record", "T01", "--agent-id", "a1")
+        h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "Yes, markdown only.")
+        p = h.kb / "architecture" / "overview.md"
+        p.parent.mkdir(parents=True)
+        p.write_text("# Overview\n\nSee [missing](nope.md).\n")
+        h.result("T01", "author", changed=["architecture/overview.md"])
+        h.tp("record", "T01")
+        h.tp("dispatch", "T01")
+        self.assertIn("Yes, markdown only.", (h.run_dir("T01") / "brief-fix-1.md").read_text())
+
 
 FINAL_REVIEW = dict(review="final", participants=[
     {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},
@@ -343,10 +443,12 @@ class BatchReviewTest(unittest.TestCase):
 
     def test_the_brief_covers_the_whole_batch_and_the_change_as_a_file(self) -> None:
         self.accept_all()
+        self.h.tp("exception", "--summary", "Merge notes that share a root cause?")
+        self.h.tp("resolve", "--action", "answer", "--answer", "Yes, one note per root cause.")
         self.h.tp("dispatch", S1)
         brief = (self.h.wf / "runs" / "B1" / "brief-doc-reviewer-1.md").read_text()
         for needle in ("architecture/overview.md", "build/guide.md", "T01", "T02", "Do not edit",
-                       "changes.json", "doc-reviewer-1.json", "Agent tool"):
+                       "changes.json", "doc-reviewer-1.json", "Agent tool", "one note per root cause"):
             self.assertIn(needle, brief)
         self.assertNotIn("index.md", brief.split("## Hand back")[0].split("Deliverables")[1])   # B2's file
         changes = json.loads((self.h.wf / "runs" / "B1" / "changes.json").read_text())
@@ -420,6 +522,144 @@ class BatchReviewTest(unittest.TestCase):
         self.assertEqual(h.next()["actions"][0]["action"], "human")
         h.tp("resolve", "--review", S1, "--action", "accept", "--answer", "Ship it; I'll fix F1 by hand.")
         self.assertEqual(h.state()["reviews"][S1]["status"], "done")
+
+    def fix_and_accept(self, tid: str, rel: str) -> None:
+        h = self.h
+        h.tp("dispatch", tid)
+        h.good_article(rel)
+        h.result(tid, "fix", changed=[rel])
+        h.tp("record", tid)
+        h.tp("accept", tid, "--note", "fixed")
+
+    def test_a_fix_round_running_beside_a_review_is_not_a_reviewer_edit(self) -> None:
+        # Seen live: B1's fix round wrote build/guide.md while B2's reviewer worked; recording B2
+        # blamed the reviewer for it. The task-side gates already allow concurrent tasks' paths.
+        h = self.h
+        self.accept_all()
+        h.tp("dispatch", S1, "B2/doc-reviewer")
+        self.review(S1, 1, "changes", [self.finding("F1", "build/guide.md:3")])
+        h.tp("record", S1)
+        h.tp("triage", S1, "--accept-all")
+        h.tp("dispatch", "T02")
+        (h.kb / "build" / "guide.md").write_text("# Build\n\nFixed by T02's fix round.\n")
+        self.review("B2/doc-reviewer", 1, "pass")
+        out = h.tp("record", "B2/doc-reviewer").out
+        self.assertNotIn("BLOCKED", out)
+        self.assertEqual(h.state()["reviews"]["B2/doc-reviewer"]["status"], "done")
+
+    def test_an_edit_no_concurrent_task_owns_still_blocks(self) -> None:
+        h = self.h
+        self.accept_all()
+        h.tp("dispatch", S1)
+        (h.kb / "stray.md").write_text("# Written during the review\n")
+        self.review(S1, 1, "pass")
+        self.assertIn("BLOCKED", h.tp("record", S1).out)
+        self.assertEqual(h.state()["reviews"][S1]["status"], "blocked")
+
+    def test_an_edit_block_holds_the_findings_until_cleared(self) -> None:
+        # Seen live: accepting a false edit block marked the session done and silently dropped its
+        # two valid blocking findings.
+        h = self.h
+        self.accept_all()
+        h.tp("dispatch", S1)
+        (h.kb / "stray.md").write_text("# Not the reviewer's\n")
+        self.review(S1, 1, "changes", [self.finding("F1", "build/guide.md:3")])
+        out = h.tp("record", S1).out
+        self.assertIn("1 blocking", out)
+        self.assertIn("--action clear", out)
+        res = h.tp("resolve", "--review", S1, "--action", "accept", "--answer", "Not the reviewer.", expect=2)
+        self.assertIn("F1", res.text)
+        self.assertEqual(h.state()["reviews"][S1]["status"], "blocked")
+        h.tp("resolve", "--review", S1, "--action", "clear", "--by", "manager",
+             "--answer", "stray.md was written by the human, not the reviewer.")
+        self.assertEqual(h.state()["reviews"][S1]["status"], "needs_triage")
+        h.tp("triage", S1, "--accept-all")
+        self.assertEqual(statuses(h)["T02"], "needs_fix")
+        self.assertIn("· manager: stray.md", (h.wf / "decisions.md").read_text())
+
+    def test_accept_with_force_ships_an_edit_block_without_its_findings(self) -> None:
+        h = self.h
+        self.accept_all()
+        h.tp("dispatch", S1)
+        (h.kb / "stray.md").write_text("# Stray\n")
+        self.review(S1, 1, "changes", [self.finding("F1", "build/guide.md:3")])
+        h.tp("record", S1)
+        h.tp("resolve", "--review", S1, "--action", "accept", "--force", "--by", "human",
+             "--answer", "Ship it.")
+        self.assertEqual(h.state()["reviews"][S1]["status"], "done")
+
+    def test_a_done_session_reopens_its_findings_and_verifies_them(self) -> None:
+        # Seen live: findings recovered with a task-side reopen never reached the session's counts
+        # or its verification round.
+        h = self.h
+        self.accept_all()
+        h.tp("dispatch", S1)
+        self.review(S1, 1, "changes", [self.finding("F1", "build/guide.md:3"),
+                                       self.finding("F2", "architecture/overview.md:1", blocking=False)])
+        h.tp("record", S1, "--agent-id", "rev-1")
+        h.tp("triage", S1, "--dismiss", "F1", "--reason", "Looked fine at first.")
+        self.assertEqual(h.state()["reviews"][S1]["status"], "done")
+        out = h.tp("resolve", "--review", S1, "--action", "reopen", "--findings", "F1,F2", "--by", "manager",
+                   "--answer", "F1 was dismissed by mistake; F2 matters too.").out
+        self.assertIn("T02", out)
+        self.assertEqual(statuses(h)["T02"], "needs_fix")
+        self.assertEqual(statuses(h)["T01"], "needs_fix")
+        s = h.state()["reviews"][S1]
+        self.assertEqual((s["status"], s["accepted"], s["dismissed"]), ("waiting_fixes", ["F1", "F2"], {}))
+        self.fix_and_accept("T01", "architecture/overview.md")
+        self.fix_and_accept("T02", "build/guide.md")
+        self.assertEqual(h.state()["tasks"]["T02"]["round"], 1)
+        act = [a for a in h.next()["actions"] if a.get("id") == S1][0]
+        self.assertEqual((act["action"], act["step"]), ("review", "verify"))
+        h.tp("dispatch", S1)
+        verify = (h.wf / "runs" / "B1" / "brief-doc-reviewer-2.md").read_text()
+        self.assertIn("F1", verify)
+        self.assertIn("F2", verify)
+
+    def test_reopen_applies_only_to_done_sessions(self) -> None:
+        h = self.h
+        self.accept_all()
+        h.tp("dispatch", S1)
+        self.review(S1, 1, "changes", [self.finding("F1", "build/guide.md:3")])
+        h.tp("record", S1)
+        res = h.tp("resolve", "--review", S1, "--action", "reopen", "--findings", "F1", "--answer", "x", expect=2)
+        self.assertIn("needs_triage", res.text)
+
+    def test_more_findings_for_a_task_join_its_waiting_fix_round(self) -> None:
+        # A second routing to a task whose fix round has not been dispatched must not replace the
+        # first one's findings; one routed while its fix round runs is refused until it hands back.
+        h = self.h
+        self.accept_all()
+        h.tp("dispatch", S1)
+        self.review(S1, 1, "changes", [self.finding("F1", "build/guide.md:3")])
+        h.tp("record", S1)
+        h.tp("triage", S1, "--accept-all")
+        h.tp("resolve", "--task", "T02", "--action", "reopen", "--answer", "Also link the overview.")
+        ts = h.state()["tasks"]["T02"]
+        self.assertEqual((ts["status"], ts["round"]), ("needs_fix", 1))
+        h.tp("dispatch", "T02")
+        brief = (h.run_dir("T02") / "brief-fix-1.md").read_text()
+        self.assertIn("F1", brief)
+        self.assertIn("Also link the overview.", brief)
+        res = h.tp("resolve", "--task", "T02", "--action", "reopen", "--answer", "And more.", expect=2)
+        self.assertIn("in flight", res.text)
+
+    def test_report_attributes_rulings_only_as_recorded(self) -> None:
+        h = self.h
+        self.accept_all()
+        h.tp("dispatch", S1)
+        (h.kb / "stray.md").write_text("# Stray\n")
+        self.review(S1, 1, "pass")
+        h.tp("record", S1)
+        h.tp("resolve", "--review", S1, "--action", "accept", "--by", "manager", "--answer", "Stray is mine.")
+        (h.kb / "stray.md").unlink()
+        h.tp("dispatch", "B2/doc-reviewer")
+        self.review("B2/doc-reviewer", 1, "pass")
+        h.tp("record", "B2/doc-reviewer")
+        h.tp("final")
+        report = (h.wf / "report.md").read_text()
+        self.assertIn("accepted as is by the manager: Stray is mine.", report)
+        self.assertNotIn("by the human", report)
 
     def test_final_runs_after_every_session_is_done_and_reports_them(self) -> None:
         h = self.h
@@ -502,6 +742,96 @@ class HaltTest(unittest.TestCase):
             h.close()
 
 
+ISO = re.compile(r'"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)"')
+
+
+def elapse(h: Harness, minutes: int) -> None:
+    """Pretend `minutes` pass: every timestamp the state holds moves that far into the past."""
+    path = h.wf / ".tp" / "state.json"
+
+    def back(m: "re.Match[str]") -> str:
+        ts = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%SZ") - timedelta(minutes=minutes)
+        return '"' + ts.strftime("%Y-%m-%dT%H:%M:%SZ") + '"'
+
+    path.write_text(ISO.sub(back, path.read_text()))
+
+
+class ClockTest(unittest.TestCase):
+    """Seen live: 995 min of "execution" against a 240-min budget, for about 145 min of work — the
+    clocks counted halts and hours spent waiting on the human as work."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.approved()
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def row(self, report: str, tid: str) -> list:
+        return [c.strip() for c in next(ln for ln in report.splitlines() if ln.startswith(f"| {tid} ")).split("|")]
+
+    def finish_others(self) -> None:
+        h = self.h
+        h.author("T02", "build/guide.md")
+        h.tp("accept", "T02", "--note", "ok")
+        h.tp("dispatch", "T03")
+        (h.kb / "index.md").write_text("# KB\n\n- [O](architecture/overview.md)\n- [B](build/guide.md)\n")
+        h.result("T03", "author", changed=["index.md"])
+        h.tp("record", "T03")
+        h.tp("accept", "T03", "--note", "ok")
+
+    def test_waiting_on_the_human_is_not_counted_as_work(self) -> None:
+        h = self.h
+        h.tp("dispatch", "T01")
+        elapse(h, 10)
+        h.result("T01", "author", status="needs_input", questions=["Which style?"])
+        h.tp("record", "T01", "--agent-id", "a1")
+        elapse(h, 120)                                   # two hours until the human answers
+        h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "House style.")
+        elapse(h, 5)
+        h.good_article("architecture/overview.md")
+        h.result("T01", "author", changed=["architecture/overview.md"])
+        h.tp("record", "T01")
+        self.assertIn("(15 min", h.tp("accept", "T01", "--note", "ok").out)
+        self.finish_others()
+        h.tp("final")
+        report = (h.wf / "report.md").read_text()
+        cols = self.row(report, "T01")
+        self.assertEqual((cols[4], cols[5]), ("15", "15"))  # active, agent
+        self.assertIn("execution took 135 min wall-clock: 15 min of work and 120 min halted or waiting "
+                      "on the human", report)
+        self.assertIn("Agents worked 15 min", report)
+
+    def test_a_halt_is_not_counted_as_work(self) -> None:
+        h = self.h
+        h.tp("halt", "--reason", "Overnight.")
+        elapse(h, 600)
+        h.tp("resume", "--answer", "Morning.")
+        self.assertIn("600 min halted or waiting", h.tp("report").out)
+
+    def test_an_accepted_task_waiting_for_review_findings_is_not_working(self) -> None:
+        h = Harness()
+        try:
+            h.approved(plan=h.plan([h.task("T01", "a.md")], final_checks=[]), **FINAL_REVIEW)
+            h.author("T01", "a.md")
+            h.tp("accept", "T01", "--note", "ok")
+            h.tp("dispatch", "B1/doc-reviewer")
+            elapse(h, 30)                                # the review runs; T01 is done meanwhile
+            (h.wf / "runs" / "B1").mkdir(parents=True, exist_ok=True)
+            (h.wf / "runs" / "B1" / "doc-reviewer-1.json").write_text(json.dumps({"batch": "B1", "verdict": "changes",
+                "findings": [{"id": "F1", "state": "wrong", "blocking": True, "where": "a.md:3", "issue": "Wrong."}]}))
+            h.tp("record", "B1/doc-reviewer")
+            h.tp("triage", "B1/doc-reviewer", "--accept-all")
+            h.tp("dispatch", "T01")
+            elapse(h, 4)
+            h.good_article("a.md")
+            h.result("T01", "fix", changed=["a.md"])
+            h.tp("record", "T01")
+            self.assertIn("(4 min", h.tp("accept", "T01", "--note", "ok").out)
+        finally:
+            h.close()
+
+
 class CompatTest(unittest.TestCase):
     def test_state_written_by_the_previous_version_still_runs(self) -> None:
         # A workflow approved before research budgets and review batches existed must keep
@@ -519,6 +849,22 @@ class CompatTest(unittest.TestCase):
             h.author("T01", "architecture/overview.md")
             h.tp("accept", "T01", "--note", "ok")
             self.assertEqual(statuses(h)["T01"], "accepted")
+        finally:
+            h.close()
+
+    def test_a_session_blocked_by_the_previous_version_resolves_as_before(self) -> None:
+        # Its block has no kind: it reads as blocked after verification, so accept ships it as is.
+        h = Harness()
+        try:
+            h.approved(plan=h.plan([h.task("T01", "a.md")], final_checks=[]), **FINAL_REVIEW)
+            path = h.wf / ".tp" / "state.json"
+            state = json.loads(path.read_text())
+            state["reviews"]["B1/doc-reviewer"].update(status="blocked", summary="the reviewer edited a.md", findings=[
+                {"id": "F1", "state": "wrong", "blocking": True, "where": "a.md:1", "issue": "x", "task": "T01"}])
+            path.write_text(json.dumps(state))
+            h.tp("resolve", "--review", "B1/doc-reviewer", "--action", "clear", "--answer", "x", expect=2)
+            h.tp("resolve", "--review", "B1/doc-reviewer", "--action", "accept", "--answer", "Ship it.")
+            self.assertEqual(h.state()["reviews"]["B1/doc-reviewer"]["status"], "done")
         finally:
             h.close()
 

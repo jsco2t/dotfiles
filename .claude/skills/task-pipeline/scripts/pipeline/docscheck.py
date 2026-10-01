@@ -137,13 +137,15 @@ def citations(doc: Path, lines: List[str]) -> List[Citation]:
     return out
 
 
-def _identifiers(sentence: str) -> Set[str]:
+def _identifiers(sentence: str, skip: Iterable[str] = ()) -> Set[str]:
     """Single code tokens the sentence names (lower-cased): what a supporting line should mention.
-    Multi-word spans (commands, prose) and paths are skipped — too loose to match reliably."""
+    Multi-word spans (commands, prose), paths, and the spans in `skip` are skipped — too loose to
+    match reliably."""
     names: Set[str] = set()
+    skip = set(skip)
     for span in SPAN_RE.findall(sentence):
         span = span.strip().strip("'\"")
-        if " " in span or parse_cite(span) or CONTINUATION_RE.match(span):
+        if " " in span or span in skip or parse_cite(span) or CONTINUATION_RE.match(span):
             continue
         if "/" in span:  # a qualified name such as internal/version.StratumVersion; a bare path names nothing
             span = span.rstrip("/").rsplit("/", 1)[-1]
@@ -190,8 +192,9 @@ DEF_RE = re.compile(r"^\s*(func|def|fn|pub fn|function|class|type|struct|impl|in
 
 def supported(c: Citation, src_lines: List[str]) -> Tuple[bool, Set[str]]:
     """Whether a name the sentence mentions appears near the cited lines, or on the definition
-    that encloses them (a citation into a function's body supports a sentence about the function)."""
-    names = _identifiers(c.sentence)
+    that encloses them (a citation into a function's body supports a sentence about the function).
+    Naming the cited file itself (`go.mod` beside `go.mod:30`) is not a claim about its lines."""
+    names = _identifiers(c.sentence, skip={c.path, c.path.rsplit("/", 1)[-1]})
     if not names:
         return True, names
     lo = max(0, c.start - 1 - WINDOW)

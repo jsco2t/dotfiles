@@ -2,6 +2,7 @@
 and a plan that freezes once the human approves it."""
 from __future__ import annotations
 
+import json
 import unittest
 
 from harness import Harness
@@ -97,6 +98,35 @@ class PlanCheckTest(unittest.TestCase):
     def test_unknown_research_source_is_refused(self) -> None:
         plan = self.h.plan([self.h.task("T01", "a.md", sources=["research:R9"])])
         self.assertIn("R9", self.check(plan, expect=2).text)
+
+    def test_workflow_files_can_be_sources_and_shared_conventions(self) -> None:
+        # Seen live: conventions.md could only be named by absolute path inside each 150-word brief.
+        (self.h.wf / "conventions.md").write_text("# Conventions\n")
+        plan = self.h.plan([self.h.task("T01", "a.md", sources=["src:calc/**", "wf:conventions.md"])],
+                           conventions=["wf:conventions.md"], final_checks=[])
+        self.check(plan)
+        self.assertIn("conventions.md", (self.h.wf / "plan.md").read_text())
+        bad = self.h.plan([self.h.task("T01", "a.md", sources=["wf:nope.md"])], conventions=["wf:../x.md", "x.md"])
+        res = self.check(bad, expect=2)
+        for needle in ("wf:nope.md", "wf:../x.md", "'x.md'"):
+            self.assertIn(needle, res.text)
+
+    def test_a_report_like_deliverable_name_is_warned_about_not_refused(self) -> None:
+        # Seen live: Claude Code refused a sub-agent's Write of a new report.md ("Subagents should
+        # return findings as text, not write report files"); the run waited three hours on it.
+        out = self.check(self.h.plan([self.h.task("T01", "review/report.md")], final_checks=[])).out
+        self.assertIn("WARN: T01 writes report.md", out)
+        self.assertIn("plan ok", out)
+        self.assertNotIn("WARN", self.check(self.h.plan()).out)
+
+    def test_wf_is_not_a_workspace_name(self) -> None:
+        h = Harness()
+        try:
+            h.init()
+            h.write_json("scope.json", h.scope(workspaces=[{"name": "wf", "path": str(h.kb), "mode": "write"}]))
+            self.assertIn("'wf'", h.tp("scope", "check", expect=2).text)
+        finally:
+            h.close()
 
     def test_unknown_check_name_is_refused(self) -> None:
         plan = self.h.plan([self.h.task("T01", "a.md", checks=["lint"])])
@@ -215,6 +245,83 @@ class ApprovalTest(unittest.TestCase):
         self.h.tp("note", "The README's build section is stale.")
         out = self.h.tp("plan", "submit").out
         self.assertIn("README's build section is stale", out)
+
+
+class AmendTest(unittest.TestCase):
+    """`tp plan amend`: mid-run plan changes the human approves, limited to work not yet started."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def draft(self):
+        self.h.tp("plan", "amend")                        # starts the draft as a copy of the approved plan
+        return json.loads((self.h.wf / "plan-amend.json").read_text())
+
+    def test_amend_adds_tasks_and_changes_unstarted_ones_mid_run(self) -> None:
+        # Seen live: a task sized for 12 notes met 39 findings, and nothing could add or split a
+        # task once execution started.
+        h = self.h
+        h.approved()
+        h.author("T01", "architecture/overview.md")          # T01 has started: frozen
+        draft = self.draft()
+        draft["tasks"].insert(2, h.task("T04", "faq.md", brief="Write the FAQ."))
+        draft["tasks"][3]["brief"] = "Write kb/index.md linking every article, the FAQ included."
+        draft["tasks"][3]["depends_on"] = ["T01", "T02", "T04"]
+        (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        out = h.tp("plan", "amend").out
+        for needle in ("added T04", "changed T03", "--answer", "remaining work"):
+            self.assertIn(needle, out)
+        self.assertNotIn("T04", (h.wf / "plan.json").read_text())   # nothing applies without the human
+        h.tp("next")                                                # ...and the run carries on meanwhile
+        h.tp("plan", "amend", "--answer", "Yes, add the FAQ.")
+        self.assertEqual(h.state()["tasks"]["T04"]["status"], "pending")
+        self.assertIn("T04", (h.wf / "plan.md").read_text())
+        self.assertFalse((h.wf / "plan-amend.json").exists())
+        self.assertIn("Yes, add the FAQ.", (h.wf / "decisions.md").read_text())
+        ready = [a["id"] for a in json.loads(h.tp("next", "--json").out)["actions"] if a["action"] == "dispatch"]
+        self.assertEqual(ready, ["T02", "T04"])
+
+    def test_amend_never_changes_a_task_that_has_started(self) -> None:
+        h = self.h
+        h.approved()
+        h.tp("dispatch", "T01")
+        draft = self.draft()
+        draft["tasks"][0]["brief"] = "Something else."
+        del draft["tasks"][1]                                       # T02 has not started: may go
+        draft["tasks"][1]["depends_on"] = ["T01"]
+        (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        res = h.tp("plan", "amend", "--answer", "ok", expect=2)
+        self.assertIn("T01 has started", res.text)
+        self.assertNotIn("T02", res.text)
+
+    def test_amend_warns_when_the_remaining_work_overruns_the_budget(self) -> None:
+        h = self.h
+        h.approved()
+        draft = self.draft()
+        draft["tasks"] += [h.task(f"T{i}", f"x{i}.md", estimate_min=30) for i in range(10, 30)]
+        (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        self.assertIn("WARN: the remaining work runs past the budget", h.tp("plan", "amend").out)
+
+    def test_amend_puts_new_work_in_a_review_batch_that_has_not_started(self) -> None:
+        h = self.h
+        h.approved(plan=h.plan([h.task("T01", "a.md"), h.task("T02", "b.md")], final_checks=[]), **FINAL_REVIEW)
+        for tid, rel in (("T01", "a.md"), ("T02", "b.md")):
+            h.author(tid, rel)
+            h.tp("accept", tid, "--note", "ok")
+        h.tp("dispatch", "B1/doc-reviewer")
+        draft = self.draft()
+        draft["tasks"].append(h.task("T03", "c.md"))
+        (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        self.assertIn("B1", h.tp("plan", "amend", expect=2).text)
+        draft["review_batches"] = [{"id": "B1", "tasks": ["T01", "T02"]}, {"id": "B2", "tasks": ["T03"]}]
+        (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        h.tp("plan", "amend", "--answer", "Add T03 with its own review.")
+        self.assertEqual(h.state()["reviews"]["B2/doc-reviewer"]["status"], "pending")
+        self.assertEqual(h.state()["reviews"]["B1/doc-reviewer"]["status"], "in_flight")
+
 
 
 if __name__ == "__main__":

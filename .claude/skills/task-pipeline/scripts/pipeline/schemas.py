@@ -23,9 +23,10 @@ SCHEMAS = {
     },
     "plan": {
         "title": "...", "summary": "<= 80 words", "questions": ["<non-blocking, shown at approval>"],
+        "conventions": ["wf:conventions.md  (optional: every brief starts from it; frozen with the plan)"],
         "tasks": [{"id": "T01", "title": "Architecture overview", "serves": ["D1"], "agent": "kb-author",
                    "workspace": "kb", "paths": ["architecture/overview.md"],
-                   "sources": ["src:internal/cluster/**", "research:R1"],
+                   "sources": ["src:internal/cluster/**", "research:R1", "wf:notes/terms.md"],
                    "brief": "<= 150 words", "acceptance": ["<1-6 objective criteria>"], "checks": ["docs"],
                    "estimate_min": 15, "depends_on": [],
                    "test_cmd": "<code tasks: go test ./pkg/x -run TestY>", "tests_paths": ["<code tasks>"],

@@ -76,6 +76,8 @@ word-split a variable). **`tp next` always says what to do next** — run it aft
   15 minutes (30 at most), 1–6 objective acceptance criteria, a brief of 150 words or less.
   Tasks cite findings as sources: `research:R3`.
 - Parallel tasks write disjoint paths; shared files (`index.md`) go to one integration task.
+- Rules every task follows go in one file in the workflow folder, listed in plan `conventions`
+  (`wf:conventions.md`): every brief starts from it, and it freezes with the plan. Sources may be `wf:<path>`.
 - Code is test-forward: `test_cmd` (the task's package, not the whole suite) and `tests_paths`.
 - `docs` is a built-in task check; `docs-all` a built-in final check. Define repo commands in `checks`.
 - With `review: final`, split packages over 10 tasks into `review_batches`. The budget includes
@@ -99,9 +101,14 @@ Load the deferred tools first: ToolSearch `select:SendMessage,TaskStop`. Then lo
   for code, read the diff), then `tp accept <id> --note "..."` or `tp reject <id> --reason "..."`.
 - **triage** (after the end-of-pipeline review) → `tp show <id> --part blocking`, verify each
   against the source, then `tp triage <id> --accept-all`, or `--dismiss F# --reason "..."` and
-  `--assign F#=T##`. Accepted findings go to the owning authors; one verification follows.
-- **human** → stop, ask, then `tp resolve [--task <id> | --review <id>] --action … --answer "..."`.
-  A needs_input question that scope, plan, or decisions already settle, answer yourself.
+  `--assign F#=T##`. Accepted findings go to the owning authors; one verification follows. A done
+  session's dropped or wrongly dismissed findings: `tp resolve --review <id> --action reopen --findings F1,F2`.
+- **human** → stop, ask, then `tp resolve [--task <id> | --review <id>] --action … --answer "..." --by human`.
+  A needs_input question that scope, plan, or decisions already settle, answer yourself (`--by manager`).
+  Answers reach every later brief for that task (workflow-level answers: every brief).
+- **The work outgrows the plan** → `tp plan amend` starts `plan-amend.json`: add tasks, change only
+  undispatched ones; `tp plan amend` checks it; ask the human; `tp plan amend --answer "..."`.
+  New conventions go in a new file the draft points at — never edit the frozen one.
 - **wait** → end your turn; each hand-back re-invokes you.
 - **An agent far past its estimate** → TaskStop it, then `tp exception --task <id> --summary "..."`.
 

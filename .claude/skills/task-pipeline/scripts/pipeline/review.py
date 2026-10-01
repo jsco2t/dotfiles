@@ -133,6 +133,8 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
     rdir.mkdir(parents=True, exist_ok=True)
     ctx = _changes(wf, state, scope, tasks, s["batch"])
     ctx["sources"] = [w["path"] for w in scopemod.workspaces(scope).values() if w["mode"] == "read"] or ["the deliverables' own sources"]
+    ctx["decisions"] = run.decision_lines(state, [t["id"] for t in tasks])  # so the reviewer does not flag them
+    ctx["conventions"] = [str(p) for p in planmod.conventions(plan, scope, wf.root)]
     brief, result = rdir / f"brief-{s['reviewer']}-{n}.md", rdir / f"{s['reviewer']}-{n}.json"
     if result.exists():
         result.unlink()
@@ -206,6 +208,26 @@ def _owner(f: Dict[str, Any], tasks: List[Dict[str, Any]], scope: Dict[str, Any]
     return label if label in {t["id"] for t in tasks} else None
 
 
+def _outcome(s: Dict[str, Any], sid: str, n: int, blocking: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Where a recorded review goes on its findings alone."""
+    if not blocking:
+        return {"status": "done"}
+    if n == 1 or n < limit("max_review_rounds") + s.get("extra_rounds", 0):
+        return {"status": "needs_triage"}
+    return {"status": "blocked", "block": "rounds",
+            "summary": f"{sid} still has {len(blocking)} blocking findings after verification"}
+
+
+def _settle(s: Dict[str, Any], outcome: Dict[str, Any]) -> None:
+    for key in ("block", "held", "summary"):
+        s.pop(key, None)
+    s.update(outcome)
+
+
+HELD_NEXT = {"done": "the session is done", "needs_triage": "its findings go on to triage",
+             "blocked": "its findings go to the human, as after any verification"}
+
+
 def record(wf: Workflow, state: Dict[str, Any], sid: str, agent_id: Optional[str]) -> str:
     s = sessions(state).get(sid)
     fl = state["in_flight"].get(sid)
@@ -223,10 +245,16 @@ def record(wf: Workflow, state: Dict[str, Any], sid: str, agent_id: Optional[str
     for item in data.get("noticed", []):
         wf.noticed(f"{sid} review", str(item))
     tasks = _batch_tasks(plan, scope, s["batch"])
+    # Fix rounds dispatched while the reviewer worked write their own paths, as run.py allows for tasks.
+    plan_tasks = {t["id"]: t for t in plan["tasks"]}
+    allowed: Dict[str, List[str]] = {}
+    for other in fl.get("concurrent", []):
+        if other in plan_tasks:
+            allowed.setdefault(plan_tasks[other]["workspace"], []).extend(plan_tasks[other]["paths"])
     edits = []
     for name, snap in fl.get("snaps", {}).items():
         changed = snapshot.diff(snapshot.load(Path(snap)), snapshot.take(run._ws(scope, name), [wf.root]))
-        edits += [f"{name}:{c}" for c in changed]
+        edits += [f"{name}:{c}" for c in changed if not snapshot.matches(c, allowed.get(name, []))]
     minutes = minutes_since(fl["since"])
     del state["in_flight"][sid]
     for f in data["findings"]:
@@ -235,19 +263,27 @@ def record(wf: Workflow, state: Dict[str, Any], sid: str, agent_id: Optional[str
     blocking = [f for f in data["findings"] if f["blocking"]]
     lines = [f"  {f['id']} → {f['task'] or '? (no task owns this path: --assign or --dismiss)'} ({f['state']}) "
              f"at {f['where']}: {f['issue']}" for f in blocking]
-    if edits:
-        s.update(status="blocked", summary=f"the reviewer of {sid} edited {', '.join(edits[:6])} — inspect and revert")
-        out = f"BLOCKED {sid}: the reviewer edited files ({', '.join(edits[:6])}). Reviews never edit; ask the human."
-    elif not blocking:
-        s["status"] = "done"
-        out = f"{sid} {'passed' if n == 1 else 'verified'} ({len(data['findings'])} non-blocking notes in {path.name})."
-    elif n == 1 or n < limit("max_review_rounds") + s.get("extra_rounds", 0):
-        s["status"] = "needs_triage"
-        out = "\n".join([f"{sid} review {n}: {len(blocking)} blocking — triage each (tp triage {sid} ...):"] + lines)
+    outcome = _outcome(s, sid, n, blocking)
+    if edits:  # the findings are held, not lost, until someone decides about the edits
+        _settle(s, {"status": "blocked", "block": "edits", "held": outcome,
+                    "summary": f"files changed while {sid} ran and no concurrent task owns them "
+                               f"({', '.join(edits[:6])}); {len(blocking)} blocking findings held"})
+        out = "\n".join(
+            [f"BLOCKED {sid}: files changed while the reviewer worked and no concurrent task owns them "
+             f"({', '.join(edits[:6])}). Reviews never edit — inspect those files. {len(blocking)} blocking "
+             "findings are held:"] + lines +
+            [f"Not the reviewer's edits: `tp resolve --review {sid} --action clear --by <who> --answer \"...\"` "
+             f"({HELD_NEXT[outcome['status']]}). `--action accept` ships the batch as is; it is refused while "
+             "blocking findings are held, unless --force."])
     else:
-        s.update(status="blocked", summary=f"{sid} still has {len(blocking)} blocking findings after verification")
-        out = "\n".join([f"BLOCKED {sid}: still blocking after verification — the human decides "
-                         f"(`tp resolve --review {sid} --action accept|retry`):"] + lines)
+        _settle(s, outcome)
+        if outcome["status"] == "done":
+            out = f"{sid} {'passed' if n == 1 else 'verified'} ({len(data['findings'])} non-blocking notes in {path.name})."
+        elif outcome["status"] == "needs_triage":
+            out = "\n".join([f"{sid} review {n}: {len(blocking)} blocking — triage each (tp triage {sid} ...):"] + lines)
+        else:
+            out = "\n".join([f"BLOCKED {sid}: still blocking after verification — the human decides "
+                             f"(`tp resolve --review {sid} --action accept|retry`):"] + lines)
     wf.save(state)
     wf.event("record", id=sid, step="review" if n == 1 else "verify", status=s["status"], minutes=round(minutes, 1),
              blocking=len(blocking))
@@ -282,23 +318,14 @@ def cmd_triage(wf: Workflow, sid: str, accept_all: bool, dismiss: List[str], rea
             raise TPError(*errs)
         for fid in dismiss:
             s["dismissed"][fid] = reason
-        if dismiss:
-            wf.decision(f"triage {sid} dismiss {', '.join(dismiss)}", str(reason), who="manager")
-        by_task: Dict[str, List[str]] = {}
-        result_name = f"{s['reviewer']}-{s['round']}.json"
-        for f in kept:
-            by_task.setdefault(f["task"], []).append(
-                f"{result_name} {f['id']} ({f['state']}) at {f['where']}: {f['issue']}"
-                + (f" Fix: {f['fix']}" if f.get("fix") else ""))
-        out = []
-        for tid, lines in sorted(by_task.items()):
-            ts = state["tasks"][tid]
-            ts["extra_rounds"] = ts.get("extra_rounds", 0) + 1   # a review fix is not one of the task's own rounds
-            out.append(run._fail(wf, ts, tid, lines, fixing=run._authoring_step(plan_task(plan, tid), scope)))
+        by_task = _route(wf, state, plan, scope, s, kept)
         s["accepted"] = sorted(set(s["accepted"]) | {f["id"] for f in kept})
         s["fix_tasks"] = sorted(by_task)
         s["status"] = "waiting_fixes" if kept else "done"
         wf.save(state)
+        if dismiss:
+            wf.decision(f"triage {sid} dismiss {', '.join(dismiss)}", str(reason), who="manager")
+        out = list(by_task.values())
         wf.event("triage", id=sid, accepted=len(kept), dismissed=len(dismiss))
         head = (f"{sid}: {len(kept)} accepted → {', '.join(sorted(by_task))}; {len(dismiss)} dismissed."
                 if kept else f"{sid}: every blocking finding dismissed — session done.")
@@ -309,21 +336,95 @@ def plan_task(plan: Dict[str, Any], tid: str) -> Dict[str, Any]:
     return next(t for t in plan["tasks"] if t["id"] == tid)
 
 
-def resolve(wf: Workflow, state: Dict[str, Any], sid: str, action: str, answer: str) -> str:
+def _route(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any], s: Dict[str, Any],
+           findings: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Send each finding (its `task` already decided) to the owning author: {task id: what happened}."""
+    result_name = f"{s['reviewer']}-{s['round']}.json"
+    by_task: Dict[str, List[str]] = {}
+    for f in findings:
+        by_task.setdefault(f["task"], []).append(
+            f"{result_name} {f['id']} ({f['state']}) at {f['where']}: {f['issue']}"
+            + (f" Fix: {f['fix']}" if f.get("fix") else ""))
+    return {tid: run.add_fix(wf, state, tid, lines, fixing=run._authoring_step(plan_task(plan, tid), scope))
+            for tid, lines in sorted(by_task.items())}
+
+
+def _reopen(wf: Workflow, state: Dict[str, Any], sid: str, s: Dict[str, Any], fids: List[str], assign: List[str],
+            answer: str, by: Optional[str]) -> str:
+    """Send a done session's findings (dismissed, dropped, or non-blocking) back to their authors,
+    counted as this session's accepted findings, with its verification round to follow."""
+    if s["status"] != "done":
+        raise TPError(f"{sid} is {s['status']}; reopen applies to a done session (a blocked one takes clear, "
+                      "accept, or retry).")
+    if not fids:
+        raise TPError("reopen needs --findings F1,F2: the findings to send back to their authors.")
+    plan, scope, _ = run._loaded(wf, state)
+    tasks = _batch_tasks(plan, scope, s["batch"])
+    batch_ids = {t["id"] for t in tasks}
+    found = {f["id"]: f for f in s["findings"]}
+    errs = [f"{fid} is not a finding of {sid} ({', '.join(found) or 'it has none'})." for fid in fids if fid not in found]
+    owners: Dict[str, Optional[str]] = {}
+    for spec in assign:
+        fid, _, tid = spec.partition("=")
+        if fid not in fids or tid not in batch_ids:
+            errs.append(f"--assign {spec}: need one of the reopened findings and a task in {s['batch']}.")
+        owners[fid] = tid
+    for fid in fids:
+        if fid in found and fid not in owners:
+            label = found[fid].get("task")
+            owners[fid] = label if label in batch_ids else _owner(found[fid], tasks, scope)
+            if not owners[fid]:
+                errs.append(f"{fid} matches no task path in {s['batch']} — add `--assign {fid}=T##`.")
+    if errs:
+        raise TPError(*errs)
+    for fid in fids:
+        found[fid]["task"] = owners[fid]
+        s["dismissed"].pop(fid, None)
+    by_task = _route(wf, state, plan, scope, s, [found[fid] for fid in fids])
+    s["accepted"] = sorted(set(s["accepted"]) | set(fids))
+    s["fix_tasks"] = sorted(by_task)
+    s["status"] = "waiting_fixes"
+    s.setdefault("reopened", []).append({"findings": fids, "by": by, "answer": answer})
+    return "\n".join([f"{sid}: reopened {', '.join(fids)} → {', '.join(sorted(by_task))}; it verifies them once "
+                      "those tasks are accepted again."] + list(by_task.values()))
+
+
+def resolve(wf: Workflow, state: Dict[str, Any], sid: str, action: str, answer: str, by: Optional[str] = None,
+            force: bool = False, fids: Optional[List[str]] = None, assign: Optional[List[str]] = None) -> str:
     s = sessions(state).get(sid)
-    if s is None or s["status"] != "blocked":
-        raise TPError(f"{sid} is not blocked.")
-    if action == "accept":
-        s.update(status="done", accepted_as_is=answer)
-    elif action == "retry":
-        s["extra_rounds"] = s.get("extra_rounds", 0) + 1
-        s["status"] = "needs_triage"
+    if s is None:
+        raise TPError(f"{sid} is not a review session.")
+    if action == "reopen":
+        out = _reopen(wf, state, sid, s, fids or [], assign or [], answer, by)
     else:
-        raise TPError("a blocked review session takes --action accept (ship as is) or retry (one more fix and "
-                      "verification round).")
+        if s["status"] != "blocked":
+            raise TPError(f"{sid} is not blocked (status {s['status']})"
+                          + ("; `--action reopen --findings F#` sends its findings back to their authors."
+                             if s["status"] == "done" else "."))
+        kind = s.get("block", "rounds")  # sessions blocked before blocks had kinds: as after verification
+        held = [f["id"] for f in s["findings"] if f["blocking"]]
+        if action == "clear" and kind == "edits":
+            _settle(s, s.get("held") or {"status": "needs_triage" if held else "done"})
+        elif action == "accept":
+            if kind == "edits" and held and not force:
+                raise TPError(f"{sid} holds {len(held)} blocking findings nobody has triaged ({', '.join(held)}); "
+                              "accepting would drop them.",
+                              f"Edits not the reviewer's: `tp resolve --review {sid} --action clear`. To ship without "
+                              "these findings, add --force.")
+            _settle(s, {"status": "done", "accepted_as_is": answer, "accepted_by": by})
+        elif action == "retry" and kind == "rounds":
+            s["extra_rounds"] = s.get("extra_rounds", 0) + 1
+            _settle(s, {"status": "needs_triage"})
+        else:
+            raise TPError(f"{sid} is blocked by " + (
+                "edits; it takes --action clear (they were not the reviewer's: its findings go on) or accept "
+                "(ship as is)." if kind == "edits" else
+                "findings still open after verification; it takes --action accept (ship as is) or retry (one "
+                "more fix and verification round)."))
+        out = f"{sid} → {s['status']}. `tp next`."
     wf.save(state)
-    wf.decision(f"resolve {sid} {action}", answer)
-    return f"{sid} → {s['status']}. `tp next`."
+    wf.decision(f"resolve {sid} {action}", answer, who=by)
+    return out
 
 
 def show(state: Dict[str, Any], sid: str, part: Optional[str]) -> str:
@@ -346,8 +447,16 @@ def report_lines(state: Dict[str, Any]) -> List[str]:
         return []
     out = [f"{len(ss)} review session{'s' if len(ss) != 1 else ''}, after every task was accepted:", ""]
     for sid, s in ss.items():
+        reopened = "".join(f"; reopened {', '.join(r['findings'])}{_by(r.get('by'))}: {r['answer']}"
+                           for r in s.get("reopened", []))
         out.append(f"- {sid}: {s['status']} after {s['round']} round{'s' if s['round'] != 1 else ''}; "
                    f"{len(s['accepted'])} findings fixed ({', '.join(s['fix_tasks']) or 'none'}), "
-                   f"{len(s['dismissed'])} dismissed by the manager"
-                   + (f"; accepted as is by the human: {s['accepted_as_is']}" if s.get("accepted_as_is") else ""))
+                   f"{len(s['dismissed'])} dismissed by the manager" + reopened
+                   + (f"; accepted as is{_by(s.get('accepted_by'))}: {s['accepted_as_is']}"
+                      if s.get("accepted_as_is") else ""))
     return out
+
+
+def _by(who: Optional[str]) -> str:
+    """Attribution only where `tp resolve --by` recorded one."""
+    return f" by the {who}" if who else ""

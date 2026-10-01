@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import math
 import re
-from pathlib import PurePosixPath
+import shutil
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import scope as scopemod
-from .common import TPError, Workflow, catalog, limit, load_json, minutes_since, now_iso, sha_file, words
+from .common import TPError, Workflow, limit, load_json, minutes_since, now_iso, sha_file, words
 
 BUILTIN_TASK_CHECKS = {"docs": "every relative link resolves, and every code citation is written repo-relative "
                                "(`path/to/file.go:12`, `:12-20`) and points at a real line (a citation whose lines "
@@ -97,9 +98,8 @@ def reviewer_for(task: Dict[str, Any], scope: Dict[str, Any]) -> Optional[str]:
     if task.get("reviewer"):
         return task["reviewer"]
     kind = task_kind(task, scope)
-    agents = catalog()["agents"]
     for agent in scopemod.participants(scope, "reviewer"):
-        if kind in agents[agent]["kinds"]:
+        if kind in scopemod.agent_kinds(agent, "reviewer"):
             return agent
     return None
 
@@ -146,6 +146,28 @@ def _ancestors(tasks: Dict[str, Dict[str, Any]]) -> Dict[str, Set[str]]:
     return memo
 
 
+def resolve_ref(ref: str, scope: Dict[str, Any], wf_root: Path) -> Optional[Path]:
+    """`wf:<path>` (inside the workflow folder) or `<workspace>:<path>` as a path; None if it is neither."""
+    prefix, _, rel = str(ref).partition(":")
+    pp = PurePosixPath(rel)
+    if not rel or pp.is_absolute() or ".." in pp.parts:
+        return None
+    if prefix == "wf":
+        return wf_root / rel
+    wss = scopemod.workspaces(scope)
+    return Path(wss[prefix]["path"]) / rel if prefix in wss else None
+
+
+def conventions(plan: Dict[str, Any], scope: Dict[str, Any], wf_root: Path) -> List[Path]:
+    """The files every brief starts from (plan `conventions`)."""
+    return [p for p in (resolve_ref(c, scope, wf_root) for c in plan.get("conventions", [])) if p is not None]
+
+
+def conventions_shas(plan: Dict[str, Any], scope: Dict[str, Any], wf_root: Path) -> Dict[str, Optional[str]]:
+    """Frozen with the plan at approval: a conventions file is part of every brief's contract."""
+    return {str(p): sha_file(p) for p in conventions(plan, scope, wf_root)}
+
+
 def lane_minutes(task: Dict[str, Any], scope: Dict[str, Any]) -> int:
     return int(task.get("estimate_min", 0)) + (REVIEW_MINUTES if reviewer_for(task, scope) else 0)
 
@@ -163,8 +185,8 @@ def critical_path(tasks: Dict[str, Dict[str, Any]], scope: Dict[str, Any]) -> Tu
     return max((longest(t) for t in tasks), default=(0, []))
 
 
-def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any]) -> List[str]:
-    cat = catalog()
+def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any], wf_root: Path,
+             budget_check: bool = True) -> List[str]:
     errs: List[str] = []
     wss = scopemod.workspaces(scope)
     deliverables = {d["id"] for d in scope["deliverables"]}
@@ -190,6 +212,11 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any])
         if name not in BUILTIN_FINAL_CHECKS and name not in plan.get("checks", {}):
             errs.append(f"final check {name!r} is neither built in ({', '.join(BUILTIN_FINAL_CHECKS)}) "
                         "nor defined in `checks`.")
+    for ref in plan.get("conventions", []):
+        path = resolve_ref(ref, scope, wf_root)
+        if path is None or not path.is_file():
+            errs.append(f"conventions {ref!r} must name an existing file as `wf:<path in the workflow folder>` "
+                        "or `<workspace>:<path>`.")
 
     tasks: Dict[str, Dict[str, Any]] = {}
     served: Set[str] = set()
@@ -213,7 +240,7 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any])
         if t.get("serves") and not unknown and kind is None:
             errs.append(f"{tid}: every deliverable a task serves must be of one kind.")
         agent = t.get("agent")
-        if agent and kind and (agent not in authors or kind not in cat["agents"].get(agent, {}).get("kinds", [])):
+        if agent and kind and (agent not in authors or kind not in scopemod.agent_kinds(agent, "author")):
             errs.append(f"{tid}: agent {agent} is not a confirmed author for {kind} in scope.json.")
         ws = wss.get(t.get("workspace", ""))
         if ws is None:
@@ -229,8 +256,13 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any])
             if prefix == "research":
                 if state.get("recon", {}).get(ref, {}).get("status") != "done":
                     errs.append(f"{tid}: source {src} is not an answered research item.")
+            elif prefix == "wf":
+                path = resolve_ref(src, scope, wf_root)
+                if path is None or not path.exists():
+                    errs.append(f"{tid}: source {src} is not a file or folder inside the workflow folder.")
             elif not ref or prefix not in wss:
-                errs.append(f"{tid}: source {src!r} must be `<workspace>:<path or glob>` or `research:R#`.")
+                errs.append(f"{tid}: source {src!r} must be `<workspace>:<path or glob>`, `wf:<path>`, or "
+                            "`research:R#`.")
         if words(t.get("brief", "")) > limit("task_brief_words"):
             errs.append(f"{tid}: brief is {words(t['brief'])} words; the limit is {limit('task_brief_words')}.")
         if len(t.get("acceptance", [])) > limit("max_acceptance"):
@@ -284,7 +316,7 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any])
 
     errs += _validate_batches(plan, scope)
     budget = scope.get("budget_minutes")
-    if budget:
+    if budget and budget_check:
         left = budget - minutes_since(state.get("created"))
         total = sum(lane_minutes(t, scope) for t in tasks.values())
         span, chain = critical_path(tasks, scope)
@@ -301,6 +333,18 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any])
     return errs
 
 
+def warnings(plan: Dict[str, Any]) -> List[str]:
+    """What a plan check cannot refuse but the manager should know before the run hits it."""
+    out = []
+    for t in plan.get("tasks", []):
+        for p in t.get("paths", []):
+            name = PurePosixPath(str(p)).name
+            if "report" in PurePosixPath(name).stem.lower():
+                out.append(f"{t.get('id')} writes {name}: Claude Code has refused a sub-agent creating a new "
+                           "report-like file (seen with report.md) — prefer a name such as README.md or synthesis.md.")
+    return out
+
+
 def render(plan: Dict[str, Any], scope: Dict[str, Any], wf: Workflow) -> str:
     tasks = {t["id"]: t for t in plan["tasks"]}
     total = sum(lane_minutes(t, scope) for t in tasks.values())
@@ -310,6 +354,9 @@ def render(plan: Dict[str, Any], scope: Dict[str, Any], wf: Workflow) -> str:
     out = [f"# Plan — {plan['title']}", "", plan.get("summary", ""), "",
            f"**{len(tasks)} tasks** · about {max(span, math.ceil(total / lanes)) + tail} min of execution on "
            f"{lanes} lanes · budget {scope.get('budget_minutes') or 'none'} · scope: `scope.md`", ""]
+    if plan.get("conventions"):
+        out += ["**Conventions every brief starts from** (frozen with the plan): "
+                + ", ".join(f"`{c}`" for c in plan["conventions"]), ""]
     if sessions:
         nb, nr = len(review_batches(plan, scope)), len(scopemod.final_reviewers(scope))
         out += [f"**Review:** {nb} batch{'es' if nb > 1 else ''} × {nr} reviewer{'s' if nr > 1 else ''} = "
@@ -351,7 +398,7 @@ def _checked(wf: Workflow, state: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[
                       "(`tp revise --scope --feedback \"<their words>\"`), or restore it.")
     scope = scopemod.load_scope(wf)
     plan = load_plan(wf)
-    errs = validate(plan, scope, state)
+    errs = validate(plan, scope, state, wf.root)
     if errs:
         raise TPError(*errs)
     (wf.root / "plan.md").write_text(render(plan, scope, wf))
@@ -364,7 +411,8 @@ def cmd_check(wf: Workflow) -> str:
         raise TPError(f"Plans are checked in PLANNING; the workflow is {state['phase']}.")
     plan, _ = _checked(wf, state)
     wf.event("plan_check", tasks=len(plan["tasks"]))
-    return f"plan ok — {len(plan['tasks'])} tasks; rendered {wf.root / 'plan.md'}. Next: `tp plan submit`."
+    return "\n".join([f"WARN: {w}" for w in warnings(plan)]
+                     + [f"plan ok — {len(plan['tasks'])} tasks; rendered {wf.root / 'plan.md'}. Next: `tp plan submit`."])
 
 
 def cmd_submit(wf: Workflow) -> str:
@@ -411,6 +459,7 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
     plan = load_plan(wf)
     scope = scopemod.load_scope(wf)
     state["plan_approved_sha"] = state["plan_submitted_sha"]
+    state["conventions_sha"] = conventions_shas(plan, scope, wf.root)
     state["phase"] = "EXECUTING"
     state["approved"] = now_iso()
     for t in plan["tasks"]:
@@ -423,6 +472,119 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
     wf.decision("plan approve", answer)
     wf.event("approve")
     return "approved — EXECUTING. Run `tp next` and keep going until it says final or human."
+
+
+AMEND_JSON = "plan-amend.json"
+
+
+def _amendment(approved: Dict[str, Any], draft: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
+               wf_root: Path) -> Tuple[List[str], List[str]]:
+    """(what the draft changes, why it may not): only tasks never dispatched may change or go, and
+    a review batch whose review has started keeps exactly its tasks."""
+    old = {t["id"]: t for t in approved["tasks"]}
+    new = {t.get("id"): t for t in draft["tasks"]}
+    added = [t for t in new if t not in old]
+    removed = [t for t in old if t not in new]
+    changed = [t for t in old if t in new and new[t] != old[t]]
+    errs = []
+    for tid in changed + removed:
+        ts = state["tasks"].get(tid, {})
+        if ts.get("started") or ts.get("status", "pending") != "pending":
+            errs.append(f"{tid} has started ({ts.get('status')}); only tasks not yet dispatched can change or go. "
+                        f"Reopen it (`tp resolve --task {tid} --action reopen`), or ask the human about `tp revise`.")
+    old_b = {b["id"]: sorted(b["tasks"]) for b in review_batches(approved, scope)}
+    new_b = {b["id"]: sorted(b["tasks"]) for b in review_batches(draft, scope)}
+    for bid in sorted(set(old_b) | set(new_b)):
+        if old_b.get(bid) == new_b.get(bid):
+            continue
+        started = [sid for sid, s in state.get("reviews", {}).items() if s["batch"] == bid and s["status"] != "pending"]
+        if started:
+            errs.append(f"{bid}'s review has started ({', '.join(started)}): leave its tasks as they are and put new "
+                        f"work in a new review batch (`review_batches`, e.g. B{len(new_b) + 1}).")
+    changes = [f"{verb} {', '.join(ids)}" for verb, ids in (("added", added), ("changed", changed),
+                                                             ("removed", removed)) if ids]
+    changes += [f"review batches {', '.join(sorted(set(new_b) - set(old_b)))} new"] if set(new_b) - set(old_b) else []
+    changes += [f"{key} changed" for key in ("title", "summary", "checks", "final_checks", "conventions", "questions")
+                if approved.get(key) != draft.get(key)]
+    if conventions_shas(draft, scope, wf_root) != state.get("conventions_sha", {}) and "conventions changed" not in changes:
+        changes.append("conventions files changed")
+    return changes, errs
+
+
+def _remaining(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any]) -> List[str]:
+    """The open work an amended plan leaves, against the budget's wall-clock minutes left: shown, not
+    enforced — an amendment exists because the work outgrew the plan, and the human decides."""
+    done = ("accepted", "skipped")
+    tasks = {t["id"]: t for t in plan["tasks"] if state["tasks"].get(t["id"], {}).get("status") not in done}
+    total = sum(lane_minutes(t, scope) for t in tasks.values())
+    span, _ = critical_path(tasks, scope)
+    reviews = state.get("reviews", {})
+    open_batches = [b for b in review_batches(plan, scope)
+                    if all(s["status"] == "pending" for s in reviews.values() if s["batch"] == b["id"])]
+    tail = review_tail(dict(plan, review_batches=open_batches), scope)[1] if open_batches else 0
+    remaining = max(span, math.ceil(total / limit("max_in_flight"))) + tail
+    line = f"remaining work: about {remaining} min ({len(tasks)} open tasks" + (f", {tail}-min review tail" if tail else "") + ")"
+    budget = scope.get("budget_minutes")
+    if not budget:
+        return [line + "."]
+    left = budget - minutes_since(state["created"])
+    out = [f"{line}; the budget has {left:.0f} of {budget} min left, wall-clock."]
+    if remaining > left:
+        out.append("WARN: the remaining work runs past the budget — say so when you ask the human.")
+    return out
+
+
+def cmd_amend(wf: Workflow, answer: Optional[str]) -> str:
+    """Change the approved plan mid-run with the human's answer: add tasks, or change or remove tasks
+    not yet dispatched. The draft lives in plan-amend.json, so plan.json stays the contract — and
+    agents in flight can still be recorded — until the human agrees."""
+    from . import review, run
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] != "EXECUTING":
+            raise TPError(f"amend changes a plan mid-run; the workflow is {state['phase']}.")
+        if sha_file(wf.plan_json) != state.get("plan_approved_sha"):
+            raise TPError("plan.json changed after approval — restore it; an amendment goes in plan-amend.json.")
+        approved, scope = load_plan(wf), scopemod.load_scope(wf)
+        draft_path = wf.root / AMEND_JSON
+        if not draft_path.exists():
+            shutil.copyfile(wf.plan_json, draft_path)
+            return (f"Draft started: {draft_path}, a copy of the approved plan. Add tasks, or change or remove tasks "
+                    "not yet dispatched (new work needs a review batch whose review has not started). To change "
+                    "conventions, write them to a new file and point `conventions` at it: the frozen file stays "
+                    "as it is until the human agrees. Then `tp plan amend` to check it.")
+        draft = load_json(draft_path, "the amended plan")
+        if not isinstance(draft, dict) or not isinstance(draft.get("tasks"), list):
+            raise TPError(f"{draft_path} must be a JSON object with a `tasks` list.")
+        errs = validate(draft, scope, state, wf.root, budget_check=False)
+        changes, refusals = _amendment(approved, draft, scope, state, wf.root)
+        if errs or refusals:
+            raise TPError(*(errs + refusals))
+        if not changes:
+            return f"{draft_path.name} changes nothing yet."
+        remaining = _remaining(draft, scope, state)
+        if answer is None:
+            (wf.root / "plan-amend.md").write_text(render(draft, scope, wf))
+            return "\n".join([f"amendment ok — {'; '.join(changes)}."] + remaining + [
+                f"Show the human {wf.root / 'plan-amend.md'} and ask (AskUserQuestion); then "
+                "`tp plan amend --answer \"<their words>\"`."])
+        shutil.copyfile(draft_path, wf.plan_json)
+        draft_path.replace(wf.meta / f"plan-amend-{len(state.get('amendments', [])) + 1}.json")
+        (wf.root / "plan-amend.md").unlink(missing_ok=True)
+        state["plan_approved_sha"] = state["plan_submitted_sha"] = sha_file(wf.plan_json)
+        state["conventions_sha"] = conventions_shas(draft, scope, wf.root)
+        ids = [t["id"] for t in draft["tasks"]]
+        for tid in [t for t in state["tasks"] if t not in ids]:
+            del state["tasks"][tid]
+        for tid in ids:
+            state["tasks"].setdefault(tid, run.new_task_state())
+        state["reviews"] = review.new_reviews(draft, scope, state.get("reviews", {}))
+        state.setdefault("amendments", []).append({"ts": now_iso(), "changes": changes, "answer": answer})
+        wf.save(state)
+        (wf.root / "plan.md").write_text(render(draft, scope, wf))
+        wf.decision("plan amend", answer)
+        wf.event("plan_amend", changes=changes)
+        return "\n".join([f"amended — {'; '.join(changes)}."] + remaining + ["`tp next`."])
 
 
 def cmd_revise(wf: Workflow, feedback: str, to_scope: bool) -> str:

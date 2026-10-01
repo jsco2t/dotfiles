@@ -24,6 +24,12 @@ class RosterSuggestTest(unittest.TestCase):
                        "test-planner"):
             self.assertNotIn(absent, out)
 
+    def test_research_suggestion_lists_every_eligible_author(self) -> None:
+        out = self.h.tp("roster", "suggest", "--kinds", "research", wf=False).out
+        self.assertIn("research: author    doc-author", out)
+        self.assertIn("research: author?   architecture-reviewer", out)
+        self.assertNotIn("research: review?   architecture-reviewer", out)
+
     def test_code_suggestion_is_test_forward(self) -> None:
         out = self.h.tp("roster", "suggest", "--kinds", "code", wf=False).out
         self.assertIn("test-author", out)
@@ -107,6 +113,30 @@ class ScopeCheckTest(unittest.TestCase):
         ])
         self.assertIn("architecture-reviewer", res.text)
         self.assertIn("kb", res.text)
+
+    def test_architecture_reviewer_authors_a_review_of_an_existing_codebase(self) -> None:
+        # Seen live: "use /arch-reviewer over the whole repo" had to be routed through
+        # codebase-researcher, because the architecture reviewer could only review code changes.
+        review_d1 = [{"id": "D1", "kind": "research", "what": "Architecture review of calc", "where": "kb"}]
+        self.check(review="final", deliverables=review_d1, participants=[
+            {"agent": "architecture-reviewer", "role": "author", "why": "Writes the architecture review D1."},
+            {"agent": "doc-reviewer", "role": "reviewer", "why": "Checks D1's claims against the code."}])
+        self.h.tp("scope", "confirm", "--answer", "yes")
+        plan = self.h.plan([self.h.task("T01", "review/README.md", agent="architecture-reviewer")], final_checks=[])
+        self.h.write_json("plan.json", plan)
+        self.h.tp("plan", "check")
+
+    def test_architecture_reviewer_still_never_reviews_documents_or_writes_code(self) -> None:
+        res = self.check(expect=2, review="final",
+                         deliverables=[{"id": "D1", "kind": "research", "what": "A write-up", "where": "kb"}],
+                         participants=[{"agent": "doc-author", "role": "author", "why": "Writes the D1 write-up."},
+                                       {"agent": "architecture-reviewer", "role": "reviewer",
+                                        "why": "Reviews the D1 write-up."}])
+        self.assertIn("architecture-reviewer (reviewer) does not apply to research", res.text)
+        res = self.check(expect=2, deliverables=[{"id": "D1", "kind": "code", "what": "mul()", "where": "kb"}],
+                         participants=[{"agent": "architecture-reviewer", "role": "author",
+                                        "why": "Implements mul for D1."}])
+        self.assertIn("architecture-reviewer (author) does not apply to code", res.text)
 
     def test_orchestrator_only_agents_are_refused(self) -> None:
         res = self.check(expect=2, participants=[

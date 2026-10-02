@@ -118,7 +118,7 @@ Use the following nine perspectives. Each finding must name one perspective and 
 9. **Systems Correctness Analyst**
    - Logic, nil/null handling, edge cases, lifecycle leaks, concurrency correctness, misleading errors, redundant conditions, and whether bug fixes address root causes.
 
-Also check test changes for determinism and meaningful coverage. For a dedicated deep test review, chain `eng-test-reviewer`; for a dedicated documentation review, chain `doc-reviewomatic` in local mode. Do this only when requested by the caller.
+Also check test changes for determinism and meaningful coverage. For a dedicated deep test review, chain `test-reviewer`; for a dedicated documentation review, chain `doc-reviewomatic` in local mode. Do this only when requested by the caller.
 
 ### 4. Delegate when useful
 

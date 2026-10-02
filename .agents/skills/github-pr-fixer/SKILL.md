@@ -78,7 +78,7 @@ For uncertain items, report the evidence and ask for a decision only when the am
 ### 5. Verify the combined diff
 
 1. Invoke `comp-reviewomatic` in local mode over the files changed by this run. Fix verified high-confidence issues.
-2. If tests changed, invoke `eng-test-reviewer` on those tests. Fix verified high-confidence issues.
+2. If tests changed, invoke `test-reviewer` on those tests. Fix verified high-confidence issues.
 3. Run repository-native lint, build, and test commands. Prefer `AGENTS.md`, CI configuration, README/CONTRIBUTING, and build-system targets, in that order. Treat `CLAUDE.md` as legacy project guidance when present.
 4. Re-run failing checks after fixes. Do not push known-broken changes.
 

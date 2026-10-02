@@ -106,7 +106,7 @@ Read repository guidance, `go.mod`, surrounding implementations, interfaces, gen
    - Verify bugs, boundary conditions, concurrency and lock coverage, resource leaks, misleading errors, redundant checks, and fixes that address root causes.
    - Confirm gomock and variadic behavior from generated interfaces or compilation rather than assumption.
 
-Review tests for meaningful coverage and determinism. When a dedicated test review is requested, chain `eng-test-reviewer`. When a dedicated documentation review is requested, chain `doc-reviewomatic` in local mode.
+Review tests for meaningful coverage and determinism. When a dedicated test review is requested, chain `test-reviewer`. When a dedicated documentation review is requested, chain `doc-reviewomatic` in local mode.
 
 ### 4. Delegate when useful
 

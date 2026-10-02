@@ -62,7 +62,7 @@ Proceed directly when the plan stays within the approved task.
 Run independent reviews after implementation; they may run in parallel when available:
 
 1. Invoke `comp-reviewomatic` in local mode over the implementation diff. Validate its findings, fix verified high-confidence issues, and re-review affected areas.
-2. Invoke `eng-test-reviewer` over new or modified tests. Fix verified high-confidence issues and re-review affected tests.
+2. Invoke `test-reviewer` over new or modified tests. Fix verified high-confidence issues and re-review affected tests.
 3. Invoke `doc-reviewomatic` in local mode when user-facing or engineering documentation changed. Fix verified high-confidence issues and re-review affected documents.
 
 Record unverified, low-confidence, or out-of-scope findings without changing code solely to satisfy them.

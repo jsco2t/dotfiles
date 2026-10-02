@@ -39,7 +39,7 @@ With no explicit scope:
 - Route out-of-scope work as follows:
   - Bugs, security, compatibility, concurrency correctness, logging, and general code quality: `comp-reviewomatic` in local mode.
   - Documentation quality: `doc-reviewomatic` in local mode.
-  - Test quality and coverage: `eng-test-reviewer`.
+  - Test quality and coverage: `test-reviewer`.
 - Do not invoke those skills unless the caller requested a broader chained review. Otherwise, list out-of-scope observations briefly.
 
 ## Core Skill Process

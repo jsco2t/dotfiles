@@ -104,7 +104,7 @@ Review:
 - Test value, coverage, isolation, and determinism.
 - Documentation commands and examples when docs are part of the change.
 
-For a deeper general review, a caller may chain `comp-reviewomatic` in local mode. For dedicated tests use `eng-test-reviewer`; for docs use `doc-reviewomatic` in local mode. Do not invoke these unless the request includes the broader chained review.
+For a deeper general review, a caller may chain `comp-reviewomatic` in local mode. For dedicated tests use `test-reviewer`; for docs use `doc-reviewomatic` in local mode. Do not invoke these unless the request includes the broader chained review.
 
 ### 4. Delegate and consolidate
 

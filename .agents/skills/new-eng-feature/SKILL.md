@@ -1,6 +1,6 @@
 ---
 name: new-eng-feature
-description: Orchestrate end-to-end engineering feature planning by running eng-plan-creator, eng-design-creator, eng-test-planning, eng-task-planning, and eng-verification-creator in strict sequence while maintaining a structured documentation workspace. Use for new features that need research, design, test planning, tasks, and manual verification, directly or from a delegated project pipeline.
+description: Orchestrate end-to-end engineering feature planning by running eng-plan-creator, design-creator, test-planning, task-planning, and feature-verification-creator in strict sequence while maintaining a structured documentation workspace. Use for new features that need research, design, test planning, tasks, and manual verification, directly or from a delegated project pipeline.
 ---
 
 # New Engineering Feature
@@ -18,12 +18,12 @@ Ask only for missing or materially ambiguous inputs. Honor all caller-supplied p
 
 - Run these available skills in strict order, completing and validating each output before continuing:
   1. `eng-plan-creator`
-  2. `eng-design-creator`
-  3. `eng-test-planning`
-  4. `eng-task-planning`
-  5. `eng-verification-creator`
+  2. `design-creator`
+  3. `test-planning`
+  4. `task-planning`
+  5. `feature-verification-creator`
 - Invoke each skill through the current skill/delegation mechanism after reading its instructions. Pass explicit paths, upstream artifacts, relevant decisions, and output requirements.
-- Route genuinely unresolved questions and approval gates from `eng-plan-creator`, `eng-design-creator`, or `eng-verification-creator` to the direct user or delegating caller. Never fabricate answers. Do not pause for information already supplied.
+- Route genuinely unresolved questions and approval gates from `eng-plan-creator`, `design-creator`, or `feature-verification-creator` to the direct user or delegating caller. Never fabricate answers. Do not pause for information already supplied.
 - Do not run pipeline phases in parallel. Later phases depend on earlier artifacts.
 - Maintain indexes and cross-document organization yourself; subskills need not know the workspace layout.
 - Use ISO 8601 timestamps with the local Mountain offset. Preserve numeric ordering in verification folders.
@@ -135,7 +135,7 @@ Move any useful ancillary research produced by the skill into `research/`, fix l
 
 ### 3. Create the design
 
-Run `eng-design-creator` with the plan path, repository context, prior answers, and:
+Run `design-creator` with the plan path, repository context, prior answers, and:
 
 ```text
 Save the design to <output-directory>/plans/design.md. Do not ask for an output location. The implementation plan is <output-directory>/plans/implementation-plan.md.
@@ -149,7 +149,7 @@ Allow unresolved trade-off questions and approval to reach the user/caller. Veri
 
 ### 4. Append the test plan
 
-Run `eng-test-planning` with `plans/implementation-plan.md`, the companion `plans/design.md`, repository context, and settled decisions. Verify that the implementation plan now contains the test-plan section. Update its existing index row rather than adding a duplicate:
+Run `test-planning` with `plans/implementation-plan.md`, the companion `plans/design.md`, repository context, and settled decisions. Verify that the implementation plan now contains the test-plan section. Update its existing index row rather than adding a duplicate:
 
 ```markdown
 | [`implementation-plan.md`](implementation-plan.md) | Engineering implementation plan — includes appended test strategy (added [timestamp]) | [original timestamp] |
@@ -157,7 +157,7 @@ Run `eng-test-planning` with `plans/implementation-plan.md`, the companion `plan
 
 ### 5. Create the task plan
 
-Run `eng-task-planning` with the implementation plan, design path, repository context, and:
+Run `task-planning` with the implementation plan, design path, repository context, and:
 
 ```text
 Save the task plan to <output-directory>/tasks/task-plan.md. Do not save it in plans/ or ask for an output location.
@@ -180,7 +180,7 @@ Index any individual task documents created by the planning skill.
 
 ### 6. Create manual verifications
 
-Run `eng-verification-creator` with:
+Run `feature-verification-creator` with:
 
 ```text
 <output-directory>/plans/implementation-plan.md
@@ -263,10 +263,10 @@ Verify every document is indexed, all links resolve, timestamps and counts are c
 | Phase | Skill                       | Status   | Primary Output                                                 |
 | ----- | --------------------------- | -------- | -------------------------------------------------------------- |
 | 1     | `eng-plan-creator`          | Complete | [`plans/implementation-plan.md`](plans/implementation-plan.md) |
-| 2     | `eng-design-creator`        | Complete | [`plans/design.md`](plans/design.md)                           |
-| 3     | `eng-test-planning`         | Complete | Test strategy appended to implementation plan                  |
-| 4     | `eng-task-planning`         | Complete | [`tasks/task-plan.md`](tasks/task-plan.md)                     |
-| 5     | `eng-verification-creator`  | Complete | [`verifications/README.md`](verifications/README.md)           |
+| 2     | `design-creator`        | Complete | [`plans/design.md`](plans/design.md)                           |
+| 3     | `test-planning`         | Complete | Test strategy appended to implementation plan                  |
+| 4     | `task-planning`         | Complete | [`tasks/task-plan.md`](tasks/task-plan.md)                     |
+| 5     | `feature-verification-creator`  | Complete | [`verifications/README.md`](verifications/README.md)           |
 
 **Total Documents:** [count]
 **Open Follow-Up Items:** [count]

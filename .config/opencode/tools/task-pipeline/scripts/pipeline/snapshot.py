@@ -11,8 +11,11 @@ import subprocess
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+# .opencode/.claude are the coding agent's own runtime state (e.g. .opencode/ciq-loop/audit.log,
+# rewritten by the harness whenever an agent declares a long task). They live inside the workspace
+# but are never task output, so the changed-files gate must not flag them.
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tp", ".mypy_cache", ".pytest_cache",
-             ".idea", ".vscode", "target", "dist", ".next", ".cache"}
+             ".idea", ".vscode", "target", "dist", ".next", ".cache", ".opencode", ".claude"}
 SKIP_FILES = {".DS_Store"}
 HASH_LIMIT = 2 * 1024 * 1024
 

@@ -576,6 +576,13 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bo
                 msgs.append(f"green: `{task['test_cmd']}` passes.")
             else:
                 findings.append(f"The tests are not green: `{task['test_cmd']}` failed: {tail}")
+        elif effective == "author" and planmod.is_tested(task, scope):
+            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
+            if ok:
+                msgs.append(f"pinned: `{task['test_cmd']}` passes.")
+            else:
+                findings.append(f"The delivered tests must pass against current code: "
+                                f"`{task['test_cmd']}` failed: {tail}")
         if effective in ("author", "impl"):
             findings += _task_checks(wf, task, scope, plan, label)
         del state["in_flight"][tid]
@@ -1037,7 +1044,8 @@ def cmd_resume(wf: Workflow, answer: str) -> str:
         return "resumed. Run `tp next`."
 
 
-def add_fix(wf: Workflow, state: Dict[str, Any], tid: str, findings: List[str], fixing: str) -> str:
+def add_fix(wf: Workflow, state: Dict[str, Any], tid: str, findings: List[str], fixing: str,
+            from_review: bool = False) -> str:
     """Send findings from outside the task's own steps (review triage, a reopen) to its author.
     They join a fix round that has not been dispatched yet; otherwise they open a round of their
     own that does not count against the task's cap. Refused while the task is in flight, not yet
@@ -1049,6 +1057,13 @@ def add_fix(wf: Workflow, state: Dict[str, Any], tid: str, findings: List[str], 
                       "handed back and been recorded.")
     if ts["status"] in ("pending", "needs_impl", "blocked"):
         raise TPError(f"{tid} is {ts['status']}; it takes fixes once it is authored and not waiting on the human.")
+    if from_review:
+        # A reviewer-accepted finding may point at the tests themselves (e.g. a guard whose
+        # assertion can never fire). Re-baseline the frozen tests hash so the sanctioned
+        # strengthening is not read as "tests weakened" at the impl gate; correctness stays
+        # gated by test_cmd and the same reviewer's verification session.
+        ts.pop("tests_hash", None)
+        ts["fix_from_review"] = True
     if ts["status"] == "needs_fix":
         if ts.get("fixing") != fixing:
             raise TPError(f"{tid}'s waiting fix round is for its {ts.get('fixing')} step; send these after it.")

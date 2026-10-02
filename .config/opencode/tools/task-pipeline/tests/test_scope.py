@@ -29,6 +29,11 @@ class RosterSuggestTest(unittest.TestCase):
         self.assertIn("test-author", out)
         self.assertIn("code-author", out)
 
+    def test_tests_suggestion_is_test_author_authored(self) -> None:
+        out = self.h.tp("roster", "suggest", "--kinds", "tests", wf=False).out
+        self.assertIn("tests: author    test-author", out)
+        self.assertIn("test-reviewer", out)
+
 
 class InitTest(unittest.TestCase):
     """The location the human names is a parent: the workflow always creates, and owns, its
@@ -140,6 +145,16 @@ class ScopeCheckTest(unittest.TestCase):
         res = self.check(expect=2, review="per-task", participants=[
             {"agent": "doc-reviewer", "role": "reviewer", "why": "Checks the accuracy of the articles."}])
         self.assertIn("author", res.text)
+
+    def test_a_tests_deliverable_is_authored_by_test_author_and_reviewed_by_test_reviewer(self) -> None:
+        # Regression: a tests deliverable had no valid author (test-author only held the
+        # `tests` role) and test-reviewer did not apply to it.
+        self.check(review="final",
+                   deliverables=[{"id": "D1", "kind": "tests", "what": "A regression suite for calc",
+                                  "where": "kb"}],
+                   participants=[{"agent": "test-author", "role": "author", "why": "Writes the suite for D1."},
+                                 {"agent": "test-reviewer", "role": "reviewer",
+                                  "why": "Checks the suite would catch a regression."}])
 
     def test_a_reviewer_the_review_mode_never_uses_is_refused(self) -> None:
         res = self.check(expect=2, review="none", participants=[

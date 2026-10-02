@@ -30,7 +30,7 @@ def review_batches(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[Dict[str
 def session_minutes(batch: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any]) -> int:
     """How long one reviewer needs for a batch: review time grows with what it reviews."""
     tasks = {t["id"]: t for t in plan["tasks"]}
-    return sum(limit("review_minutes_per_code_task") if tid in tasks and is_code(tasks[tid], scope)
+    return sum(limit("review_minutes_per_code_task") if tid in tasks and is_tested(tasks[tid], scope)
                else limit("review_minutes_per_doc_task") for tid in batch.get("tasks", []))
 
 
@@ -91,6 +91,12 @@ def task_kind(task: Dict[str, Any], scope: Dict[str, Any]) -> Optional[str]:
 
 def is_code(task: Dict[str, Any], scope: Dict[str, Any]) -> bool:
     return task_kind(task, scope) == "code"
+
+
+def is_tested(task: Dict[str, Any], scope: Dict[str, Any]) -> bool:
+    """Code tasks (tests written first, then the implementation) and tests tasks (a suite over
+    existing behaviour) both prove themselves with `test_cmd`."""
+    return task_kind(task, scope) in ("code", "tests")
 
 
 def reviewer_for(task: Dict[str, Any], scope: Dict[str, Any]) -> Optional[str]:
@@ -290,6 +296,12 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
                 errs.append(f"{tid}: a code task needs `test_cmd` (tests first, observed red, then green).")
             if t.get("test_mode", "red") not in ("red", "pin"):
                 errs.append(f"{tid}: test_mode must be red (new behaviour) or pin (characterize current behaviour).")
+        elif kind == "tests":
+            if not t.get("test_cmd"):
+                errs.append(f"{tid}: a tests task needs `test_cmd` (the suite it delivers must be run, and pass).")
+            elif t.get("test_mode", "pin") != "pin":
+                errs.append(f"{tid}: a tests task's suite pins existing behaviour, so test_mode must be pin "
+                            "(red is for code tasks, whose pipeline also implements the behaviour).")
         if scope.get("review") in ("per-task", "both") and t.get("review") is not False:
             rev = reviewer_for(t, scope)
             if rev is None or rev not in scopemod.participants(scope, "reviewer"):

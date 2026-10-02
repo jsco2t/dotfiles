@@ -2,6 +2,7 @@
   "_comment": "Which agents /task-pipeline may use, in which role, for which deliverable kinds. tp.py enforces it. Agents not listed here are never used. `role_kinds` overrides `kinds` for one role.",
   "kinds": [
     "code",
+    "tests",
     "kb",
     "docs",
     "tutorial",
@@ -22,12 +23,18 @@
     },
     "test-author": {
       "roles": [
-        "tests"
+        "tests",
+        "author"
       ],
       "kinds": [
-        "code"
+        "tests"
       ],
-      "use": "tests written first and observed failing (red)"
+      "role_kinds": {
+        "tests": [
+          "code"
+        ]
+      },
+      "use": "tests: a code task's tests written first and observed failing (red); author: a test suite over existing behaviour (tests deliverables, pinned green)"
     },
     "kb-author": {
       "roles": [
@@ -193,7 +200,8 @@
         "reviewer"
       ],
       "kinds": [
-        "code"
+        "code",
+        "tests"
       ],
       "use": "whether new tests prove the acceptance criteria and would catch a regression"
     },
@@ -236,6 +244,16 @@
       ],
       "research": [
         "impact-researcher",
+        "test-researcher",
+        "codebase-researcher"
+      ]
+    },
+    "tests": {
+      "author": "test-author",
+      "ask": [
+        "test-reviewer"
+      ],
+      "research": [
         "test-researcher",
         "codebase-researcher"
       ]

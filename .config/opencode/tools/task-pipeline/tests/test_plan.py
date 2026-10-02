@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from typing import Any, Dict
 
 from harness import Harness
 
@@ -178,6 +179,45 @@ class ReviewPlanTest(unittest.TestCase):
         md = (self.h.wf / "plan.md").read_text()
         self.assertIn("2 batches × 1 reviewer = 2 review sessions", md)
         self.assertIn("after every task is accepted", md)
+
+
+class TestsPlanCheckTest(unittest.TestCase):
+    """A `tests` deliverable (a suite over existing behaviour) is test_cmd-verified like a code
+    task, but always pinned: the suite must pass as delivered — red belongs to the code flow,
+    whose pipeline also implements the behaviour."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.confirmed(deliverables=[{"id": "D1", "kind": "tests", "what": "A regression suite for calc",
+                                        "where": "kb"}],
+                         participants=[{"agent": "test-author", "role": "author",
+                                        "why": "Writes the regression suite for D1."}])
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def task(self, **over: Any) -> Dict[str, Any]:
+        base = {"id": "T01", "title": "Regression suite", "serves": ["D1"], "agent": "test-author",
+                "workspace": "kb", "paths": ["test_calc.py"], "sources": ["src:calc/**"],
+                "brief": "Write test_calc.py covering calc's Add.", "acceptance": ["Covers Add."],
+                "test_cmd": "python3 -m unittest -q test_calc", "checks": [], "estimate_min": 10,
+                "depends_on": []}
+        base.update(over)
+        return base
+
+    def check(self, **over: Any):
+        self.h.write_json("plan.json", self.h.plan([self.task(**over)], final_checks=[]))
+        return self.h.tp("plan", "check", expect=2)
+
+    def test_a_tests_task_needs_a_test_command(self) -> None:
+        self.assertIn("test_cmd", self.check(test_cmd=None).text)
+
+    def test_a_tests_task_may_not_run_red(self) -> None:
+        self.assertIn("pin", self.check(test_mode="red").text)
+
+    def test_a_pinned_tests_task_passes_the_plan_check(self) -> None:
+        self.h.write_json("plan.json", self.h.plan([self.task()], final_checks=[]))
+        self.h.tp("plan", "check")
 
 
 class ApprovalTest(unittest.TestCase):

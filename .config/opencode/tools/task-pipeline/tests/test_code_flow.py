@@ -119,5 +119,59 @@ class CodeFlowTest(unittest.TestCase):
         self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
 
 
+class TestsDeliverableFlowTest(unittest.TestCase):
+    """A `tests` deliverable is authored in one step by test-author and recorded only when its
+    suite passes against current code (pinned green)."""
+
+    def setUp(self) -> None:
+        self.h = h = Harness()
+        self.app = h.root / "app"
+        self.app.mkdir()
+        (self.app / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+        git(self.app, "init", "-q", "-b", "main")
+        git(self.app, "add", "-A")
+        git(self.app, "commit", "-q", "-m", "init")
+        self.scope = dict(
+            deliverables=[{"id": "D1", "kind": "tests", "what": "A regression suite for calc's Add",
+                           "where": "app"}],
+            participants=[{"agent": "test-author", "role": "author", "why": "Writes the suite for D1."}],
+            workspaces=[{"name": "app", "path": str(self.app), "mode": "write"}])
+        self.plan = h.plan([{"id": "T01", "title": "Regression suite", "serves": ["D1"],
+                             "agent": "test-author", "workspace": "app", "paths": ["test_add.py"],
+                             "sources": ["app:calc.py"], "brief": "Write test_add.py covering Add.",
+                             "acceptance": ["Covers Add."],
+                             "test_cmd": "python3 -m unittest -q test_add",
+                             "checks": [], "estimate_min": 10, "depends_on": []}], final_checks=[])
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def approve(self) -> None:
+        self.h.approved(plan=self.plan, **self.scope)
+
+    def write_suite(self, body: str) -> None:
+        self.h.tp("dispatch", "T01")
+        (self.app / "test_add.py").write_text(body)
+        self.h.result("T01", "author", changed=["test_add.py"])
+
+    def test_a_tests_task_runs_one_author_step_and_records_when_green(self) -> None:
+        self.approve()
+        act = self.h.next()["actions"][0]
+        self.assertEqual((act["step"], act["agent"]), ("author", "test-author"))
+        self.write_suite("import unittest\nfrom calc import add\n\nclass T(unittest.TestCase):\n"
+                         "    def test_add(self):\n        self.assertEqual(add(2, 3), 5)\n")
+        out = self.h.tp("record", "T01", "--agent-id", "ta-1").out
+        self.assertIn("pinned", out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_check")
+
+    def test_a_failing_suite_is_not_accepted(self) -> None:
+        self.approve()
+        self.write_suite("import unittest\nfrom calc import add\n\nclass T(unittest.TestCase):\n"
+                         "    def test_add(self):\n        self.assertEqual(add(2, 3), 6)\n")
+        out = self.h.tp("record", "T01").out
+        self.assertIn("must pass against current code", out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
+
+
 if __name__ == "__main__":
     unittest.main()

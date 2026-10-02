@@ -2,8 +2,10 @@
 description: >-
   Test-forward test author: writes a task's tests FIRST, before any production code, following
   the repository's own test patterns, so they fail for the right reason (red) — or, for
-  refactors, pin current behaviour (characterization). Never writes production code. Use for the
-  first step of /task-pipeline code tasks and test-side fix rounds, or standalone.
+  refactors, pin current behaviour (characterization). Also authors `tests` deliverables: a
+  test suite over existing behaviour, pinned green. Never writes production code. Use for the
+  first step of /task-pipeline code tasks, as the author of /task-pipeline tests deliverables,
+  in test-side fix rounds, or standalone.
 mode: subagent
 permission:
   task: deny

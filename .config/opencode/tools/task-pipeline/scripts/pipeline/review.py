@@ -313,7 +313,8 @@ def cmd_triage(wf: Workflow, sid: str, accept_all: bool, dismiss: List[str], rea
                 f"{result_name} {f['id']} ({f['state']}) at {f['where']}: {f['issue']}"
                 + (f" Fix: {f['fix']}" if f.get("fix") else ""))
         out = []
-        by_task = {tid: run.add_fix(wf, state, tid, lines, fixing=run._authoring_step(plan_task(plan, tid), scope))
+        by_task = {tid: run.add_fix(wf, state, tid, lines, fixing=run._authoring_step(plan_task(plan, tid), scope),
+                                    from_review=True)
                    for tid, lines in sorted(lines_by.items())}
         out = list(by_task.values())
         s["accepted"] = sorted(set(s["accepted"]) | {f["id"] for f in kept})
@@ -450,7 +451,8 @@ def _reopen(wf: Workflow, state: Dict[str, Any], sid: str, s: Dict[str, Any], by
         lines_by.setdefault(f["task"], []).append(
             f"{result_name} {fid} (reopened) at {f['where']}: {f['issue']}"
             + (f" Fix: {f['fix']}" if f.get("fix") else ""))
-    by_task = {tid: run.add_fix(wf, state, tid, lines, fixing=run._authoring_step(plan_task(plan, tid), scope))
+    by_task = {tid: run.add_fix(wf, state, tid, lines, fixing=run._authoring_step(plan_task(plan, tid), scope),
+                                from_review=True)
                for tid, lines in sorted(lines_by.items())}
     s["accepted"] = sorted(set(s.get("accepted", [])) | set(fids))
     s["fix_tasks"] = sorted(by_task)

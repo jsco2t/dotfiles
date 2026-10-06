@@ -1,5 +1,5 @@
 ---
-name: eng-ux-reviewer
+name: ux-reviewer
 description: Reviews UI, TUI, and CLI interfaces for user experience quality — responsiveness, accessibility, usability patterns, discoverability, and overall experience excellence. Reads code to envision the resulting interface and provides concrete, actionable feedback during development. Use when reviewing any user-facing surface.
 argument-hint: "<files, directory, diff range, or description of the interface to review> [--max-agents=N]"
 ---

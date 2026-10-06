@@ -1,5 +1,5 @@
 ---
-name: eng-verification-runner
+name: feature-verification-runner
 description: Executes manual verification test documents against a local environment (fuzzy compose or fuzzy kind) that the user has already set up. Runs environment readiness checks first, then walks every test step-by-step, comparing observed behavior against the document's Expected Results and Pass Criteria. HALTS immediately on any mismatch, ambiguity, or gap — resolution is always a collaborative decision with the user, never a unilateral fix or scope adjustment. Strictly local-only (no AWS/GCP/Azure).
 argument-hint: "<path to verification doc(s), comma- or space-separated> <'environment-ready' confirmation>"
 ---

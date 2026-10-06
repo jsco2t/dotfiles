@@ -75,8 +75,8 @@ Read the implementation plan (typically found in `plans/`). This is the most com
 - Feature overview and requirements
 - Codebase impact assessment
 - Gap analysis and open questions
-- Design decision log (if `/eng-design-creator` has run)
-- Test plan (if `/eng-test-planning` has run)
+- Design decision log (if `/design-creator` has run)
+- Test plan (if `/test-planning` has run)
 
 Read the full document.
 

@@ -322,10 +322,10 @@ Then use **AskUserQuestion** to let the reader choose what to do:
 - **Not a code reviewer** — it reviews plans, not implementations.
   Use `/arch-reviewer` for post-implementation architectural review.
 - **Not a design document generator** — it reviews an existing plan.
-  Use `/eng-design-creator` to produce a design document from research.
+  Use `/design-creator` to produce a design document from research.
 - **Not a bug finder** — it doesn't look for logic errors or security issues.
 - **Not a test planner** — it doesn't generate test cases.
-  Use `/eng-test-planning` for that.
+  Use `/test-planning` for that.
 
 ## Process Guidance
 

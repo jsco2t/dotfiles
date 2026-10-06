@@ -2,7 +2,7 @@
 name: ux-reviewer
 description: >-
   Reviews user-facing surfaces — web/desktop UI, TUI, and CLI — for usability, accessibility,
-  discoverability, error states, and overall experience by applying the /eng-ux-reviewer method,
+  discoverability, error states, and overall experience by applying the /ux-reviewer method,
   from the code or from a plan's interface design. Report-only. Use in /task-pipeline
   end-of-pipeline review when a change creates or alters something a person interacts with
   (commands, flags, output, prompts, screens), or standalone.
@@ -22,10 +22,10 @@ code (or from a plan's design) and judge it.
 ## Method
 
 1. Identify the surface (CLI, TUI, or GUI) and the user tasks the change serves.
-2. Apply the /eng-ux-reviewer method to the scope:
+2. Apply the /ux-reviewer method to the scope:
 
    ```
-   Skill: eng-ux-reviewer
+   Skill: ux-reviewer
      args: "<changed UI/TUI/CLI files or the plan section describing the interface>.
             Review only this change. [--max-agents=N]"
    ```

@@ -1,5 +1,5 @@
 ---
-name: eng-verification-creator
+name: feature-verification-creator
 description: Creates manual verification test documents from an engineering implementation plan and design document. Fetches spec requirements from Jira/Confluence as the source of truth, maps every requirement to concrete verification steps, organizes tests by deployment environment (cheapest-first), and produces copy-paste-ready documents with spec coverage matrix.
 argument-hint: "<path to eng-implementation-plan.md> <path to engineering-design.md> <output directory>"
 ---
@@ -51,7 +51,7 @@ These principles are non-negotiable. Every verification document must satisfy th
    - **Run in any order.** Documents WILL be executed in arbitrary order by different testers or AI runners. Document A must NEVER assume Document B ran first. If two documents need the same provisioner, both documents create it in their own setup.
    - **Never be setup-only or cleanup-only.** Do NOT create documents whose sole purpose is environment setup or teardown. Every document is a complete unit: setup → tests → teardown. The ONE exception is expensive one-time environments (see Principle 15).
 
-8. **Be explicit — every step spelled out.** Verification documents may be executed by an AI agent (`/eng-verification-runner`) that follows instructions literally. Do not presume "implied steps" will be understood. Specifically:
+8. **Be explicit — every step spelled out.** Verification documents may be executed by an AI agent (`/feature-verification-runner`) that follows instructions literally. Do not presume "implied steps" will be understood. Specifically:
    - Every action must have a concrete, copy-pasteable command in a bash code block.
    - Never write "configure the environment" without showing exactly how.
    - Never write "verify it works" without specifying what to check and what the expected output looks like.
@@ -76,10 +76,10 @@ These principles are non-negotiable. Every verification document must satisfy th
 
 12. **Verify feature availability per level.** Before placing a test at a given environment level, confirm the feature is actually available there. Check compose configs for service availability (e.g., object cache, service proxy). Check Kind configs for environment types (e.g., segmented). Do not write tests for features that aren't present at that level.
 
-13. **Human and AI executable.** Every document must be runnable by a human or by the `/eng-verification-runner` skill. The AI runner follows instructions literally — it does not infer missing steps, guess at expected outputs, or fill in gaps. Write documents as if the reader has never seen the product and will execute exactly what is written, nothing more. Include an AI guidance header at the top of every verification document:
+13. **Human and AI executable.** Every document must be runnable by a human or by the `/feature-verification-runner` skill. The AI runner follows instructions literally — it does not infer missing steps, guess at expected outputs, or fill in gaps. Write documents as if the reader has never seen the product and will execute exactly what is written, nothing more. Include an AI guidance header at the top of every verification document:
     ```
     > **AI Verification Runner Guidance**
-    > This document is designed to be executed by a human or by the `/eng-verification-runner` skill.
+    > This document is designed to be executed by a human or by the `/feature-verification-runner` skill.
     > - Execute steps sequentially within each test. HALT on any mismatch.
     > - Capture all command outputs and compare against Expected Results exactly.
     > - On MacOS, you may need to leave the sandbox to interact with the system under test.
@@ -217,7 +217,7 @@ Every document includes this blockquote immediately after the metadata block. Us
 
 ```markdown
 > **AI Verification Runner Guidance**
-> This document is designed to be executed by a human or by the `/eng-verification-runner` skill.
+> This document is designed to be executed by a human or by the `/feature-verification-runner` skill.
 > - **Quality over speed.** Do **NOT** compress, batch, or shortcut these tests. The goal is to verify product quality, not to finish quickly. Execute every command exactly as written and evaluate every result against the pass criteria.
 > - **Parallel execution.** Running tests in sub-agents in parallel is acceptable only when the test objectives have **NO** overlap in the resources they create, modify, or verify.
 > - Execute steps sequentially within each test. HALT on any mismatch.

@@ -1,5 +1,5 @@
 ---
-name: eng-design-creator
+name: design-creator
 description: Reviews a feature's implementation plan or requirements document (such as a /new-drd DRD), performs architectural analysis with user input on design choices, produces a design document with rationale, and links it from the source document upon approval.
 argument-hint: "<path to feature research document>"
 ---

@@ -22,7 +22,7 @@ work item small and objectively checkable, every open question surfaced for a pe
 ## Method
 
 1. **Structure.** Use the document structure the relevant skill defines, without running its
-   interactive Q&A: `/new-drd` for delivery requirements documents, `/eng-task-planning` for epic
+   interactive Q&A: `/new-drd` for delivery requirements documents, `/task-planning` for epic
    and task breakdowns. Questions only a person can answer go back as `needs_input`.
 2. **Ground every statement** in its source: issue keys, page links, dates, owners, and
    `path:line` for claims about code. For Jira or Confluence use `/atlassian-toolkit`; for GitHub

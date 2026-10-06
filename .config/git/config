@@ -1,0 +1,30 @@
+# Credential helpers: GitHub goes to gh, every other host to Git Credential
+# Manager (GCM). Git builds one helper list per URL in config read order
+# (system, this file, ~/.gitconfig, repo), and an empty `helper =` clears the
+# list built so far, so each host below reaches exactly one helper.
+#
+# Both helpers are wrappers in ~/.local/bin/gcm-helper/ (linked from
+# ~/.local/bin) and are called by absolute path, so they work when ~/.local/bin
+# and the Homebrew bin are not on PATH. Each wrapper exits 0 silently when its
+# binary is missing, so git falls back to its own prompt.
+#
+# The GCM credential store is not set here: on Linux the wrapper defaults
+# GCM_CREDENTIAL_STORE to cache, and macOS keeps GCM's Keychain default.
+# credential.interactive is deliberately unset; agents opt out of prompts with
+# GCM_INTERACTIVE=0 and GIT_TERMINAL_PROMPT=0 so humans keep theirs.
+[credential]
+	# Drop any helper set earlier (for example a system-level osxkeychain).
+	helper =
+	helper = !\"$HOME/.local/bin/git-credential-gcm\"
+	# Prompt in the terminal instead of a GUI dialog when DISPLAY is set.
+	guiPrompt = false
+	# The cache store keeps credentials in memory for 8 hours.
+	cacheOptions = --timeout 28800
+
+# These blocks must follow [credential]: their reset clears the GCM helper above.
+[credential "https://github.com"]
+	helper =
+	helper = !\"$HOME/.local/bin/git-credential-gh\"
+[credential "https://gist.github.com"]
+	helper =
+	helper = !\"$HOME/.local/bin/git-credential-gh\"

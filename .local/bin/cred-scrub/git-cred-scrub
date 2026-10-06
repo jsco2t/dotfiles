@@ -1,0 +1,611 @@
+#!/usr/bin/env python3
+"""git-cred-scrub -- find and strip credentials embedded in git config.
+
+A single self-contained, stdlib-only tool. See README.md for the usage contract.
+
+It reads each repo's config (plus config.worktree files and submodule configs under
+.git/modules), ~/.gitconfig, ~/.config/git/config, and every file those include, and reports:
+  - userinfo in remote.<name>.url / remote.<name>.pushurl / submodule.<name>.url
+  - userinfo in the base of url.<base>.insteadOf / url.<base>.pushInsteadOf
+  - an Authorization header in http.extraHeader / http.<url>.extraHeader
+  - credential.helper = store (any credential.*.helper)
+  - ~/.git-credentials and other store files (report only; never modified)
+
+Design notes for maintainers:
+  - Never print a config value. URLs are shown as scheme://***@host/path; header and
+    helper values are never shown. git's stderr and exception text go through sanitize().
+  - Writes go only through `git config --file`. Secret values stay out of argv where git
+    allows it (--replace-all with no value pattern, a secret-free regex for headers); an
+    insteadOf base can only be renamed by naming its section.
+  - Exceptions never escape as tracebacks: CalledProcessError and friends embed argv.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+EX_CLEAN, EX_FINDINGS, EX_ERROR = 0, 1, 2
+
+# Schemes whose userinfo git hands to curl, i.e. where a URL can carry a password or token.
+CREDENTIAL_SCHEMES = {"http", "https", "ftp", "ftps"}
+_URL = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<authority>[^/?#]*)(?P<rest>.*)",
+                  re.S)
+# scheme://userinfo@ anywhere in free text (git messages, exception text); redaction only.
+_TEXT_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/?#\s]*@")
+_SPACE = "[ \t\n\v\f\r]*"
+_AUTH_HEADER = re.compile(_SPACE + "authorization" + _SPACE + ":", re.IGNORECASE)
+# The same test as a POSIX ERE for `git config --unset-all`, so no header value enters argv.
+AUTH_HEADER_ERE = ("^[[:space:]]*" + "".join(f"[{c.upper()}{c}]" for c in "authorization")
+                   + "[[:space:]]*:")
+
+REAUTH = """\
+Re-authenticate without putting a token in any URL:
+  github.com and gist.github.com: run `gh auth login`; gh's credential helper serves both.
+  Any other host: create a new token, then run `git ls-remote https://HOST/OWNER/REPO.git`
+  in a terminal. Git Credential Manager prompts once and stores the new token.
+  Never reuse the old token, even after scrubbing."""
+
+# Raw secrets seen while scanning, so sanitize() can mask them in git's own messages.
+_SECRETS: set[str] = set()
+
+
+class ScrubError(Exception):
+    """A path or config that could not be scanned or fixed; the message is printable."""
+
+
+class Action:
+    """The `git config --file` commands that remove one or more findings."""
+
+    def __init__(self, commands):
+        self.commands = commands
+        self.ok = None  # None: not attempted; True/False after --fix
+
+
+class Finding:
+    """One credential finding, described without its secret."""
+
+    def __init__(self, text, hosts=(), action=None):
+        self.text = text
+        self.hosts = [host for host in hosts if host]
+        self.action = action  # None: report only
+
+
+# --------------------------------------------------------------------------- #
+# secret-safe text
+# --------------------------------------------------------------------------- #
+def remember(*values):
+    for value in values:
+        if value and len(value) >= 4:
+            _SECRETS.add(value)
+
+
+def sanitize(text):
+    """Redact URL userinfo and every secret seen so far from text we did not compose."""
+    text = _TEXT_USERINFO.sub(r"\1***@", text)
+    for secret in sorted(_SECRETS, key=len, reverse=True):
+        text = text.replace(secret, "***")
+    return text
+
+
+def split_userinfo(url):
+    """(scheme, hostport, rest) for a credential-scheme URL with userinfo, else None.
+
+    Everything up to the last "@" of the authority counts as userinfo, so no part of an
+    unencoded password can survive into the host.
+    """
+    match = _URL.fullmatch(url)
+    if not match or match["scheme"].lower() not in CREDENTIAL_SCHEMES:
+        return None
+    userinfo, at, hostport = match["authority"].rpartition("@")
+    if not at or not userinfo:
+        return None
+    user, _, password = userinfo.partition(":")
+    remember(userinfo, user, password)
+    return match["scheme"], hostport, match["rest"]
+
+
+def host_of(url):
+    """The lowercased host[:port] of a credential-scheme URL, else None."""
+    match = _URL.fullmatch(url)
+    if not match or match["scheme"].lower() not in CREDENTIAL_SCHEMES:
+        return None
+    return match["authority"].rpartition("@")[2].lower() or None
+
+
+def redacted(url):
+    """url with its userinfo shown as ***, e.g. https://***@host/path."""
+    parts = split_userinfo(url)
+    if parts:
+        return f"{parts[0]}://***@{parts[1]}{parts[2]}"
+    return _TEXT_USERINFO.sub(r"\1***@", url)
+
+
+# --------------------------------------------------------------------------- #
+# git
+# --------------------------------------------------------------------------- #
+def git(*args):
+    try:
+        result = subprocess.run(["git", *args], capture_output=True)
+    except OSError as exc:
+        raise ScrubError(f"cannot run git: {exc.strerror}") from None
+    result.stdout = os.fsdecode(result.stdout)
+    result.stderr = os.fsdecode(result.stderr)
+    return result
+
+
+def git_message(result):
+    lines = [line for line in result.stderr.splitlines() if line.strip()]
+    return sanitize(lines[0]) if lines else f"git exited {result.returncode}"
+
+
+def read_config(cfg):
+    """[(key, value)] in file order; value is None for a bare boolean key."""
+    result = git("config", "--file", str(cfg), "--null", "--list")
+    if result.returncode != 0:
+        raise ScrubError(f"{cfg}: cannot read config ({git_message(result)})")
+    entries = []
+    for item in result.stdout.split("\0"):
+        if item:
+            key, newline, value = item.partition("\n")
+            entries.append((key, value if newline else None))
+    return entries
+
+
+def split_key(key):
+    """(section, subsection or None, variable); the subsection may contain dots."""
+    section, _, rest = key.partition(".")
+    sub, dot, var = rest.rpartition(".")
+    return section, (sub if dot else None), var
+
+
+# --------------------------------------------------------------------------- #
+# finding repos and files
+# --------------------------------------------------------------------------- #
+def is_git_dir(path):
+    return (path / "HEAD").is_file() and ((path / "objects").is_dir()
+                                          or (path / "commondir").is_file())
+
+
+def read_gitfile(dotgit):
+    """The git dir a `.git` file points to, or None."""
+    try:
+        text = dotgit.read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.startswith("gitdir:"):
+        return None
+    target = Path(text[len("gitdir:"):].strip())
+    if not target.is_absolute():
+        target = dotgit.parent / target
+    return target if is_git_dir(target) else None
+
+
+def git_dir_of(path):
+    """The git dir of a repo given by its top-level directory or its git dir, or None."""
+    dotgit = path / ".git"
+    if dotgit.is_dir():
+        return dotgit if is_git_dir(dotgit) else None
+    if dotgit.is_file():
+        return read_gitfile(dotgit)
+    return path if is_git_dir(path) else None
+
+
+def common_dir(git_dir):
+    """Where a repo's shared config lives (differs from the git dir for linked worktrees)."""
+    pointer = git_dir / "commondir"
+    if pointer.is_file():
+        target = Path(pointer.read_text().strip())
+        return target if target.is_absolute() else (git_dir / target).resolve()
+    return git_dir
+
+
+def module_git_dirs(modules):
+    """Submodule git dirs under .git/modules, nested ones included.
+
+    A submodule name may contain slashes, so a directory without a config file is a
+    name prefix and is searched further.
+    """
+    try:
+        children = sorted(p for p in modules.iterdir() if p.is_dir())
+    except OSError as exc:
+        raise ScrubError(f"cannot read {modules}: {exc.strerror}") from None
+    for child in children:
+        if (child / "config").is_file():
+            yield child
+            if (child / "modules").is_dir():
+                yield from module_git_dirs(child / "modules")
+        else:
+            yield from module_git_dirs(child)
+
+
+def worktree_configs(git_dir):
+    """The config.worktree files (extensions.worktreeConfig) of a repo and its worktrees."""
+    paths = [git_dir / "config.worktree"]
+    if (git_dir / "worktrees").is_dir():
+        paths += sorted((git_dir / "worktrees").glob("*/config.worktree"))
+    return [path for path in paths if path.is_file()]
+
+
+def repo_configs(path):
+    """The config files of the repo at path: its own, then every submodule's."""
+    git_dir = git_dir_of(path)
+    if git_dir is None:
+        raise ScrubError(f"{path}: not a git repository (pass its top-level directory or "
+                         "its git dir)")
+    try:
+        common = common_dir(git_dir)
+    except (OSError, UnicodeDecodeError):
+        raise ScrubError(f"{path}: cannot read {git_dir / 'commondir'}") from None
+    cfg = common / "config"
+    if not cfg.is_file():
+        raise ScrubError(f"{path}: repository has no config file")
+    configs = [cfg, *worktree_configs(common)]
+    if (common / "modules").is_dir():
+        for module in module_git_dirs(common / "modules"):
+            configs += [module / "config", *worktree_configs(module)]
+    return configs
+
+
+def find_repos(root, errors):
+    """Every repo at or below root: work trees (`.git` dir or file) and bare repos."""
+    def onerror(exc):
+        errors.append(f"cannot read {exc.filename}: {exc.strerror}")
+
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root, onerror=onerror):
+        here = Path(dirpath)
+        if ".git" in dirnames or ".git" in filenames:
+            found.append(here)
+            if ".git" in dirnames:
+                dirnames.remove(".git")  # its submodules come from repo_configs()
+        elif is_git_dir(here):
+            found.append(here)
+            dirnames[:] = []
+        dirnames.sort()
+    return found
+
+
+def xdg_git_dir():
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "git"
+
+
+def collect_configs(repos, scan_dirs, errors):
+    """Config files to scan, deduplicated, in report order: repos first, then global."""
+    targets = []
+    for repo in repos:
+        path = Path(repo)
+        if not path.is_dir():
+            errors.append(f"{path}: no such directory")
+        else:
+            targets.append(path)
+    for root in scan_dirs:
+        path = Path(root)
+        if not path.is_dir():
+            errors.append(f"{path}: no such directory to scan")
+        else:
+            targets += find_repos(path, errors)
+    configs = []
+    for target in targets:
+        try:
+            configs += repo_configs(target)
+        except ScrubError as exc:
+            errors.append(str(exc))
+    configs += [p for p in (xdg_git_dir() / "config", Path.home() / ".gitconfig") if p.is_file()]
+    unique, seen = [], set()
+    for cfg in configs:
+        real = os.path.realpath(cfg)
+        if real not in seen:
+            seen.add(real)
+            unique.append(cfg)
+    return unique
+
+
+# --------------------------------------------------------------------------- #
+# scanning
+# --------------------------------------------------------------------------- #
+def is_store_helper(value):
+    """True for a helper that runs git-credential-store, which keeps passwords in plain text."""
+    command = value.strip()
+    words = command.lstrip("!").split()
+    if not words:
+        return False
+    if os.path.basename(words[0]) == "git-credential-store":
+        return True
+    if command.startswith("!"):
+        return words[1:2] == ["credential-store"] and os.path.basename(words[0]) == "git"
+    return words[0] == "store"
+
+
+def store_file(value):
+    """The absolute --file a store helper writes to, or None for its default files."""
+    try:
+        words = shlex.split(value.strip().lstrip("!"))
+    except ValueError:
+        return None
+    raw = None
+    for i, word in enumerate(words):
+        if word.startswith("--file="):
+            raw = word[len("--file="):]
+        elif word == "--file" and i + 1 < len(words):
+            raw = words[i + 1]
+    if not raw:
+        return None
+    path = Path(os.path.expanduser(raw))
+    return path if path.is_absolute() else None
+
+
+def include_path(value, cfg):
+    """Where an include.path or includeIf.<condition>.path value points, as git resolves it."""
+    path = Path(os.path.expanduser(value))
+    return path if path.is_absolute() else cfg.parent / path
+
+
+def only_resets_left(values):
+    """True when nothing but empty resets would remain once a helper key's store values go.
+
+    A lone `helper =` reset left behind would clear the helpers set in earlier config files
+    (the tracked GCM wrapper among them), so it goes with the store helper it preceded.
+    """
+    return all(v == "" for v in values if not (v and is_store_helper(v)))
+
+
+def helper_action(key, values):
+    """Unset a helper key's store values, or the whole key when only empty resets remain."""
+    if only_resets_left(values):
+        return Action([["--unset-all", key]])
+    stores = dict.fromkeys(v for v in values if v and is_store_helper(v))
+    return Action([["--fixed-value", "--unset-all", key, v] for v in stores])
+
+
+def url_action(key, values):
+    """Rewrite every value of a URL key, userinfo stripped, keeping order and the rest."""
+    clean = []
+    for value in values:
+        parts = split_userinfo(value or "")
+        clean.append(f"{parts[0]}://{parts[1]}{parts[2]}" if parts else (value or ""))
+    return Action([["--replace-all", key, clean[0]]] + [["--add", key, v] for v in clean[1:]])
+
+
+def scan_config(cfg):
+    """(findings, actions in apply order, store-helper files, included files) for one config."""
+    entries = read_config(cfg)
+    url_values, helper_values = {}, {}
+    for key, value in entries:
+        section, sub, var = split_key(key)
+        if sub is not None and ((section == "remote" and var in ("url", "pushurl"))
+                                or (section == "submodule" and var == "url")):
+            url_values.setdefault(key, []).append(value)
+        elif section == "credential" and var == "helper":
+            helper_values.setdefault(key, []).append(value)
+
+    findings, actions, files, includes = [], {}, [], []
+    remote_hosts, unscoped = set(), []
+    for key, value in entries:
+        section, sub, var = split_key(key)
+        if key in url_values:
+            host = host_of(value or "")
+            if host and section == "remote":
+                remote_hosts.add(host)
+            parts = split_userinfo(value or "")
+            if parts:
+                action = actions.setdefault(("url", key), url_action(key, url_values[key]))
+                findings.append(Finding(f"{key} = {redacted(value)}", [host], action))
+        elif section == "url" and sub is not None and var in ("insteadof", "pushinsteadof"):
+            parts = split_userinfo(sub)
+            if parts:
+                old, new = f"url.{sub}", f"url.{parts[0]}://{parts[1]}{parts[2]}"
+                action = actions.setdefault(("section", old),
+                                            Action([["--rename-section", old, new]]))
+                findings.append(Finding(f"url.{redacted(sub)}.{var}: the rewrite base holds "
+                                        "credentials", [host_of(sub)], action))
+        elif section == "http" and var == "extraheader" and value \
+                and _AUTH_HEADER.match(value):
+            credentials = value.partition(":")[2]
+            remember(value, credentials.strip(), *credentials.split())
+            action = actions.setdefault(("header", key),
+                                        Action([["--unset-all", key, AUTH_HEADER_ERE]]))
+            label = f"http.{redacted(sub)}.extraheader" if sub is not None else "http.extraheader"
+            finding = Finding(f"{label}: Authorization header (value hidden)", [], action)
+            host = host_of(sub) if sub is not None else None
+            if host:
+                finding.hosts.append(host)
+            else:
+                unscoped.append(finding)
+            findings.append(finding)
+        elif section == "credential" and var == "helper" and value and is_store_helper(value):
+            action = actions.setdefault(("helper", key), helper_action(key, helper_values[key]))
+            label = (f"credential.{redacted(sub)}.helper" if sub is not None
+                     else "credential.helper")
+            note = "store helper (keeps credentials in a plain-text file)"
+            if "" in helper_values[key] and only_resets_left(helper_values[key]):
+                note += ("; --fix also drops the empty `helper =` reset, which would otherwise "
+                         "disable the helpers set in earlier config files")
+            findings.append(Finding(f"{label}: {note}", [], action))
+            path = store_file(value)
+            if path is not None:
+                files.append(path)
+        elif section in ("include", "includeif") and var == "path" and value:
+            includes.append(include_path(value, cfg))
+
+    for finding in unscoped:
+        finding.hosts = sorted(remote_hosts) or [
+            f"unknown host (the token in {cfg} http.extraheader)"]
+    return findings, list(actions.values()), files, includes
+
+
+def scan_credentials_file(path):
+    """A report-only finding for a git-credential-store file, or None when it is empty."""
+    try:
+        text = path.read_bytes().decode("utf-8", "replace")
+    except OSError as exc:
+        raise ScrubError(f"cannot read {path}: {exc.strerror}") from None
+    count, hosts = 0, set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        count += 1
+        split_userinfo(line)  # remembers the secret for sanitize()
+        host = host_of(line)
+        if host:
+            hosts.add(host)
+    if not count:
+        return None
+    return Finding(f"{count} stored credential(s) in plain text; --fix never touches this file, "
+                   "so delete it yourself once they are revoked", sorted(hosts))
+
+
+def credential_files(store_files):
+    defaults = [Path.home() / ".git-credentials", xdg_git_dir() / "credentials"]
+    unique, seen = [], set()
+    for path in defaults + store_files:
+        real = os.path.realpath(path)
+        if real not in seen and path.is_file():
+            seen.add(real)
+            unique.append(path)
+    return unique
+
+
+# --------------------------------------------------------------------------- #
+# fixing and reporting
+# --------------------------------------------------------------------------- #
+def fix_config(cfg, actions, errors):
+    for action in actions:
+        action.ok = True
+        for command in action.commands:
+            result = git("config", "--file", str(cfg), *command)
+            if result.returncode != 0:
+                action.ok = False
+                errors.append(f"{cfg}: git config failed ({git_message(result)})")
+                break
+    try:
+        left = [f for f in scan_config(cfg)[0] if f.action is not None]
+    except ScrubError as exc:
+        errors.append(str(exc))
+        return
+    if left and all(a.ok for a in actions):
+        errors.append(f"{cfg}: {len(left)} finding(s) remain after --fix")
+
+
+def status(finding):
+    if finding.action is None:
+        return "report only"
+    return "fixed" if finding.action.ok else "NOT FIXED"
+
+
+def report(sources, fix, scanned, errors):
+    if not sources:
+        if errors:
+            print(f"No embedded credentials found in the {scanned} config file(s) read, but the "
+                  "scan is incomplete (see stderr).")
+        else:
+            print(f"No embedded credentials found in {scanned} config file(s).")
+        return
+    print("git-cred-scrub --fix: stripping credentials from config." if fix else
+          "git-cred-scrub dry run: nothing will be changed.")
+    findings = []
+    for path, found in sources:
+        print(f"\n{path}")
+        for finding in found:
+            print(f"  {finding.text}" + (f"  [{status(finding)}]" if fix else ""))
+        findings += found
+    fixable = [f for f in findings if f.action is not None]
+    print()
+    if fix:
+        done = sum(1 for f in fixable if f.action.ok)
+        print(f"Fixed {done} of {len(fixable)} config finding(s).")
+    else:
+        print(f"Found {len(findings)} finding(s); nothing was changed."
+              + (f" Re-run with --fix to strip the {len(fixable)} config finding(s)."
+                 if fixable else ""))
+    hosts = sorted({host for f in findings for host in f.hosts})
+    if hosts:
+        print("\nRevoke the exposed credentials at these hosts now; scrubbing the config does "
+              "not invalidate them:")
+        for host in hosts:
+            print(f"  {host}")
+    print()
+    print(REAUTH)
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="git-cred-scrub",
+        description="Find credentials embedded in git config and, with --fix, strip them. "
+                    "Checks remote and submodule URLs, insteadOf bases, Authorization extra "
+                    "headers, and the store credential helper in each repo (submodules and "
+                    "config.worktree included), in the global config, and in every file those "
+                    "include, and reports ~/.git-credentials. Never prints a secret.",
+        epilog="Exit status: 0 nothing found, 1 credentials remain (every finding in a dry "
+               "run; the report-only files after --fix), 2 error (a path that cannot be "
+               "scanned or a fix that failed).")
+    parser.add_argument("repos", nargs="*", metavar="REPO",
+                        help="a repository's top-level directory or git dir")
+    parser.add_argument("--scan", action="append", default=[], metavar="DIR",
+                        help="also check every repository at or below DIR (repeatable)")
+    parser.add_argument("--fix", action="store_true",
+                        help="strip userinfo and unset the offending keys via "
+                             "`git config --file`; ~/.git-credentials is never touched")
+    args = parser.parse_args(argv)
+    if not args.repos and not args.scan:
+        parser.error("give at least one REPO or --scan DIR")
+    return args
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    errors = []
+    configs = collect_configs(args.repos, args.scan, errors)
+    seen = {os.path.realpath(cfg) for cfg in configs}
+    sources, store_files = [], []
+    index = 0
+    while index < len(configs):
+        cfg = configs[index]
+        index += 1
+        try:
+            findings, actions, files, includes = scan_config(cfg)
+        except ScrubError as exc:
+            errors.append(str(exc))
+            continue
+        included = []
+        for path in includes:  # git skips a missing include, so this does too
+            real = os.path.realpath(path)
+            if real not in seen and path.is_file():
+                seen.add(real)
+                included.append(path)
+        configs[index:index] = included  # scanned right after the file that includes them
+        store_files += files
+        if findings:
+            if args.fix:
+                fix_config(cfg, actions, errors)
+            sources.append((cfg, findings))
+    for path in credential_files(store_files):
+        try:
+            finding = scan_credentials_file(path)
+        except ScrubError as exc:
+            errors.append(str(exc))
+            continue
+        if finding:
+            sources.append((path, [finding]))
+    report(sources, args.fix, len(configs), errors)
+    for error in errors:
+        print(f"git-cred-scrub: error: {error}", file=sys.stderr)
+    if errors:
+        return EX_ERROR
+    findings = [f for _, found in sources for f in found]
+    remaining = [f for f in findings if not args.fix or f.action is None or not f.action.ok]
+    return EX_FINDINGS if remaining else EX_CLEAN
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # a traceback could echo argv or a config value
+        print(f"git-cred-scrub: error: unexpected {type(exc).__name__}: {sanitize(str(exc))}",
+              file=sys.stderr)
+        sys.exit(EX_ERROR)

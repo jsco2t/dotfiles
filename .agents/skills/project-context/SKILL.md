@@ -1,6 +1,6 @@
 ---
 name: project-context
-description: Load and synthesize context from an engineering feature documentation folder created by new-eng-feature or eng-feature-followup. Use to orient a conversation or delegated task around project scope, design, status, decisions, tasks, and open items.
+description: Load and synthesize context from an engineering feature documentation folder (a root index.md linking plans/, tasks/, and related subfolders). Use to orient a conversation or delegated task around project scope, design, status, decisions, tasks, and open items.
 ---
 
 # Project Context

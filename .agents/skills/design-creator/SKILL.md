@@ -1,6 +1,6 @@
 ---
 name: design-creator
-description: Turn an engineering research or implementation plan into an approved architecture and design document with explicit trade-offs, codebase-grounded component design, test strategy, risks, and implementation sequence. Use after eng-plan-creator or when a feature needs architectural decisions before task planning. Supports direct requests and delegated/chained workflows.
+description: Turn an engineering research or implementation plan into an approved architecture and design document with explicit trade-offs, codebase-grounded component design, test strategy, risks, and implementation sequence. Use after an implementation plan or requirements document (such as a new-drd DRD) exists, or when a feature needs architectural decisions before task planning. Supports direct requests and delegated/chained workflows.
 ---
 
 # Engineering Design Creator
@@ -86,13 +86,15 @@ Create the design document using the required template. Validate that interfaces
 
 Present the design's key decisions, risks, and open items. Ask the direct user for approval unless approval was already supplied by the delegating caller.
 
-On approval only, update the research document:
+On approval only, update the research document. Find sections by their headings, not their numbers, and update only those that exist:
 
-- Section 2.2: chosen architecture.
-- Section 4.5: test strategy summary.
-- Section 6.1: approved implementation approach.
-- Section 6.3: link to the design as the first next step.
-- Add Section 7 using the approval block below.
+- Architecture or approach section: chosen architecture.
+- Testing section: test strategy summary.
+- Implementation approach section: approved implementation approach.
+- Next steps section: link to the design as the first next step.
+- Append the approval block below as a new, unnumbered section.
+
+Never overwrite, renumber, or restructure requirements, deliverable tables, coverage matrices, or a Definition of Done.
 
 If changes are requested, revise the design and repeat approval. Do not describe an unapproved design as approved.
 
@@ -236,7 +238,7 @@ After approval, append this block to the research document:
 ```markdown
 ---
 
-## 7. Design Document
+## Design Document
 
 **Design Date:** [Date]
 **Design Document:** [Relative path]

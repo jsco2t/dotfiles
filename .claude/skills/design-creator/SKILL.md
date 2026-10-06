@@ -1,6 +1,6 @@
 ---
 name: eng-design-creator
-description: Design companion to /eng-plan-creator. Reviews feature research, performs architectural analysis with user input on design choices, produces a design document with rationale, and updates the original research docs upon approval.
+description: Reviews a feature's implementation plan or requirements document (such as a /new-drd DRD), performs architectural analysis with user input on design choices, produces a design document with rationale, and links it from the source document upon approval.
 argument-hint: "<path to feature research document>"
 ---
 
@@ -172,17 +172,19 @@ Use the AskUserQuestion tool with options:
 **Only after the user approves the design**, update the original feature research document:
 
 1. Read the current feature research document
-2. Update the following sections to reflect design decisions:
-   - **Section 2.2 Architecture Considerations** - Add the chosen architectural approach
-   - **Section 4.5 Testing Considerations** - Replace with the detailed test strategy summary
-   - **Section 6.1 Implementation Approach** - Update with the approved design approach
-   - **Section 6.3 Suggested Next Steps** - Add "Review design document at [path]" as the first step
-3. Add a new section at the end of the research document:
+2. Find sections by their headings, not their numbers — source documents use different layouts. Update only sections that exist:
+   - **Architecture or approach section** (e.g. "Architecture Considerations", "Solution Approach") - Add the chosen architectural approach
+   - **Testing section** (e.g. "Testing Considerations") - Replace with the detailed test strategy summary
+   - **Implementation approach section** - Update with the approved design approach
+   - **Next steps section** - Add "Review design document at [path]" as the first step
+
+   Never overwrite, renumber, or restructure requirements, deliverable tables, coverage matrices, or a Definition of Done.
+3. Add a new, unnumbered section at the end of the research document:
 
 ```markdown
 ---
 
-## 7. Design Document
+## Design Document
 
 **Design Date:** [Date]
 **Design Document:** [Relative path to design document]

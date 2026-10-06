@@ -1,6 +1,6 @@
 ---
 name: new-project
-description: "Create a new product/project with a collaborative PRD (Product Requirements Document). Sets up a structured documentation folder with PRD, user scenarios, knowledge base, supplementary documents, and a features folder for future /new-eng-feature runs. Interactively researches and questions the user to build a comprehensive product specification."
+description: "Create a new product/project with a collaborative PRD (Product Requirements Document). Sets up a structured documentation folder with PRD, user scenarios, knowledge base, supplementary documents, and a features folder for later feature planning (/new-quick-feature, /new-drd). Interactively researches and questions the user to build a comprehensive product specification."
 argument-hint: "<output directory> <initial context: description, URLs, file paths, or free-text>"
 ---
 
@@ -13,9 +13,9 @@ Read its usage doc once, then use it: `~/.local/bin/atlassian-toolkit/README.md`
 read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira ...`
 (issues, search, projects), `confluence ...` (pages, search), `atlassian search "..."` (both).
 
-You are creating a new product/project workspace with a comprehensive Product Requirements Document (PRD). Unlike `/new-eng-feature` which produces engineering-level implementation plans, this skill operates at the **product level** — defining what to build, for whom, why, and what success looks like.
+You are creating a new product/project workspace with a comprehensive Product Requirements Document (PRD). Unlike the feature-planning skills (`/new-quick-feature`, `/new-drd`), which work at the engineering or delivery level, this skill operates at the **product level** — defining what to build, for whom, why, and what success looks like.
 
-Your primary output is a PRD. Your secondary outputs are user-scenario verifications, supplementary documents, and a knowledge base seed. The `features/` folder you create is a container for future `/new-eng-feature` runs — you do NOT populate it.
+Your primary output is a PRD. Your secondary outputs are user-scenario verifications, supplementary documents, and a knowledge base seed. The `features/` folder you create is a container for later feature planning (`/new-quick-feature`, `/new-drd`) — you do NOT populate it.
 
 **This is a collaborative process.** The user provides initial context, and you research, ask informed questions, and iterate with them until the PRD is comprehensive. Do not rubber-stamp thin context into a document — your questions and research are the value.
 
@@ -78,7 +78,7 @@ Create the following directory tree inside the output directory:
 | -------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------- |
 | [`prd.md`](prd.md)                           | Product Requirements Document — the product specification                     | —                                                  |
 | [`documents/`](documents/index.md)           | Supplementary documents, research, and reference materials                    | [documents/index.md](documents/index.md)           |
-| [`features/`](features/index.md)             | Engineering feature plans created by `/new-eng-feature`                        | [features/index.md](features/index.md)             |
+| [`features/`](features/index.md)             | Feature plans (`/new-quick-feature`, `/new-drd`)                              | [features/index.md](features/index.md)             |
 | [`kb/`](kb/index.md)                         | Knowledge base — domain knowledge, glossaries, and reference docs             | [kb/index.md](kb/index.md)                         |
 | [`verifications/`](verifications/index.md)   | User scenarios — acceptance-level verification of product behavior            | [verifications/index.md](verifications/index.md)   |
 ```
@@ -107,12 +107,12 @@ Create the following directory tree inside the output directory:
 
 ---
 
-This folder contains engineering feature plans created by `/new-eng-feature` runs. Each subdirectory is a self-contained feature documentation tree with its own index.
+This folder contains feature plans. Each subdirectory is a self-contained feature documentation tree with its own index.
 
 | Feature | Slug | Jira | Status | Index |
 | ------- | ---- | ---- | ------ | ----- |
 
-_No features planned yet. Use `/new-eng-feature <feature-directory> <spec links>` to create one._
+_No features planned yet. Use `/new-quick-feature <this folder> <spec links or description>` for a small feature, or `/new-drd <feature-directory>/drd.md <spec links>` for a larger unit of work._
 ```
 
 ### Step 0.4: Inform the User
@@ -644,7 +644,7 @@ Add a summary section to the root `index.md`:
 
 1. Review and approve the PRD
 2. Resolve open questions in PRD Section 12
-3. Use `/new-eng-feature <features/feature-slug> <spec links>` to begin engineering planning for individual features
+3. Plan individual features inside `features/`: `/new-quick-feature` for small features, `/new-drd` for larger units of work
 ```
 
 ### Step 7.3: Verify All Links
@@ -663,7 +663,7 @@ After all phases are complete, present a final summary:
 2. Highlight the number of user scenarios and their coverage of Must Have requirements
 3. Note any open questions that need resolution
 4. List the knowledge base entries created
-5. Suggest next steps (typically: review PRD, resolve open questions, then `/new-eng-feature` for individual features)
+5. Suggest next steps (typically: review PRD, resolve open questions, then `/new-quick-feature` or `/new-drd` for individual features)
 
 ---
 
@@ -686,13 +686,13 @@ After all phases are complete, present a final summary:
 
 ## Important Guidelines
 
-1. **This is product-level, not engineering-level.** The PRD describes WHAT to build and WHY. HOW to build it is the domain of `/new-eng-feature`, which the user will run inside `features/` later. Do not include codebase impact analysis, file-level changes, or implementation details in the PRD.
+1. **This is product-level, not engineering-level.** The PRD describes WHAT to build and WHY. HOW to build it is the domain of the feature-planning skills (`/new-quick-feature`, `/new-drd`), which the user will run inside `features/` later. Do not include codebase impact analysis, file-level changes, or implementation details in the PRD.
 
 2. **Q&A is the primary value.** A PRD generated from thin context without informed questions is worse than no PRD. Your research should surface questions the user hasn't thought of. Every question should demonstrate that you've done your homework.
 
 3. **User scenarios are product-level, not test-level.** Verifications describe what a user should be able to do, not how a developer should test it. No shell commands, no API calls, no test fixtures.
 
-4. **The `features/` folder is a container.** Do not populate it. Its index explicitly states it will be filled by `/new-eng-feature` runs. This is the bridge between product planning and engineering planning.
+4. **The `features/` folder is a container.** Do not populate it. Its index explicitly states it will be filled by later feature planning. This is the bridge between product planning and engineering planning.
 
 5. **Timestamps in MST.** All timestamps in index files must use ISO 8601 format with MST offset: `YYYY-MM-DDTHH:MM:SS-06:00` (or `-07:00` during MDT). Use the current time when creating each document.
 

@@ -1,12 +1,12 @@
 ---
 name: project-context
-description: Load engineering project context from a /new-eng-feature documentation folder. Reads the root index, child indexes, implementation plan, design document, follow-ups, and task overview to build a full understanding of the project. Use when starting work on a feature that has an existing engineering documentation folder, or when you need to orient yourself before a task.
+description: Load engineering project context from a feature documentation folder (a root index.md linking plans/, tasks/, and related subfolders). Reads the root index, child indexes, implementation plan, design document, follow-ups, and task overview to build a full understanding of the project. Use when starting work on a feature that has an existing engineering documentation folder, or when you need to orient yourself before a task.
 argument-hint: "<path to root index.md> [optional focus directive or additional context]"
 ---
 
 # Project Context Loader
 
-You are loading engineering project context from a documentation folder created by the `/new-eng-feature` pipeline (or `/eng-feature-followup`). Your job is to **read and internalize** the project's plans, design, status, and open items so that subsequent work in this conversation is fully informed.
+You are loading engineering project context from a feature documentation folder — a root `index.md` that links subfolders such as `plans/`, `tasks/`, `follow-ups/`, and `verifications/`. Your job is to **read and internalize** the project's plans, design, status, and open items so that subsequent work in this conversation is fully informed.
 
 This is a context-loading skill, not a document-producing skill. You read, synthesize, and present a brief orientation — then you're ready for whatever the user asks next.
 
@@ -161,7 +161,7 @@ Structure the summary as:
 [Bullet list of the highest-priority unresolved items — blockers first, then questions, then risks]
 ```
 
-Omit sections that don't apply to the project's current state. An early-stage project that only ran `/eng-plan-creator` won't have tasks, follow-ups, or a design document — adapt the summary to what actually exists rather than rendering empty sections.
+Omit sections that don't apply to the project's current state. An early-stage project that only has an implementation plan won't have tasks, follow-ups, or a design document — adapt the summary to what actually exists rather than rendering empty sections.
 
 If a focus directive was provided, add a focused section:
 
@@ -176,7 +176,7 @@ If a focus directive was provided, add a focused section:
 
 1. **Don't hardcode document names.** The pipeline creates documents with predictable-but-not-guaranteed names. Always discover paths from the index files. If an index references `implementation-plan.md`, read that. If it references `plan-v2.md`, read that instead.
 
-2. **Graceful handling of missing content.** Projects at different stages will have different documents. A project that only ran `/eng-plan-creator` will have a plan but no design, tasks, or verifications. Note what exists and what doesn't — don't error on absence.
+2. **Graceful handling of missing content.** Projects at different stages will have different documents. A project at the planning stage will have a plan but no design, tasks, or verifications. Note what exists and what doesn't — don't error on absence.
 
 3. **Don't produce a new document.** This skill loads context into the conversation. The summary goes in your response to the user, not into a file.
 

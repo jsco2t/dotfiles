@@ -17,8 +17,9 @@ and success; leave code and file-level design to engineering planning.
 Create `index.md`, `prd.md`, and child folders `documents/`, `features/`, `kb/`,
 and `verifications/`, each with `index.md`. Derive a stable project slug.
 Read [references/templates.md](references/templates.md) for index and artifact
-formats. Leave `features/` empty apart from its index; it is reserved for
-[new-eng-feature](~/.agents/skills/new-eng-feature/SKILL.md).
+formats. Leave `features/` empty apart from its index; it is reserved for later feature
+planning with [new-quick-feature](~/.agents/skills/new-quick-feature/SKILL.md) or
+[new-drd](~/.agents/skills/new-drd/SKILL.md).
 
 Read supplied files and linked requirements. Use
 [atlassian-toolkit](~/.agents/skills/atlassian-toolkit/SKILL.md) for Jira/Confluence

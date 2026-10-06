@@ -1,6 +1,6 @@
 ---
 name: eng-task-planning
-description: Create an implementation task plan from a high level engineering plan (created by /eng-plan-creator) as well as an engineering design/architecture document (created by /eng-design-creator). Reviews research docs, Jira/Confluence, and source code to produce an ordered list of tasks (epic structure) with time estimates and parallel work optimization.
+description: Create an implementation task plan from a high level engineering plan or requirements document (such as a /new-drd DRD) as well as an engineering design/architecture document (created by /eng-design-creator). Reviews research docs, Jira/Confluence, and source code to produce an ordered list of tasks (epic structure) with time estimates and parallel work optimization.
 argument-hint: "<path to feature research document or Jira/Confluence URLs>"
 ---
 

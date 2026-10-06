@@ -15,7 +15,7 @@ read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira
 
 This skill represents a simplified feature implementation pipeline. You are creating a structured plan for a simple feature task. You research the codebase to understand the problem space, you research the requested feature, you produce an implementation plan, and break the work into tasks that are **test-forward**.
 
-This skill produces a focused, lightweight documentation set: an index, a plan, and task files. Unlike `/new-eng-feature`, there is no design document, verification suite, or multi-skill pipeline. The goal here is to run through a simplified pipeline for small feature requests, in this case the plan IS the design.
+This skill produces a focused, lightweight documentation set: an index, a plan, and task files. There is no design document, verification suite, or multi-skill pipeline. The goal here is to run through a simplified pipeline for small feature requests, in this case the plan IS the design.
 
 ## Input
 

@@ -1,6 +1,6 @@
 ---
 name: new-quick-feature
-description: Research a small feature and create a focused implementation plan with indexed, test-forward tasks. Use when a full new-eng-feature design and verification pipeline would be excessive, including direct requests and delegated planning with pre-supplied paths or decisions.
+description: Research a small feature and create a focused implementation plan with indexed, test-forward tasks. Use for small, well-bounded features (larger work starts with new-drd), including direct requests and delegated planning with pre-supplied paths or decisions.
 ---
 
 # New Quick Feature
@@ -15,7 +15,7 @@ Require the parent directory and feature context. Ask only for missing or materi
 
 ## Requirements and Skill Boundaries
 
-- Use this lightweight workflow only for small, well-bounded features. For work needing explicit architecture decisions, a broad test strategy, or manual verification planning, recommend `new-eng-feature`.
+- Use this lightweight workflow only for small, well-bounded features. For work needing explicit architecture decisions, a broad test strategy, or manual verification planning, recommend `new-drd`, followed by `design-creator` or `feature-verification-creator` where needed.
 - Produce only `index.md`, `plan.md`, `tasks/index.md`, task files, and the parent features index update. Do not create research, review, follow-up, verification, or separate design documents; the implementation plan is the design.
 - Ground all code claims in current file paths and line numbers. Do not guess implementation details.
 - A concrete Test Gap Assessment and explicit test tasks are mandatory.
@@ -253,4 +253,4 @@ Report completion with:
 - task count, effort, dependencies, and critical path;
 - open questions and API/proto risk.
 
-Report problems under `Problems`, each with `Issue`, `Evidence`, `Impact`, and `Next action`. An indeterminate implementation, ambiguous output location, oversized scope that needs `new-eng-feature`, or required breaking API/proto change blocks a definitive quick plan. Missing external enrichment is non-blocking when local evidence and supplied context are sufficient.
+Report problems under `Problems`, each with `Issue`, `Evidence`, `Impact`, and `Next action`. An indeterminate implementation, ambiguous output location, oversized scope that needs `new-drd`, or required breaking API/proto change blocks a definitive quick plan. Missing external enrichment is non-blocking when local evidence and supplied context are sufficient.

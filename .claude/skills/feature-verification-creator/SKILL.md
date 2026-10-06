@@ -648,7 +648,7 @@ If any gaps exist, either add tests or document why the requirement cannot be ve
 
 #### Step 4.2: Update Parent Index (if present)
 
-If the output directory sits inside a `/new-eng-feature`-style documentation tree, the parent scaffold will contain an `index.md` that must stay in sync with what you just wrote. Check for and update these:
+If the output directory sits inside a feature documentation tree (a root `index.md` linking `plans/`, `tasks/`, `verifications/`, and similar subfolders), the parent scaffold will contain an `index.md` that must stay in sync with what you just wrote. Check for and update these:
 
 1. **`<output-directory>/index.md`** (the verifications folder index) — if it exists, refresh it to list:
    - `README.md` (the suite overview you just wrote)
@@ -657,9 +657,9 @@ If the output directory sits inside a `/new-eng-feature`-style documentation tre
 
 2. **`<output-directory>/../index.md`** (the feature root index) — if it exists and has a row for verifications, update that row's status/link if needed. Do not rewrite unrelated rows.
 
-If neither index exists, the skill was invoked standalone outside the orchestrator — skip this step and note it in the final summary so the user knows no parent indexes were touched.
+If neither index exists, the skill was invoked outside a feature documentation tree — skip this step and note it in the final summary so the user knows no parent indexes were touched.
 
-**When the orchestrator (`/new-eng-feature` or `/eng-feature-followup`) invokes this skill, it performs its own post-skill index reconciliation. Do not duplicate that work — a simple refresh of `<output-directory>/index.md` is sufficient; the orchestrator will handle the root.**
+**If the invoking skill or user says it will reconcile the parent indexes itself, do not duplicate that work — a simple refresh of `<output-directory>/index.md` is sufficient.**
 
 #### Step 4.3: Present Summary to User
 

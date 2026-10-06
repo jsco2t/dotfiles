@@ -20,7 +20,7 @@ Use established formats when creating the corresponding artifact. Replace exampl
 | -------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------- |
 | [`prd.md`](prd.md)                           | Product Requirements Document — the product specification                     | —                                                  |
 | [`documents/`](documents/index.md)           | Supplementary documents, research, and reference materials                    | [documents/index.md](documents/index.md)           |
-| [`features/`](features/index.md)             | Engineering feature plans created by `new-eng-feature`                        | [features/index.md](features/index.md)             |
+| [`features/`](features/index.md)             | Feature plans (`new-quick-feature`, `new-drd`)                                | [features/index.md](features/index.md)             |
 | [`kb/`](kb/index.md)                         | Knowledge base — domain knowledge, glossaries, and reference docs             | [kb/index.md](kb/index.md)                         |
 | [`verifications/`](verifications/index.md)   | User scenarios — acceptance-level verification of product behavior            | [verifications/index.md](verifications/index.md)   |
 ```
@@ -49,12 +49,12 @@ Use established formats when creating the corresponding artifact. Replace exampl
 
 ---
 
-This folder contains engineering feature plans created by `new-eng-feature` runs. Each subdirectory is a self-contained feature documentation tree with its own index.
+This folder contains feature plans. Each subdirectory is a self-contained feature documentation tree with its own index.
 
 | Feature | Slug | Jira | Status | Index |
 | ------- | ---- | ---- | ------ | ----- |
 
-_No features planned yet. Use `new-eng-feature <feature-directory> <spec links>` to create one._
+_No features planned yet. Use `new-quick-feature <this folder> <spec links or description>` for a small feature, or `new-drd <feature-directory>/drd.md <spec links>` for a larger unit of work._
 ```
 
 ## PRD
@@ -356,5 +356,5 @@ _No features planned yet. Use `new-eng-feature <feature-directory> <spec links>`
 
 1. Review and approve the PRD
 2. Resolve open questions in PRD Section 12
-3. Use `new-eng-feature <features/feature-slug> <spec links>` to begin engineering planning for individual features
+3. Plan individual features inside `features/`: `new-quick-feature` for small features, `new-drd` for larger units of work
 ```

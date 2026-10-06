@@ -15,7 +15,7 @@ read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira
 
 You are creating a structured bug fix plan for a reported issue. You research the codebase to understand the root cause, produce a fix plan, and break the work into tasks that are **test-forward** — every bug is evidence that automated validation was insufficient, and the fix must close that gap.
 
-This skill produces a focused, lightweight documentation set: an index, a plan, and task files. Unlike `/new-eng-feature`, there is no design document, verification suite, or multi-skill pipeline. Bugs are smaller scope — the plan IS the design.
+This skill produces a focused, lightweight documentation set: an index, a plan, and task files. There is no design document, verification suite, or multi-skill pipeline. Bugs are smaller scope — the plan IS the design.
 
 ## Input
 

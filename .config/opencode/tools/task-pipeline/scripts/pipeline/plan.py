@@ -16,7 +16,9 @@ from .common import (TPError, Workflow, agent_minutes, catalog, limit, load_json
 BUILTIN_TASK_CHECKS = {"docs": "every relative link resolves, and every code citation is written repo-relative "
                                "(`path/to/file.go:12`, `:12-20`) and points at a real line (a citation whose lines "
                                "do not name what its sentence claims is flagged for the manager's fact check)"}
-BUILTIN_FINAL_CHECKS = {"docs-all": "links, citations, and index reachability across every write workspace"}
+BUILTIN_FINAL_CHECKS = {"docs-all": "links and citations across every write workspace; an unlinked document "
+                                    "warns against a README.md (an entry page, not a nav index) and blocks only "
+                                    "against a deliberate index.md"}
 REVIEW_MINUTES = 8
 
 
@@ -339,8 +341,15 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
     budget = scope.get("budget_minutes")
     if budget:
         left = budget - (agent_minutes(wf, state) if wf else 0.0)
-        total = sum(lane_minutes(t, scope) for t in tasks.values())
-        span, chain = critical_path(tasks, scope)
+        # The budget gate sizes REMAINING work: accepted tasks' minutes are already
+        # inside agent_minutes, so counting their full estimates in the critical
+        # path again would double-count them and block every amendment after a
+        # mid-plan burn.
+        done = ({tid for tid, ts in (state or {}).get("tasks", {}).items()
+                 if ts.get("status") in ("accepted", "skipped")} if state else set())
+        pending = {tid: t for tid, t in tasks.items() if tid not in done}
+        total = sum(lane_minutes(t, scope) for t in pending.values())
+        span, chain = critical_path(pending, scope)
         lanes = limit("max_in_flight")
         work = math.ceil(total / lanes)
         sessions, tail = review_tail(plan, scope)
@@ -542,6 +551,10 @@ def cmd_amend(wf: Workflow, reason: str) -> str:
         snap.write_text(json.dumps({"tasks": plan["tasks"]}, indent=1))
     state["plan_approved_sha"] = state["plan_submitted_sha"] = sha_file(wf.plan_json)
     state["conventions_sha"] = conventions_shas(plan, scope, wf.root)
+    # An amendment may remove a review batch: prune its sessions so `tp next`
+    # never points at a session that can no longer dispatch.
+    from . import review as review_mod  # reuse the same session builder as approve
+    state["reviews"] = review_mod.new_reviews(plan, scope, state.get("reviews", {}))
     wf.save(state)
     wf.decision("plan amend", reason)
     wf.event("plan_amend", reason=reason)

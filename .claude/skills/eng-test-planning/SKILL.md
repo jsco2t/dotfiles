@@ -1,5 +1,5 @@
 ---
-name: feature-test-planning
+name: eng-test-planning
 description: Analyze an engineering implementation planning document and produce a detailed test plan section. Reviews the feature spec, studies existing test patterns in the codebase, and appends a test plan with specific test cases, rationale, and implementation guidance — written from the perspective of an expert test developer.
 argument-hint: "<path to engineering planning document>"
 ---

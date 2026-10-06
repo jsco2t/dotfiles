@@ -139,6 +139,50 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class ReachabilityTests(unittest.TestCase):
+    """Reachability from an index is a docs-workspace rule, not a repo rule: a code repo's
+    README links to what a reader needs and legitimately never to every internal note, ADR,
+    or sub-README. Against a README.md, orphans warn; only a deliberate index.md blocks."""
+
+    def _tree(self) -> tuple:
+        import tempfile
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root = Path(td.name)
+        (root / "README.md").write_text("# A code repo\n\nJust an entry page, not a nav index.\n")
+        (root / "notes" / "adr.md").parent.mkdir(parents=True)
+        (root / "notes" / "adr.md").write_text("# ADR: an internal note no README links\n")
+        return root
+
+    def test_against_a_readme_orphans_warn_instead_of_erroring(self) -> None:
+        root = self._tree()
+        errors, warnings, _ = check([root], {}, root / "README.md", root_warn=True)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("adr.md", warnings[0])
+        self.assertIn("not reachable", warnings[0])
+
+    def test_against_a_deliberate_index_md_orphans_still_error(self) -> None:
+        root = self._tree()
+        (root / "index.md").write_text("# The nav index\n\n- [README](README.md)\n")
+        errors, warnings, _ = check([root], {}, root / "index.md")
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("adr.md", errors[0])
+        self.assertIn("not reachable from index.md", errors[0])
+
+    def test_root_warn_does_not_soften_broken_links(self) -> None:
+        root = self._tree()
+        (root / "notes" / "adr.md").unlink()
+        (root / "notes" / "rmdir" / "keep.txt").parent.mkdir(parents=True)
+        (root / "notes" / "rmdir" / "keep.txt").write_text("keep the dir alive\n")
+        (root / "README.md").write_text("# A code repo\n\n- [gone](missing.md)\n")
+        errors, warnings, _ = check([root], {}, root / "README.md", root_warn=True)
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("broken link", errors[0])
+
+
 class BoundsTest(unittest.TestCase):
     """supported() and _enclosing() take direct callers' values without raising:
     check() guards the inputs today, but the helpers must stand alone."""

@@ -54,6 +54,8 @@
       "Edit(~/Developer/sources/personal/notebook/projects/fuzzball/**)",
       "Edit(~/Developer/sources/personal/notebook/**)",
       "Bash(python3 ~/.claude/skills/task-pipeline/scripts/tp.py:*)",
+      "Read(~/Developer/sources/personal/projects/**)",
+      "Edit(~/Developer/sources/personal/projects/**)",
       "Bash(jira search:*)",
       "Bash(jira issue get:*)",
       "Bash(jira issue links:*)",

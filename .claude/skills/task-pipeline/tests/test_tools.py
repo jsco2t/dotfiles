@@ -283,5 +283,106 @@ class DocsCheckTest(unittest.TestCase):
         self.run_check("```\n[x](nope.md) `calc/nope.go:1`\n```\n")
 
 
+sys.path.insert(0, str(SKILL / "scripts"))
+from pipeline import docscheck, run  # noqa: E402
+
+
+class ReportOnlyTest(unittest.TestCase):
+    """docscheck.check(report_only=...): only the given documents are judged and counted, every
+    document still feeds the link graph, and a link to a removed document is reported wherever
+    it is."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.kb = self.h.kb
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def write(self, rel: str, text: str) -> None:
+        p = self.kb / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+
+    def test_only_the_given_docs_are_judged_and_counted(self) -> None:
+        self.write("index.md", "# KB\n\n- [A](a.md)\n")
+        self.write("a.md", "# A\n\nSee [nope](nope.md).\n")
+        self.write("b.md", "# B\n\nSee [gone](gone.md).\n")      # unjudged, unreachable, broken
+        a = (self.kb / "a.md").resolve()
+        errors, warnings, stats = docscheck.check([self.kb], {}, self.kb / "index.md", report_only={a})
+        self.assertEqual([e for e in errors if "nope.md" in e], errors, errors)   # nothing about b.md
+        self.assertEqual(len(errors), 1)          # a.md is reached through the unjudged index
+        self.assertEqual(stats["files"], 1)
+        self.assertEqual(stats["links"], 1)
+
+    def test_a_link_to_a_removed_doc_is_reported_from_an_untouched_doc(self) -> None:
+        self.write("guide.md", "# Guide\n\nSee [old](old.md).\n")
+        removed = {(self.kb / "old.md").resolve()}
+        errors, _, _ = docscheck.check([self.kb], {}, None, report_only=set(), removed=removed)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("guide.md:3: broken link old.md", errors[0])
+
+
+class ChangedMarkdownTest(unittest.TestCase):
+    """run._changed_md: what a git workspace gained, changed and removed since a baseline."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.repo = self.h.kb
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def write(self, rel: str, text: str = "# Doc\n") -> None:
+        p = self.repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+
+    def commit(self) -> str:
+        if not (self.repo / ".git").exists():
+            git(self.repo, "init", "-q", "-b", "main")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "c")
+        return git(self.repo, "rev-parse", "HEAD").strip()
+
+    def rel(self, paths, root=None) -> set:
+        return {str(p.relative_to((root or self.repo).resolve())) for p in paths}
+
+    def test_names_git_would_quote_are_read_exactly(self) -> None:
+        self.write("spaced name.md")
+        base = self.commit()
+        self.write("spaced name.md", "# Changed\n")
+        self.write("docs/café.md")                       # untracked, non-ASCII
+        changed, removed = run._changed_md(self.repo, base)
+        self.assertEqual(self.rel(changed), {"spaced name.md", "docs/café.md"})
+        self.assertEqual(removed, set())
+
+    def test_a_workspace_in_a_subdirectory_reads_its_own_paths(self) -> None:
+        self.write("site/old.md")
+        self.write("other.md")
+        base = self.commit()
+        self.write("site/old.md", "# Changed\n")
+        self.write("other.md", "# Changed\n")            # outside the workspace
+        site = self.repo / "site"
+        changed, _ = run._changed_md(site, base)
+        self.assertEqual(self.rel(changed, site), {"old.md"})
+
+    def test_deletions_and_rename_sources_are_removed(self) -> None:
+        self.write("a.md")
+        self.write("b.md")
+        base = self.commit()
+        (self.repo / "a.md").unlink()
+        git(self.repo, "mv", "b.md", "c.md")
+        changed, removed = run._changed_md(self.repo, base)
+        self.assertEqual(self.rel(changed), {"c.md"})
+        self.assertEqual(self.rel(removed), {"a.md", "b.md"})
+
+    def test_no_answer_from_git_means_judge_every_file(self) -> None:
+        self.write("a.md")
+        self.commit()
+        self.assertEqual(run._changed_md(self.repo, "0" * 40), (None, set()))
+        self.assertEqual(run._changed_md(self.repo, None), (None, set()))
+
+
 if __name__ == "__main__":
     unittest.main()

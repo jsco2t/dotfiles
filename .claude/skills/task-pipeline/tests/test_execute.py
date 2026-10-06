@@ -7,7 +7,7 @@ import re
 import unittest
 from datetime import datetime, timedelta
 
-from harness import Harness
+from harness import Harness, git
 
 REVIEWED = dict(review="per-task", participants=[
     {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},
@@ -915,6 +915,94 @@ class FinalTest(unittest.TestCase):
         out = self.h.tp("report").out
         self.assertIn("planning", out)
         self.assertIn("T01", out)
+
+
+GOOD_DOC = "# Old\n\n`Add` returns the sum of two ints (`calc/calc.go:5`).\n"
+
+
+class FinalDocsInGitWorkspaceTest(unittest.TestCase):
+    """In a write workspace under git, docs-all judges only the Markdown the workflow added or
+    changed since approval, and only index.md is an index. A code repository's README links what
+    its authors chose, and a run is not answerable for documents it never touched."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        kb = self.h.kb
+        (kb / "README.md").write_text("# Calc\n\nA calculator. Read the code.\n")
+        (kb / "docs").mkdir()
+        (kb / "docs" / "old.md").write_text("# Old\n\nNothing links here.\n")
+        (kb / "docs" / "stale.md").write_text("# Stale\n\nSee [gone](gone.md).\n")
+        self.commit("init")
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def commit(self, msg: str) -> None:
+        if not (self.h.kb / ".git").exists():
+            git(self.h.kb, "init", "-q", "-b", "main")
+        git(self.h.kb, "add", "-A")
+        git(self.h.kb, "commit", "-q", "-m", msg)
+
+    def run_one(self, rel: str, text: str) -> None:
+        h = self.h
+        h.approved(h.plan([h.task("T01", rel, checks=[])]))
+        h.tp("dispatch", "T01")
+        p = h.kb / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        h.result("T01", "author", changed=[rel])
+        h.tp("record", "T01")
+        h.tp("accept", "T01", "--note", "ok")
+
+    def test_a_readme_that_links_nothing_is_not_an_index(self) -> None:
+        self.run_one("docs/old.md", GOOD_DOC)
+        self.h.tp("final")
+        self.assertEqual(self.h.state()["phase"], "DONE")
+
+    def test_docs_the_run_did_not_touch_are_not_judged(self) -> None:
+        # docs/stale.md has carried a broken link, and no index has reached it, since before
+        # approval. The run changes only docs/old.md, which the unchanged index links: the link
+        # graph must still include the index although the run did not touch it.
+        (self.h.kb / "index.md").write_text("# KB\n\n- [Old](docs/old.md)\n")
+        self.commit("index")
+        self.run_one("docs/old.md", GOOD_DOC)
+        self.h.tp("final")
+        self.assertEqual(self.h.state()["phase"], "DONE")
+
+    def test_a_broken_link_the_run_adds_fails(self) -> None:
+        self.run_one("docs/old.md", "# Old\n\nSee [missing](missing.md).\n")
+        res = self.h.tp("final", expect=2)
+        self.assertIn("broken link missing.md", res.text)
+        self.assertNotIn("stale.md", res.text)
+        self.assertNotEqual(self.h.state()["phase"], "DONE")
+
+    def test_an_article_the_index_does_not_reach_fails(self) -> None:
+        (self.h.kb / "index.md").write_text("# KB\n\n- [Old](docs/old.md)\n")
+        self.commit("index")
+        self.run_one("docs/new.md", GOOD_DOC)
+        res = self.h.tp("final", expect=2)
+        self.assertIn("new.md is not reachable from index.md", res.text)
+        self.assertNotIn("stale.md", res.text)
+
+    def test_a_changed_doc_git_would_quote_is_still_judged(self) -> None:
+        self.run_one("docs/café.md", "# Café\n\nSee [missing](missing.md).\n")
+        res = self.h.tp("final", expect=2)
+        self.assertIn("café.md:3: broken link missing.md", res.text)
+
+    def test_a_link_to_a_doc_the_run_deleted_is_reported(self) -> None:
+        # docs/guide.md is untouched by the run, but the run deletes the document it links.
+        (self.h.kb / "docs" / "guide.md").write_text("# Guide\n\nSee [old](old.md).\n")
+        self.commit("guide")
+        h = self.h
+        h.approved(h.plan([h.task("T01", "docs/old.md", checks=[])]))
+        h.tp("dispatch", "T01")
+        (h.kb / "docs" / "old.md").unlink()
+        h.result("T01", "author", changed=["docs/old.md"])
+        h.tp("record", "T01")
+        h.tp("accept", "T01", "--note", "ok")
+        res = h.tp("final", expect=2)
+        self.assertIn("guide.md:3: broken link old.md", res.text)
+        self.assertNotIn("stale.md", res.text)
 
 
 class StatusTest(unittest.TestCase):

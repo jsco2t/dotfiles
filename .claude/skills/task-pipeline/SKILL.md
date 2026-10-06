@@ -128,3 +128,8 @@ Committing and pushing are the human's call.
   `tp exception --task <id>` and re-dispatch after resolving.
 - Unattended runs need no permission prompts: keep the workflow and write workspaces
   sandbox-writable, and allow `Bash(python3 ~/.claude/skills/task-pipeline/scripts/tp.py:*)`.
+
+### Coding Related Tasks
+
+- **Always** be test forward with code changes
+- **Always** review code before considering a unit of work as done. This is true even if smaller reviews happened during the coding tasks. If you are not sure which reviewer to use: Use the skill `reviewomatic

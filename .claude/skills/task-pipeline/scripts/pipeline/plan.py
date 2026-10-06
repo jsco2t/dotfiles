@@ -14,7 +14,8 @@ from .common import TPError, Workflow, limit, load_json, minutes_since, now_iso,
 BUILTIN_TASK_CHECKS = {"docs": "every relative link resolves, and every code citation is written repo-relative "
                                "(`path/to/file.go:12`, `:12-20`) and points at a real line (a citation whose lines "
                                "do not name what its sentence claims is flagged for the manager's fact check)"}
-BUILTIN_FINAL_CHECKS = {"docs-all": "links, citations, and index reachability across every write workspace"}
+BUILTIN_FINAL_CHECKS = {"docs-all": "links, citations, and reachability from index.md for the Markdown each write "
+                                    "workspace gained or changed since approval (every file when it is not under git)"}
 REVIEW_MINUTES = 8
 
 

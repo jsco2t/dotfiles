@@ -35,6 +35,14 @@ def write_baseline(scope: Dict[str, Any]) -> Dict[str, str]:
 
 def new_reviews(plan: Dict[str, Any], scope: Dict[str, Any], existing: Dict[str, Any]) -> Dict[str, Any]:
     sessions = {}
+    batch_ids = {b["id"] for b in planmod.review_batches(plan, scope)}
+    for sid, s in existing.items():
+        # A plan amendment can remove a review batch; its sessions could never run
+        # (dispatch validates the batch against the plan), so prune them instead of
+        # leaving actions that can never dispatch.
+        if s.get("batch") not in batch_ids:
+            continue
+        sessions[sid] = s
     for b in planmod.review_batches(plan, scope):
         for reviewer in scopemod.final_reviewers(scope):
             sid = f"{b['id']}/{reviewer}"

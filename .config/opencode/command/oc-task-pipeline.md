@@ -38,8 +38,8 @@ Every `task` call is synchronous: when it returns, that agent is done.
 
 The first word selects the mode. Words after it are positional arguments.
 
-- **`resume`** — arguments: the workflow directory ($1). Skip to *Resume* at the end.
-- **`halt`** (or `hault`) — no arguments needed. Skip to *Halt* at the end.
+- **`resume`** — arguments: the workflow directory ($1). Skip to _Resume_ at the end.
+- **`halt`** (or `hault`) — no arguments needed. Skip to _Halt_ at the end.
 - **`status`** — arguments: the workflow directory ($1). Run `tp status`, present it answer-first,
   and stop.
 - **Anything else** — this is a new pipeline:
@@ -54,11 +54,8 @@ Then run the manager loop below from Stage 1.
 1. **Only the human decides** scope, the research budget, plan approval, and anything off the
    plan. Ask with the `question` tool; record their words verbatim (`--answer` / `--feedback`).
 2. **At most 3 subagents in flight**, only agents confirmed in scope.json (script-enforced).
-   Dispatch them with the `task` tool, one call per agent, naming the subagent by its roster name
-   (your deployed OpenCode agents: `codebase-researcher`, `domain-researcher`,
-   `impact-researcher`, `test-researcher`, `code-author`, `test-author`, `doc-author`,
-   `education-author`, `kb-author`, `planning-author`, `tutorial-author`, the reviewers, and the
-   liaisons). Never ad-hoc agents outside the roster.
+   Dispatch them with the `task` tool, one call per agent, naming the subagent by its roster
+   name (`tp roster suggest` lists them). Never ad-hoc agents outside the roster.
 3. **Structured files, not messages.** Agents read a brief file and write JSON; their reply is
    one line. Read only the part you need: `tp show <id> --part …`, `tp schema <name>`.
 4. **The approved plan is the contract.** Outside it: `tp note "<one line>"`; blocking:
@@ -93,8 +90,7 @@ questions will not fit:
 
 ## Stage 1 — Scope and research budget (one round with the human)
 
-1. Save the request verbatim to a file, then run `python3
-   ~/.config/opencode/tools/task-pipeline/scripts/tp.py init <location> --title "<title>"
+1. Save the request verbatim to a file, then run `tp init <location> --title "<title>"
    --request-file <file> [--budget <minutes>]`. It creates the workflow's own
    `<location>/<date>-<slug>/` folder and prints it: that is `-w` from then on.
 2. **Size it yourself first**, in ten minutes or less and with no agents: `tp survey <repo> --name
@@ -117,7 +113,7 @@ questions will not fit:
 - Each item is one agent, at most 3 narrow questions, a box of 15 minutes or less, and a purpose:
   `map`, `requirements`, or `investigate`. Many small items beat one big one.
   `tp research add R1 --agent <a> --purpose <p> --questions-file <f> --done-when "..." [--minutes N]`.
-  If `research add` rejects the questions, see *When tp.py rejects research questions*.
+  If `research add` rejects the questions, see _When tp.py rejects research questions_.
 - `tp dispatch R1 R2 R3`, then send one `task` call per id with the brief file it printed, and
   `tp record <id> --agent-id <the task call's id>` as each returns. Fact-check one answer per item.
 - **Followups** come back in the result; decide each: `tp research add … --from R1.F2`, or
@@ -184,3 +180,10 @@ Committing and pushing are the human's call.
 - Unattended runs need no permission prompts: keep the workflow and write workspaces
   sandbox-writable, and allow
   `Bash(python3 ~/.config/opencode/tools/task-pipeline/scripts/tp.py:*)` in `permission`.
+
+## Special Instructions
+
+### Coding Related Tasks
+
+- **Always** be test forward with code changes
+- **Always** review code before considering a unit of work as done. This is true even if smaller reviews happened during the coding tasks. If you are not sure which reviewer to use: Use the skill `reviewomatic`

@@ -221,31 +221,44 @@ def doubtful(cites: List[Tuple[Citation, List[str]]]) -> List[Tuple[Citation, Se
     return out
 
 
-def check(paths: Sequence[Path], repos: Dict[str, Path], root: Optional[Path] = None
+def check(paths: Sequence[Path], repos: Dict[str, Path], root: Optional[Path] = None,
+          report_only: Optional[Set[Path]] = None, removed: Optional[Set[Path]] = None
           ) -> Tuple[List[str], List[str], Dict[str, int]]:
     """(errors, warnings, stats). Errors are certain (broken link, missing file, line past the end,
-    ambiguous file name, unreachable article); warnings are the support heuristic."""
+    ambiguous file name, unreachable article); warnings are the support heuristic.
+
+    report_only, when given, is the set of resolved paths to judge. Every document still feeds
+    the link graph, so an unchanged index still reaches a changed article, but only these are
+    checked and counted, and only these can be reported unreachable. removed is the set of
+    resolved paths the work deleted or renamed away: a link to one is reported in any document,
+    judged or not, because removing the file is what broke it."""
     errors: List[str] = []
     warnings: List[str] = []
     stats = {"files": 0, "links": 0, "citations": 0}
     docs = md_files(paths)
+    judged = [d for d in docs if report_only is None or d in report_only]
     graph: Dict[Path, Set[Path]] = {}
     for doc in docs:
-        stats["files"] += 1
+        report = report_only is None or doc in report_only
+        if report:
+            stats["files"] += 1
         lines = prose_lines(doc.read_text(errors="replace"))
         graph[doc] = set()
         for n, line in enumerate(lines, 1):
             for target in LINK_RE.findall(line):
                 if SCHEME_RE.match(target) or target.startswith("#") or target.startswith("/"):
                     continue
-                stats["links"] += 1
                 rel = target.split("#", 1)[0].split("?", 1)[0]
                 dest = (doc.parent / rel).resolve()
-                if not dest.exists():
-                    errors.append(f"{doc}:{n}: broken link {target}")
-                elif dest.suffix == ".md":
+                if report:
+                    stats["links"] += 1
+                    if not dest.exists():
+                        errors.append(f"{doc}:{n}: broken link {target}")
+                elif removed and dest in removed and not dest.exists():
+                    errors.append(f"{doc}:{n}: broken link {target} (its target was removed)")
+                if dest.exists() and dest.suffix == ".md":
                     graph[doc].add(dest)
-        if not repos:
+        if not repos or not report:
             continue
         valid: List[Tuple[Citation, List[str]]] = []
         for c in citations(doc, lines):
@@ -273,7 +286,7 @@ def check(paths: Sequence[Path], repos: Dict[str, Path], root: Optional[Path] = 
                 if nxt not in seen:
                     seen.add(nxt)
                     todo.append(nxt)
-        for doc in docs:
+        for doc in judged:
             if doc not in seen:
                 errors.append(f"{doc} is not reachable from {root.name} by links")
     return errors, warnings, stats

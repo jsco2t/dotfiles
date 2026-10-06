@@ -391,6 +391,42 @@ def _repos(scope: Dict[str, Any]) -> Dict[str, Path]:
     return {n: Path(w["path"]) for n, w in scopemod.workspaces(scope).items() if w["mode"] == "read"}
 
 
+def _changed_md(root: Path, base: Optional[str]) -> Tuple[Optional[set], set]:
+    """What the workflow did to root since base (the HEAD recorded at approval), as resolved paths:
+    (Markdown added, changed, copied or renamed to, plus untracked Markdown; every path deleted or
+    renamed away). The first is None, meaning judge every file, when the workspace has no
+    baseline (it is not under git) or git cannot say what changed.
+
+    -z keeps git from quoting names it finds unusual (non-ASCII, quotes, backslashes), and
+    --relative keeps paths relative to root when root is a subdirectory of the repository."""
+    if not base:
+        return None, set()
+    # surrogateescape round-trips a file name that is not valid UTF-8 (possible on Linux) into a
+    # Path instead of failing the whole check.
+    diff = subprocess.run(["git", "-C", str(root), "diff", "--name-status", "-z", "--relative", base],
+                          capture_output=True, text=True, errors="surrogateescape")
+    new = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--others", "--exclude-standard"],
+                         capture_output=True, text=True, errors="surrogateescape")
+    if diff.returncode != 0 or new.returncode != 0:
+        return None, set()
+    changed, removed = [], []
+    fields = diff.stdout.split("\0")
+    i = 0
+    while i < len(fields) and fields[i]:
+        status = fields[i][0]
+        if status in "RC":                       # status, source, destination
+            if status == "R":
+                removed.append(fields[i + 1])
+            changed.append(fields[i + 2])
+            i += 3
+        else:                                    # status, path
+            (removed if status == "D" else changed).append(fields[i + 1])
+            i += 2
+    changed += [r for r in new.stdout.split("\0") if r]
+    return ({(root / r).resolve() for r in changed if r.endswith(".md")},
+            {(root / r).resolve() for r in removed})
+
+
 def _expand_cmd(cmd: str, task: Optional[Dict[str, Any]], scope: Dict[str, Any]) -> str:
     wss = scopemod.workspaces(scope)
     out = cmd.replace("{tp}", f"{shlex.quote(sys.executable)} {shlex.quote(str(TP_SCRIPT))}")
@@ -839,11 +875,19 @@ def cmd_final(wf: Workflow) -> str:
                     if w["mode"] != "write":
                         continue
                     root = Path(w["path"])
-                    index = next((root / n for n in ("index.md", "README.md") if (root / n).exists()), None)
+                    # Only index.md is an index. A README is a landing page: a code repository's
+                    # README links what its authors chose, not every document under it.
+                    index = root / "index.md" if (root / "index.md").exists() else None
                     docs = [d for d in docscheck.md_files([root]) if wf.root not in d.parents]
-                    errors, warnings, stats = docscheck.check(docs, _repos(scope), index)
+                    # Under git, judge what this workflow wrote; documents it never touched are
+                    # not its to answer for, except where it broke their links by removing a file.
+                    # Every document still feeds the link graph.
+                    changed, removed = _changed_md(root, state.get("write_baseline", {}).get(wname))
+                    errors, warnings, stats = docscheck.check(docs, _repos(scope), index, report_only=changed,
+                                                              removed=removed)
                     log.write_text("\n".join(errors + [f"WARN {w}" for w in warnings]) or f"ok: {stats}")
-                    results.append(f"docs-all {wname}: {'ok' if not errors else f'{len(errors)} problems'}, "
+                    judged = "changed since approval" if changed is not None else "every file"
+                    results.append(f"docs-all {wname} ({judged}): {'ok' if not errors else f'{len(errors)} problems'}, "
                                    f"{len(warnings)} doubtful citations (log {log}) {stats}")
                     failures += errors
             else:

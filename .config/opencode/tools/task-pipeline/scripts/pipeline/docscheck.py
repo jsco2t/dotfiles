@@ -1,6 +1,7 @@
 """Mechanical document checks: relative links resolve, `path:line` citations point at real
-lines, each citation's sentence names something that appears near the cited line, and every
-article is reachable from the index."""
+lines, each citation's sentence names something that appears near the cited line, and — when
+the caller names an index — every article is reachable from it (blocking against index.md,
+warning-only against a README.md, which is not a nav index)."""
 from __future__ import annotations
 
 import random
@@ -263,10 +264,13 @@ def doubtful(cites: List[Tuple[Citation, List[str]]]) -> List[Tuple[Citation, Se
     return out
 
 
-def check(paths: Sequence[Path], repos: Dict[str, Path], root: Optional[Path] = None
-          ) -> Tuple[List[str], List[str], Dict[str, int]]:
+def check(paths: Sequence[Path], repos: Dict[str, Path], root: Optional[Path] = None,
+          root_warn: bool = False) -> Tuple[List[str], List[str], Dict[str, int]]:
     """(errors, warnings, stats). Errors are certain (broken link, missing file, line past the end,
-    ambiguous file name, unreachable article); warnings are the support heuristic."""
+    ambiguous file name, unreachable article); warnings are the support heuristic. With root_warn,
+    unreachable documents are warnings too: a README.md is an entry page, not a nav index, so a
+    code repo's unlinked notes and ADRs are surfaced, never blocking. Only a deliberate index.md
+    makes reachability an error."""
     errors: List[str] = []
     warnings: List[str] = []
     stats = {"files": 0, "links": 0, "citations": 0}
@@ -317,7 +321,8 @@ def check(paths: Sequence[Path], repos: Dict[str, Path], root: Optional[Path] = 
                     todo.append(nxt)
         for doc in docs:
             if doc not in seen:
-                errors.append(f"{doc} is not reachable from {root.name} by links")
+                miss = f"{doc} is not reachable from {root.name} by links"
+                (warnings if root_warn else errors).append(miss)
     return errors, warnings, stats
 
 

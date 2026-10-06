@@ -203,8 +203,12 @@ def parser() -> argparse.ArgumentParser:
                    help="resolve a workflow-level exception block (action: answer)")
     s.add_argument("--noticed", type=int, metavar="N",
                    help="resolve noticed item N (1-based, as listed by `tp noticed`) as settled")
-    s.add_argument("--action", required=True, choices=["answer", "retry", "skip", "reopen", "accept", "clear"])
+    s.add_argument("--action", required=True, choices=["answer", "retry", "skip", "reopen", "accept", "clear", "repin"])
     s.add_argument("--answer", required=True)
+    s.add_argument("--rebaseline-tests", action="store_true", dest="rebaseline_tests",
+                   help="--task answer/retry: the human's decision authorizes editing the task's "
+                        "test files (e.g. seeded tests that cannot compile); release the frozen "
+                        "tests baseline so the impl gate does not flag the sanctioned edits")
     sub.add_parser("noticed", help="list the noticed, not-in-plan items")
     s = sub.add_parser("note", help="log something noticed outside the plan")
     s.add_argument("text")
@@ -335,7 +339,8 @@ def dispatch(args: argparse.Namespace) -> str:
                 session["reviews"][args.review]["_reopen_assign"] = list(args.assign)
                 return review.resolve(wf, session, args.review, args.action, args.answer,
                                       by=args.by, force=args.force)
-        return run.cmd_resolve(wf, args.task, args.action, args.answer, by=args.by)
+        return run.cmd_resolve(wf, args.task, args.action, args.answer, by=args.by,
+                               rebaseline_tests=args.rebaseline_tests)
     if c == "noticed":
         items = wf.load() and wf.noticed_items()
         if not items:

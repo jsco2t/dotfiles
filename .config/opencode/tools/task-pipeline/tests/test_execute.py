@@ -720,6 +720,38 @@ class FinalTest(unittest.TestCase):
         self.assertIn("build/guide.md", res.text)
         self.assertNotEqual(self.h.state()["phase"], "DONE")
 
+    def test_final_does_not_block_on_a_readme_rooted_workspace_with_orphans(self) -> None:
+        # A code repo's README is an entry page, not a nav index: it legitimately links to
+        # none of the internal notes, ADRs, or sub-READMEs the tree carries. An orphan next
+        # to a README warns; only a deliberate index.md makes reachability blocking.
+        h = self.h
+        try:
+            h.approved(plan=h.plan([h.task("T01", "notes/design.md", checks=[])],
+                                   final_checks=["docs-all"]))
+            (h.kb / "README.md").write_text("# kb\n\nEntry page only, no nav.\n")
+            h.author("T01", "notes/design.md")
+            h.tp("accept", "T01", "--note", "ok")
+            h.tp("final")
+            log = (h.wf / ".tp" / "final-docs-all.log").read_text()
+            self.assertIn("WARN", log)
+            self.assertIn("notes/design.md", log)
+            self.assertIn("not reachable", log)
+        finally:
+            h.close()
+
+    def test_final_still_blocks_on_a_readme_rooted_workspace_with_a_broken_link(self) -> None:
+        h = self.h
+        try:
+            h.approved(plan=h.plan([h.task("T01", "notes/design.md", checks=[])],
+                                   final_checks=["docs-all"]))
+            (h.kb / "README.md").write_text("# kb\n\n- [gone](missing.md)\n")
+            h.author("T01", "notes/design.md")
+            h.tp("accept", "T01", "--note", "ok")
+            res = h.tp("final", expect=2)
+            self.assertIn("broken link", res.text)
+        finally:
+            h.close()
+
     def test_final_refuses_while_tasks_are_open(self) -> None:
         self.h.tp("final", expect=2)
 

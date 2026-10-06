@@ -570,7 +570,9 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bo
             if ts.get("tests_hash") and _tests_hash(task, scope) != ts["tests_hash"]:
                 bad = [k for k, v in _tests_hash(task, scope).items() if ts["tests_hash"].get(k) != v]
                 findings.append(f"The tests changed during implementation (tests changed: {', '.join(bad)}) — "
-                                "restore them; the implementation must not weaken the tests.")
+                                "restore them; the implementation must not weaken the tests. If the edits "
+                                "were the human-sanctioned fix for a blocked round (e.g. seeded tests that "
+                                "cannot compile), the resolve answer must carry --rebaseline-tests.")
             ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
             if ok:
                 msgs.append(f"green: `{task['test_cmd']}` passes.")
@@ -740,8 +742,29 @@ def decision_lines(state: Dict[str, Any], tids: List[str]) -> List[str]:
     return out
 
 
+def _release_tests_baseline(wf: Workflow, state: Dict[str, Any], tid: str, by: Optional[str]) -> bool:
+    """Release the frozen tests hash so the impl gate does not read the human-sanctioned
+    test-file edits as weakening. Mirrors the from_review re-baseline in add_fix: the
+    decision is recorded (here as a carried decision too), correctness stays gated by
+    test_cmd. Returns whether a baseline existed to release."""
+    ts = state["tasks"][tid]
+    had = ts.get("tests_hash") is not None
+    ts.pop("tests_hash", None)
+    ts.setdefault("decisions", []).append(
+        {"q": "tests baseline released (--rebaseline-tests)",
+         "a": "The human's decision authorizes editing this task's test files; the impl gate "
+              "will not flag them as tests changed. test_cmd still gates correctness.",
+         "by": by, "ts": now_iso()})
+    wf.event("rebaseline_tests", id=tid)
+    return had
+
+
 def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str, exception: bool = False,
-                noticed: Optional[int] = None, by: Optional[str] = None) -> str:
+                noticed: Optional[int] = None, by: Optional[str] = None,
+                rebaseline_tests: bool = False) -> str:
+    if rebaseline_tests and not tid:
+        raise TPError("--rebaseline-tests applies to a task resolution (--task), not to "
+                      "--exception/--noticed/--review.")
     if noticed is not None:
         with wf.locked():
             item = wf.noticed_resolve(noticed, answer)
@@ -774,6 +797,26 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str, exce
         ts = state["tasks"].get(tid)
         if ts is None:
             raise TPError(f"{tid} is not a task.")
+        if rebaseline_tests and action not in ("answer", "retry"):
+            raise TPError(f"--rebaseline-tests applies to --action answer/retry, not {action}.")
+        if rebaseline_tests and action == "answer" and ts["status"] == "blocked" \
+                and ts["blocked"]["kind"] != "input":
+            raise TPError(f"--rebaseline-tests with --action answer applies to an input block; "
+                          f"{tid} is blocked on {ts['blocked']['kind']} (use --action retry).")
+        if action == "repin":
+            # A sanctioned test change (human-approved while the task is in flight) makes the
+            # recorded tests hash stale; the impl gate would then fail forever on "tests changed".
+            # Re-pin the hash to the current tests files instead of burning fix rounds.
+            if ts["status"] in DONE_STATES:
+                raise TPError(f"{tid} is already done; its tests hash is not re-pinned.")
+            _, scope, tasks = _loaded(wf, state)
+            if not ts.get("tests_hash"):
+                raise TPError(f"{tid} has no recorded tests hash; its tests step has not run.")
+            ts["tests_hash"] = _tests_hash(tasks[tid], scope)
+            _keep_decision(ts, "tests hash re-pinned after an approved test change", answer, by)
+            wf.save(state)
+            return (f"{tid}: tests hash re-pinned to the current tests files. Dispatch its "
+                    f"{ts.get('fixing') or 'impl'} step next: `tp dispatch {tid}`.")
         if action == "reopen":
             if ts["status"] not in DONE_STATES + ("blocked",):
                 raise TPError(f"{tid} is {ts['status']}; reopen applies to accepted, skipped, or blocked tasks.")
@@ -788,12 +831,14 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str, exce
         if ts["status"] != "blocked":
             raise TPError(f"{tid} is not blocked (status {ts['status']}).")
         kind = ts["blocked"]["kind"]
+        released = False
         if action == "skip":
             ts.update(status="skipped", blocked=None, note=answer)
         elif action == "retry" and kind == "rounds":
             _keep_decision(ts, ts["blocked"]["summary"], answer, by)
             ts["extra_rounds"] += 1
             ts.update(status="needs_fix", blocked=None)
+            released = _release_tests_baseline(wf, state, tid, by) if rebaseline_tests else False
         elif action == "answer" and kind == "input":
             _keep_decision(ts, ts["blocked"]["summary"], answer, by)
             _slots(state)
@@ -801,6 +846,7 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str, exce
             state["in_flight"][tid] = {"step": step, "since": now_iso(), "snap": ts["blocked"]["snap"],
                                        "agent": None, "concurrent": list(state["in_flight"])}
             ts.update(status="in_flight", blocked=None)
+            released = _release_tests_baseline(wf, state, tid, by) if rebaseline_tests else False
             effective = ts["fixing"] if step == "fix" else step
             agent_id = ts["agents"].get(effective)
             result = wf.run_dir(tid) / f"result-{step}.json"
@@ -811,7 +857,9 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str, exce
             wf.save(state)
             target = f"task(task_id={json.dumps(agent_id)}, prompt={json.dumps(msg)})" if agent_id else \
                 f"(no agent id recorded — dispatch fresh with the brief and the answer) {json.dumps(msg)}"
-            return f"{tid} back in flight.\nsend: {target}\nthen: tp record {tid}"
+            tail = "\ntests baseline released (--rebaseline-tests): the impl gate will not flag the " \
+                "sanctioned test-file edits; test_cmd still gates correctness." if released else ""
+            return f"{tid} back in flight.\nsend: {target}\nthen: tp record {tid}{tail}"
         elif action == "answer" and kind == "exception":
             _keep_decision(ts, ts["blocked"]["summary"], answer, by)
             ts.update(status=ts["blocked"]["prior"], blocked=None)
@@ -821,12 +869,15 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str, exce
             _keep_decision(ts, ts["blocked"]["summary"], answer, by)
             ts["extra_rounds"] += 1
             ts.update(status="needs_fix", fixing=ts["blocked"].get("prior") or ts["fixing"], blocked=None)
+            released = _release_tests_baseline(wf, state, tid, by) if rebaseline_tests else False
         else:
             raise TPError(f"action {action!r} does not apply to a {kind} block; use "
                           + {"rounds": "retry or skip", "input": "answer or skip",
                              "exception": "answer, retry, or skip"}[kind] + ".")
         wf.save(state)
-        return f"{tid} resolved ({action}). `tp next`."
+        tail = " The frozen tests baseline is released (--rebaseline-tests); test_cmd still " \
+            "gates correctness." if released else ""
+        return f"{tid} resolved ({action}). `tp next`.{tail}"
 
 
 # --- final ----------------------------------------------------------------------------------
@@ -854,7 +905,12 @@ def cmd_final(wf: Workflow) -> str:
                     root = Path(w["path"])
                     index = next((root / n for n in ("index.md", "README.md") if (root / n).exists()), None)
                     docs = [d for d in docscheck.md_files([root]) if wf.root not in d.parents]
-                    errors, warnings, stats = docscheck.check(docs, _repos(scope), index)
+                    # README.md is an entry page, not a nav index: a code repo's notes and
+                    # ADRs are legitimately unlinked from it. Only a deliberate index.md
+                    # makes reachability blocking; against a README orphans warn.
+                    errors, warnings, stats = docscheck.check(
+                        docs, _repos(scope), index,
+                        root_warn=index is not None and index.name != "index.md")
                     log.write_text("\n".join(errors + [f"WARN {w}" for w in warnings]) or f"ok: {stats}")
                     results.append(f"docs-all {wname}: {'ok' if not errors else f'{len(errors)} problems'}, "
                                    f"{len(warnings)} doubtful citations (log {log}) {stats}")

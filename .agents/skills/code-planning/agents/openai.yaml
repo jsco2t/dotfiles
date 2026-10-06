@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Planning"
+  short_description: "Clarify and plan code changes at any scope"
+  default_prompt: "Use $code-planning to research this change, clarify missing requirements, and produce a plan sized to the work."

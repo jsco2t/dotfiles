@@ -1,6 +1,6 @@
 ---
 name: update-project
-description: Update an existing product project's PRD, product-level user scenarios, supplementary documents, knowledge base, indexes, and changelog from changed requirements or new context. Use for revisions to a new-project workspace, directly or as a delegated step; identify affected engineering features but leave their contents to eng-feature-followup.
+description: Update an existing product project's PRD, product-level user scenarios, supplementary documents, knowledge base, indexes, and changelog from changed requirements or new context. Use for revisions to a new-project workspace, directly or as a delegated step; identify affected engineering features but leave their contents to feature-level follow-up.
 ---
 
 # Update Project
@@ -16,7 +16,7 @@ Require the project directory and at least one source of updated context. Honor 
 ## Requirements and Skill Boundaries
 
 - Update only project-level artifacts: `prd.md`, `verifications/`, `documents/`, `kb/`, root and child indexes, and `documents/changelog.md`.
-- Never edit content inside `features/`. Read its index only to identify feature plans that may need `eng-feature-followup`.
+- Never edit content inside `features/`. Read its index only to identify feature plans that may need feature-level follow-up.
 - Require `prd.md`. If it is missing, stop and recommend `new-project`; do not reconstruct it in update mode.
 - Preserve unaffected content and settled decisions. Ask only about ambiguous deltas or conflicts.
 - Never renumber existing `FR-XXX`, `NFR-XXX`, or `US-XXX` identifiers. Assign new items the next available number. Mark removed requirements and scenarios as descoped; do not silently delete them.
@@ -133,7 +133,7 @@ Complete the changelog entry with:
 
 ### Features Potentially Affected
 
-_The following features in `features/` may need updates via `eng-feature-followup`:_
+_The following features in `features/` may need updates via feature-level follow-up:_
 
 | Feature | Reason | Urgency |
 | ------- | ------ | ------- |
@@ -165,7 +165,7 @@ Report completion with:
 - requirement totals and priority breakdown;
 - resolved, new, and continuing open-question counts;
 - Must Have verification coverage;
-- features that need `eng-feature-followup`, with reason and urgency;
+- features that need feature-level follow-up, with reason and urgency;
 - recommended next steps.
 
 Report problems under `Problems`, each with `Issue`, `Impact`, and `Next action`. Missing `prd.md`, inaccessible required update sources, unresolved scope approval, or incomplete Must Have coverage are blockers. Missing optional artifacts, unavailable enrichment, and feature-level staleness are non-blocking but must be recorded.

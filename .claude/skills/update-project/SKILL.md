@@ -1,6 +1,6 @@
 ---
 name: update-project
-description: "Update an existing product/project's PRD and documentation based on new context, changed requirements, or resolved questions. Peer to /new-project — reads existing project artifacts, collaboratively refines the PRD, updates user scenarios and supplementary docs, and produces a changelog. Does NOT propagate into features/ — use /eng-feature-followup for that."
+description: "Update an existing product/project's PRD and documentation based on new context, changed requirements, or resolved questions. Peer to /new-project — reads existing project artifacts, collaboratively refines the PRD, updates user scenarios and supplementary docs, and produces a changelog. Does NOT propagate into features/ — use feature-level follow-up for that."
 argument-hint: "<project directory> <updated context: description, URLs, file paths, or free-text describing changes>"
 ---
 
@@ -15,7 +15,7 @@ read it when the task has no Jira/Confluence work. Commands are on `PATH`: `jira
 
 You are orchestrating an **update pass** on an existing product/project created by `/new-project` (or an equivalent manual process). The user has new context — changed requirements, answered questions, new constraints, stakeholder feedback, or scope adjustments — and you need to propagate those changes through the project documentation.
 
-**Scope boundary:** This skill updates project-level documents only: the PRD, user scenarios (verifications), supplementary documents, and knowledge base. It does NOT propagate changes into `features/` subdirectories — those contain engineering-level docs managed by `/eng-feature-followup`. After completing an update, you will identify which features (if any) may be affected so the user can run `/eng-feature-followup` on them.
+**Scope boundary:** This skill updates project-level documents only: the PRD, user scenarios (verifications), supplementary documents, and knowledge base. It does NOT propagate changes into `features/` subdirectories — those contain engineering-level docs managed by feature-level follow-up. After completing an update, you will identify which features (if any) may be affected so the user can schedule feature-level follow-up work on them.
 
 ## Input
 
@@ -135,7 +135,7 @@ Tell the user:
 - What existing documents were found and their current state
 - A summary of the changes you identified from their input
 - Which PRD sections are likely to need the most revision
-- Which features (if any) in `features/` may be affected by these changes — flag these for later `/eng-feature-followup` runs
+- Which features (if any) in `features/` may be affected by these changes — flag these for later feature-level follow-up work
 - That you may ask clarifying questions about how to incorporate the changes
 
 ---
@@ -271,7 +271,7 @@ Ensure the changelog entry's "Documents Updated" table is fully populated. Add a
 
 ### Features Potentially Affected
 
-_The following features in `features/` may need updates via `/eng-feature-followup`:_
+_The following features in `features/` may need updates via feature-level follow-up:_
 
 | Feature | Reason | Urgency |
 | ------- | ------ | ------- |
@@ -317,7 +317,7 @@ After all phases are complete, present a final summary:
 3. Report the current state of requirements (total, by priority)
 4. Report the current state of open questions (resolved, new, continuing)
 5. Report verification coverage (Must Have coverage percentage)
-6. **Flag features that need `/eng-feature-followup`** — this is critical. If engineering features exist in `features/` that reference changed requirements, call them out explicitly with the specific changes that affect them.
+6. **Flag features that need feature-level follow-up** — this is critical. If engineering features exist in `features/` that reference changed requirements, call them out explicitly with the specific changes that affect them.
 7. Suggest next steps
 
 ---
@@ -344,9 +344,9 @@ The PRD is the core document. If `prd.md` doesn't exist:
 
 ## Important Guidelines
 
-1. **Scope boundary is project-level.** This skill updates the PRD, user scenarios, documents, and KB. It does NOT touch anything inside `features/`. Feature-level updates are the domain of `/eng-feature-followup`.
+1. **Scope boundary is project-level.** This skill updates the PRD, user scenarios, documents, and KB. It does NOT touch anything inside `features/`. Feature-level updates are the domain of feature-level follow-up.
 
-2. **Flag affected features.** The most important output beyond the PRD update is the list of features that may be stale. The user needs this to know which `/eng-feature-followup` runs to schedule.
+2. **Flag affected features.** The most important output beyond the PRD update is the list of features that may be stale. The user needs this to know which feature-level follow-ups to schedule.
 
 3. **Maintain numbering continuity.** Never renumber existing FR-XXX, NFR-XXX, or US-XXX IDs. New items get the next available number. Removed items are marked descoped, not deleted and renumbered.
 

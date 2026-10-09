@@ -6,7 +6,8 @@ refresh, and frontmatter addition.
 Ported from notebook .tools/doc_fix.py with the kb-utilities convention
 changes: titles are derived with kb_common.title_from_filename (no
 ID-prefix handling, no title-casing) and frontmatter added to documents
-without one is id-free (createdate, title, tags only).
+without one carries a minted id (kb_common.generate_ulid_short),
+createdate, title, and tags.
 
 Usage:
     python3 doc_fix.py [OPTIONS] [PATH...]
@@ -164,14 +165,17 @@ def replace_tags_in_frontmatter(fm_raw: str, new_tags: list[str]) -> str:
 def build_frontmatter(title: str, tags: list[str]) -> str:
     """Build new frontmatter for a file that has none.
 
-    New-convention documents are id-free: createdate in ISO 8601 with a
-    -07:00 offset, the title, and the tags block. The title follows
-    kb_common's naming rule (kb_common.title_from_filename of the stem).
+    The id comes first: an 8-character ulidshort-compatible value minted
+    with the recovered notebook generator (kb_common.generate_ulid_short),
+    then createdate in ISO 8601 with a -07:00 offset, the title, and the
+    tags block. The title follows kb_common's naming rule
+    (kb_common.title_from_filename of the stem).
     """
     now = datetime.now(timezone(timedelta(hours=-7)))
     createdate = now.strftime("%Y-%m-%dT%H:%M:%S-07:00")
     tag_section = rebuild_tags_block(tags)
-    return f"---\ncreatedate: {createdate}\ntitle: {title}\n{tag_section}\n---\n"
+    return (f"---\nid: {kb_common.generate_ulid_short()}\n"
+            f"createdate: {createdate}\ntitle: {title}\n{tag_section}\n---\n")
 
 
 def stem_title(filepath: str) -> str:

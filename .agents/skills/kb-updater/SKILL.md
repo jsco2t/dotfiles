@@ -47,9 +47,15 @@ the same passes yourself. Do not drop coverage to fit the agent budget.
 
 An old-convention document is a Markdown file that carries any of the older
 `<8-char ID>_<snake_case>.md` habits: an ID filename prefix, a filename stem that
-does not match its title, a title that is not normalized, or a stray `id`
-frontmatter field (`.local/bin/kb-utilities/migrate_kb.py:6-20`). Repair these
+does not match its title, a title that is not normalized, or a missing or invalid
+`id` frontmatter field (`.local/bin/kb-utilities/migrate_kb.py:6-21`). Repair these
 before editing content, so later renames do not invalidate your work.
+
+Every document must carry a valid `id` frontmatter field: an 8-character
+lowercase Crockford Base32 value, written as the first frontmatter field
+(`.local/bin/kb-utilities/kb_common.py`). The repair tools keep an existing valid
+id as-is and mint a new one with the recovered notebook generator when the field
+is missing or invalid.
 
 1. Survey without writing anything: `kbutil check <kb-directory>` reports every
    non-conforming document and the reason (`.local/bin/kb-utilities/kbutil:207-209`).
@@ -59,9 +65,10 @@ before editing content, so later renames do not invalidate your work.
 3. Review the plan, then apply after review:
    `kbutil fix <kb-directory> --apply --mapping-out <renames.json>`. The fix renames
    each file to the normalized form of its title (lowercase kebab-case, at most 42
-   characters, no ID prefix), rewrites the title to its normalized form, drops the
-   obsolete `id` field, preserves every other field, the tags, and the body, and
-   never overwrites a target (`.local/bin/kb-utilities/migrate_kb.py:15-36`).
+   characters, no ID prefix), rewrites the title to its normalized form, mints an
+   `id` when the field is missing or invalid (an existing valid id is kept),
+   preserves every other field, the tags, and the body, and
+   never overwrites a target (`.local/bin/kb-utilities/migrate_kb.py:15-38`).
 4. Rewrite wikilinks so renames do not strand links: from the KB root (the tool
    scans the current working directory), run
    `kbutil links --mapping-file <renames.json>`; add `--dry-run` to preview

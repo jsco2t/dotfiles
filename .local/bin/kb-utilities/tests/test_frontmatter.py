@@ -36,6 +36,21 @@ serialize_frontmatter(fields, tags, body="") -> str
     ``- item`` lines, or ``tags: []`` when tags is empty), "---\\n", then
     body verbatim. Field and tag values are written unquoted.
 
+Document IDs (recovered from notebook .tools/fix_kb_ids.py):
+
+generate_ulid_short() -> str
+    An 8-character lowercase Crockford Base32 ID compatible with
+    ulidshort.js: the first 6 characters are the millisecond Unix
+    timestamp encoded to Crockford Base32, the last 2 are random, and no
+    ID repeats within a session.
+
+is_valid_ulid_short(s) -> bool
+    True for exactly 8 lowercase Crockford characters.
+
+ensure_id(fields) -> (fields, minted)
+    A valid existing id is kept as-is; a missing or invalid id is minted
+    and inserted as the first field.
+
 Round-trip: parse(serialize(parse(doc))) == parse(doc) for field values,
 tags and body.
 """
@@ -229,6 +244,60 @@ class TestFrontmatterRoundTrip(unittest.TestCase):
         # A body-only document gains an (empty) frontmatter block on the way
         # through and keeps its body verbatim.
         self.assert_round_trip("Just a body.\n")
+
+
+class TestDocumentIds(unittest.TestCase):
+    """The recovered notebook ID generator, now living in kb_common."""
+
+    def test_generate_ulid_short_is_8_crockford_chars(self):
+        for _ in range(200):
+            self.assertTrue(kb_common.is_valid_ulid_short(
+                kb_common.generate_ulid_short()))
+
+    def test_ids_are_unique_within_a_session(self):
+        ids = {kb_common.generate_ulid_short() for _ in range(500)}
+        self.assertEqual(len(ids), 500)
+
+    def test_generator_matches_the_recovered_original(self):
+        # The first 6 characters still come from the millisecond timestamp
+        # encoded to Crockford Base32; only the last 2 are random. The
+        # clock may tick between sampling and generating, so the stem must
+        # match one of the brackets.
+        before = kb_common.encode_crockford_base32(
+            int(__import__("time").time() * 1000)).lower()[:6]
+        ulid = kb_common.generate_ulid_short()
+        after = kb_common.encode_crockford_base32(
+            int(__import__("time").time() * 1000)).lower()[:6]
+        self.assertEqual(len(before), 6)
+        self.assertIn(ulid[:6], {before, after},
+                      "the timestamp stem must match the clock")
+
+    def test_is_valid_ulid_short_rejects_bad_shapes(self):
+        for bad in ("", "1jsj3x7", "1jsj3x7cc", "1JSJ3X7C", "1jsj3il7",
+                    "1jsj3x7c ".strip() + "!"):
+            self.assertFalse(kb_common.is_valid_ulid_short(bad),
+                             f"{bad!r} must not validate")
+
+    def test_ensure_id_keeps_a_valid_id_in_place(self):
+        fields = {"id": "1jsj3x7c", "title": "t", "createdate": "d"}
+        kept, minted = kb_common.ensure_id(fields)
+        self.assertIs(minted, False)
+        self.assertEqual(kept, fields)
+
+    def test_ensure_id_mints_and_puts_the_id_first(self):
+        fields = {"title": "t", "createdate": "d"}
+        new_fields, minted = kb_common.ensure_id(fields)
+        self.assertIs(minted, True)
+        self.assertEqual(list(new_fields)[0], "id")
+        self.assertTrue(kb_common.is_valid_ulid_short(new_fields["id"]))
+        self.assertEqual(new_fields["title"], "t")
+
+    def test_ensure_id_replaces_an_invalid_id(self):
+        fields = {"id": "notvalid1", "title": "t"}
+        new_fields, minted = kb_common.ensure_id(fields)
+        self.assertIs(minted, True)
+        self.assertNotEqual(new_fields["id"], "notvalid1")
+        self.assertTrue(kb_common.is_valid_ulid_short(new_fields["id"]))
 
 
 class TestStdlibOnly(unittest.TestCase):

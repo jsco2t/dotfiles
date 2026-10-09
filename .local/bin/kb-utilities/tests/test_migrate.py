@@ -18,8 +18,8 @@ migrate_kb.py PATH [--apply] [--mapping-out FILE]
     detected by any of: an 8-char lowercase ID filename prefix
     (^[0-9a-z]{8}_), a filename stem that is not
     kb_common.normalize_filename of the frontmatter title, a title that
-    is not kb_common.normalize_title of itself, or a stray ``id``
-    frontmatter field.
+    is not kb_common.normalize_title of itself, or a missing or invalid
+    ``id`` frontmatter field.
 
 - The positional PATH is a directory; it is scanned recursively,
   skipping the directories named in kb_common.EXCLUDED_DIRS.
@@ -29,8 +29,9 @@ migrate_kb.py PATH [--apply] [--mapping-out FILE]
   not rewritten.
 - The default run is a dry run: it reports the plan and writes nothing,
   including no --mapping-out file. Renames happen only with --apply.
-- On --apply the file is renamed, the obsolete ``id`` frontmatter field
-  is removed, the title is rewritten to kb_common.normalize_title of
+- On --apply the file is renamed, a missing or invalid ``id`` frontmatter
+  field is minted with the recovered generator (a valid existing id is
+  kept as-is), the title is rewritten to kb_common.normalize_title of
   itself, and every other field and the body are preserved verbatim
   (wikilinks in the body are NOT rewritten here; that is fix_wiki_links'
   job, driven by the mapping). A document whose filename already
@@ -51,7 +52,8 @@ migrate_kb.py PATH [--apply] [--mapping-out FILE]
 
 The fixtures below are a small corpus of old-convention documents:
 ID-prefixed snake_case filenames, human Title Case titles (some quoted),
-stray id frontmatter fields, and wikilinks between the documents.
+missing or stray id frontmatter fields, and wikilinks between the
+documents.
 """
 
 import ast
@@ -77,8 +79,8 @@ def write_doc(path: Path, title: str, body: str = "# Body\n",
     """Write an old-convention document.
 
     ID-prefixed filenames are passed by the caller; the frontmatter
-    carries a Title Case title, a stray id field (unless doc_id is
-    None), and a createdate field that must survive migration.
+    carries a Title Case title, an id field (unless doc_id is None), and
+    a createdate field that must survive migration.
     """
     fields: dict[str, str] = {
         "createdate": "2026-01-02T03:04:05-07:00",
@@ -133,7 +135,8 @@ class TestDetection(MigrationTestCase):
         self.assertIn("kubernetes-rolling-restarts.md", proc.stdout)
 
     def test_conforming_file_is_reported_as_skipped(self):
-        write_doc(self.dir / "my-great-doc.md", "my great doc", doc_id=None)
+        write_doc(self.dir / "my-great-doc.md", "my great doc",
+                  doc_id="3f2a9c01")
         proc = self.run_cli(str(self.dir))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("my-great-doc.md", proc.stdout)
@@ -173,9 +176,9 @@ class TestDryRunDefault(MigrationTestCase):
 
 
 class TestApply(MigrationTestCase):
-    """Done-when 2: --apply renames, strips id, and is idempotent."""
+    """Done-when 2: --apply renames, ensures an id, and is idempotent."""
 
-    def test_apply_renames_and_removes_id_field(self):
+    def test_apply_renames_and_keeps_the_valid_id(self):
         write_doc(self.dir / "3f2a9c01_my_great_doc.md", "My Great Doc!")
 
         proc = self.run_cli(str(self.dir), "--apply")
@@ -186,7 +189,8 @@ class TestApply(MigrationTestCase):
         self.assertFalse((self.dir / "3f2a9c01_my_great_doc.md").exists())
         fields, tags, _, body = kb_common.parse_frontmatter(
             new_path.read_text(encoding="utf-8"))
-        self.assertNotIn("id", fields, "the obsolete id field must be dropped")
+        self.assertEqual(fields["id"], "3f2a9c01",
+                         "a valid existing id must be kept")
         self.assertEqual(fields["title"], "my great doc")
         self.assertEqual(fields["createdate"], "2026-01-02T03:04:05-07:00")
         self.assertEqual(tags, ["docker"])
@@ -202,17 +206,19 @@ class TestApply(MigrationTestCase):
             (self.dir / "my-great-doc.md").read_text(encoding="utf-8"))
         self.assertEqual(fields["title"], "my great doc")
 
-    def test_apply_removes_a_stray_id_without_renaming(self):
-        # Conforming filename and title, but a stray id field remains.
+    def test_apply_mints_a_missing_id_without_renaming(self):
+        # Conforming filename and title, but no id field remains.
         write_doc(self.dir / "my-great-doc.md", "my great doc",
-                  doc_id="3f2a9c01")
+                  doc_id=None)
         proc = self.run_cli(str(self.dir), "--apply")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertTrue((self.dir / "my-great-doc.md").exists())
         self.assertFalse((self.dir / "my-great-doc-2.md").exists())
-        fields, _, _, _ = kb_common.parse_frontmatter(
-            (self.dir / "my-great-doc.md").read_text(encoding="utf-8"))
-        self.assertNotIn("id", fields)
+        text = (self.dir / "my-great-doc.md").read_text(encoding="utf-8")
+        fields, _, _, _ = kb_common.parse_frontmatter(text)
+        self.assertTrue(kb_common.is_valid_ulid_short(fields["id"]))
+        self.assertLess(text.index("id: "), text.index("createdate:"),
+                        "the minted id must be the first frontmatter field")
 
     def test_apply_is_idempotent_on_a_second_run(self):
         write_doc(self.dir / "3f2a9c01_my_great_doc.md", "My Great Doc!")
@@ -263,7 +269,8 @@ class TestMappingOut(MigrationTestCase):
 
     def test_mapping_out_covers_only_renamed_files(self):
         write_doc(self.dir / "3f2a9c01_my_great_doc.md", "My Great Doc!")
-        write_doc(self.dir / "already-fine.md", "already fine", doc_id=None)
+        write_doc(self.dir / "already-fine.md", "already fine",
+                  doc_id="3f2a9c01")
         mapping = self.dir / "renames.json"
         proc = self.run_cli(str(self.dir), "--apply",
                             "--mapping-out", str(mapping))
@@ -286,11 +293,12 @@ class TestCollisions(MigrationTestCase):
         for name in names:
             fields, _, _, _ = kb_common.parse_frontmatter(
                 (self.dir / name).read_text(encoding="utf-8"))
-            self.assertNotIn("id", fields)
+            self.assertTrue(kb_common.is_valid_ulid_short(fields["id"]))
             self.assertEqual(fields["title"], "same topic")
 
     def test_collision_with_an_existing_file_gets_a_suffix(self):
-        write_doc(self.dir / "my-great-doc.md", "my great doc", doc_id=None)
+        write_doc(self.dir / "my-great-doc.md", "my great doc",
+                  doc_id="3f2a9c01")
         existing = (self.dir / "my-great-doc.md").read_bytes()
         write_doc(self.dir / "3f2a9c01_my_great_doc.md", "My Great Doc!")
 
@@ -339,7 +347,8 @@ class TestExitCodes(MigrationTestCase):
         self.assertTrue(proc.stderr)
 
     def test_nothing_to_fix_exits_0(self):
-        write_doc(self.dir / "my-great-doc.md", "my great doc", doc_id=None)
+        write_doc(self.dir / "my-great-doc.md", "my great doc",
+                  doc_id="3f2a9c01")
         proc = self.run_cli(str(self.dir))
         self.assertEqual(proc.returncode, 0, proc.stderr)
 

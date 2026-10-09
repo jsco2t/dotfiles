@@ -101,6 +101,7 @@ TOKEN = "ghp_testtoken123"
 CONFORMING_NAME = "docker-networking.md"
 CONFORMING_DOC = (
     "---\n"
+    "id: 1jsj3x7c\n"
     "createdate: 2026-10-09T10:00:00-07:00\n"
     "title: docker networking\n"
     "tags: []\n"
@@ -306,6 +307,8 @@ class NewCommandTest(RouterTestCase):
             path.read_text(encoding="utf-8")
         )
         self.assertEqual(fields["title"], "docker networking")
+        self.assertTrue(kb_common.is_valid_ulid_short(fields["id"]),
+                        "the created document must carry a valid id")
         self.assertEqual(fields["source_commit"], self.sha)
         self.assertEqual(fields["last_validated"], TODAY)
         self.assertEqual(fields["git_repo"], CLEAN_URL)

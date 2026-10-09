@@ -7,7 +7,7 @@ caller's working directory):
 
     new         create a kb document from a title        (new_doc.py)
     clean       frontmatter cleanup                      (doc_fix.py)
-    names       fix document names and titles            (fix_kb_ids.py)
+    names       fix document names, titles and ids       (fix_kb_ids.py)
     links       fix wiki-links after renames             (fix_wiki_links.py)
     fix         migrate old-convention documents         (migrate_kb.py)
     git-fields  derive the git provenance fields         (git_fields.py)
@@ -174,7 +174,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="command")
     sub.required = True
 
-    p = sub.add_parser("new", help="create a kb document from a title")
+    p = sub.add_parser("new", help="create a kb document from a title",
+                       description="Create a kb document from a title: the "
+                                   "frontmatter carries a minted id, "
+                                   "createdate, the title and a tags block.")
     p.add_argument("title", help="document title; the filename derives from it")
     p.add_argument("--tags", default="", help="comma-separated tags")
     p.add_argument("--dir", type=Path, default=None,
@@ -190,7 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_sibling)
 
-    p = sub.add_parser("names", help="fix document names and titles (fix_kb_ids.py)")
+    p = sub.add_parser("names", help="fix document names, titles and ids (fix_kb_ids.py)")
     p.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_sibling)
 

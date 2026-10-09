@@ -7,7 +7,9 @@ Creation
 ``create_document(title, tags=None, directory=None, repo=None, commit=None,
 last_validated=None)`` creates ``<directory>/<normalize_filename(title)>.md``
 (directory defaults to the current directory) and returns the created
-``Path``. The frontmatter carries the kb_common fields: ``createdate`` as
+``Path``. The frontmatter carries the kb_common fields: ``id`` minted by
+``kb_common.generate_ulid_short`` (the recovered notebook generator),
+``createdate`` as
 a local ISO-8601 timestamp with second precision and a numeric UTC offset,
 ``title`` equal to ``normalize_title(title)``, and a canonical tags block
 (``tags: []`` when no tags are given). When repo is given, the git fields
@@ -74,14 +76,15 @@ def create_document(
 ) -> Path:
     """Create a kb document from a title and return its Path.
 
-    The frontmatter carries createdate, title and a canonical tags block;
-    when repo is given the git provenance fields from
+    The frontmatter carries id, createdate, title and a canonical tags
+    block; when repo is given the git provenance fields from
     git_fields.derive_git_fields are added. Raises ValueError for a title
     with no nameable characters or for unusable git inputs (see
     git_fields.derive_git_fields).
     """
     directory = Path(directory) if directory is not None else Path.cwd()
     fields = {
+        "id": kb_common.generate_ulid_short(),
         "createdate": _createdate(),
         "title": kb_common.normalize_title(title),
     }

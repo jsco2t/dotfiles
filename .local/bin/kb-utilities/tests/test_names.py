@@ -12,15 +12,16 @@ or from the dotfiles repository root:
 The contract pinned here:
 
 fix_kb_ids.py is the naming fixer. It keeps its CLI shape (a positional
-path, --dry-run, --no-rename, --json) but gains new semantics:
+path, --dry-run, --no-rename, --json) and has these semantics:
 
-- No ID minting. No filename or frontmatter carries a generated ID, and
-  the generated IDs of the old convention (generate_ulid_short) are gone.
+- No ID minting in this script. The filename carries no ID prefix, and
+  any id field minting goes through kb_common.ensure_id, not this file.
 - The filename stem is kb_common.normalize_filename of the frontmatter
   title (kebab-case, at most 42 characters); the frontmatter title is
   kb_common.normalize_title of the title.
-- When a file is renamed, the obsolete ``id`` frontmatter field is
-  dropped.
+- A valid ``id`` frontmatter field is kept as-is; a missing or invalid
+  id is minted with the recovered generator and written as the first
+  frontmatter field.
 - --json prints a JSON array of {"old", "new"} basename pairs, the shape
   fix_wiki_links.py consumes.
 - Collision targets get numeric suffixes (-2 style) so two files mapping
@@ -54,7 +55,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "fix_kb_ids.py"
 
 def write_doc(path: Path, title: str) -> None:
     """Write an old-convention document: ID-prefixed filename, Title Case
-    title, an id field, and a createdate field that must survive."""
+    title, a valid id field, and a createdate field that must survive."""
     fields = {
         "id": "3f2a9c01",
         "createdate": "2026-01-02T03:04:05-07:00",
@@ -92,7 +93,7 @@ class TestSingleFileRename(NamingFixerTestCase):
         self.assertFalse((self.dir / "3f2a9c01_my_great_doc.md").exists())
         fields, _, _, _ = kb_common.parse_frontmatter(new_path.read_text(encoding="utf-8"))
         self.assertEqual(fields["title"], "my great doc")
-        self.assertNotIn("id", fields, "the obsolete id field must be dropped")
+        self.assertEqual(fields["id"], "3f2a9c01", "a valid existing id must be kept")
         self.assertEqual(fields["createdate"], "2026-01-02T03:04:05-07:00")
 
     def test_already_conforming_file_is_left_alone(self):
@@ -174,7 +175,22 @@ class TestCollisions(NamingFixerTestCase):
             (self.dir / "my-great-doc-2.md").read_text(encoding="utf-8")
         )
         self.assertEqual(fields["title"], "my great doc")
-        self.assertNotIn("id", fields)
+        self.assertEqual(fields["id"], "3f2a9c01")
+
+    def test_collision_suffixed_name_is_stable_on_a_second_run(self):
+        # same-topic-2 is the stable outcome of an earlier collision; the
+        # second run must not swap it back to -3 and so on forever.
+        write_doc(self.dir / "same-topic.md", "same topic")
+        write_doc(self.dir / "same-topic-2.md", "same topic")
+        first = self.run_cli(str(self.dir), "--json")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(json.loads(first.stdout), [],
+                         "a collision-suffixed name must conform")
+
+        second = self.run_cli(str(self.dir), "--json")
+        self.assertEqual(json.loads(second.stdout), [])
+        names = sorted(p.name for p in self.dir.glob("*.md"))
+        self.assertEqual(names, ["same-topic-2.md", "same-topic.md"])
 
 
 class TestNoRename(NamingFixerTestCase):
@@ -188,7 +204,7 @@ class TestNoRename(NamingFixerTestCase):
             (self.dir / "3f2a9c01_my_great_doc.md").read_text(encoding="utf-8")
         )
         self.assertEqual(fields["title"], "my great doc")
-        self.assertNotIn("id", fields)
+        self.assertEqual(fields["id"], "3f2a9c01")
 
 
 class TestExitCodes(NamingFixerTestCase):
@@ -212,14 +228,86 @@ class TestExitCodes(NamingFixerTestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
-class TestNoIdGenerationRemains(NamingFixerTestCase):
-    """Done-when 4: no ID generation remains; standard library only."""
+class TestIdEnsuring(NamingFixerTestCase):
+    """A missing or invalid id is minted; a valid id survives untouched."""
+
+    def write_idless_doc(self, path: Path, title: str) -> None:
+        fields = {
+            "createdate": "2026-01-02T03:04:05-07:00",
+            "title": title,
+        }
+        path.write_text(
+            kb_common.serialize_frontmatter(fields, ["docker"], "# Body\n"),
+            encoding="utf-8",
+        )
+
+    def test_missing_id_is_minted_as_first_field(self):
+        self.write_idless_doc(self.dir / "my-great-doc.md", "my great doc")
+
+        proc = self.run_cli(str(self.dir))
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        text = (self.dir / "my-great-doc.md").read_text(encoding="utf-8")
+        fields, _, _, _ = kb_common.parse_frontmatter(text)
+        self.assertIn("id", fields)
+        self.assertTrue(kb_common.is_valid_ulid_short(fields["id"]))
+        self.assertLess(text.index("id: "), text.index("createdate:"),
+                        "the minted id must be the first frontmatter field")
+        self.assertIn("Minted the id field", proc.stdout)
+
+    def test_invalid_id_is_replaced(self):
+        fields = {"id": "not-an-id", "title": "my great doc",
+                  "createdate": "2026-01-02T03:04:05-07:00"}
+        (self.dir / "my-great-doc.md").write_text(
+            kb_common.serialize_frontmatter(fields, [], "# Body\n"),
+            encoding="utf-8",
+        )
+
+        proc = self.run_cli(str(self.dir))
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        new_fields, _, _, _ = kb_common.parse_frontmatter(
+            (self.dir / "my-great-doc.md").read_text(encoding="utf-8")
+        )
+        self.assertNotEqual(new_fields["id"], "not-an-id")
+        self.assertTrue(kb_common.is_valid_ulid_short(new_fields["id"]))
+
+    def test_minted_id_is_stable_on_a_second_run(self):
+        self.write_idless_doc(self.dir / "my-great-doc.md", "my great doc")
+        self.run_cli(str(self.dir))
+        first, _, _, _ = kb_common.parse_frontmatter(
+            (self.dir / "my-great-doc.md").read_text(encoding="utf-8"))
+
+        proc = self.run_cli(str(self.dir), "--json")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), [],
+                         "a document with a valid id needs no second fix")
+        again, _, _, _ = kb_common.parse_frontmatter(
+            (self.dir / "my-great-doc.md").read_text(encoding="utf-8"))
+        self.assertEqual(again["id"], first["id"])
+
+    def test_renamed_document_with_no_id_gets_one(self):
+        self.write_idless_doc(self.dir / "1aaaaaaa_my_great_doc.md", "My Great Doc!")
+
+        proc = self.run_cli(str(self.dir))
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue((self.dir / "my-great-doc.md").exists())
+        fields, _, _, _ = kb_common.parse_frontmatter(
+            (self.dir / "my-great-doc.md").read_text(encoding="utf-8"))
+        self.assertTrue(kb_common.is_valid_ulid_short(fields["id"]))
+
+
+class TestIdMintingStaysInKbCommon(NamingFixerTestCase):
+    """Done-when 4: no ID minting in this script; standard library only."""
 
     def test_no_id_minting_symbols(self):
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn("generate_ulid_short", source)
         self.assertNotIn("CROCKFORD", source)
         self.assertNotIn("_generated_ids", source)
+        self.assertIn("ensure_id", source, "id minting goes through kb_common.ensure_id")
 
     def test_stdlib_only_and_reuses_kb_common(self):
         allowed = set(sys.stdlib_module_names) | {"kb_common"}

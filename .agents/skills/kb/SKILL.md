@@ -70,7 +70,7 @@ kbutil new "<Article Title>" --dir <output-directory> --tags <comma-separated-ta
     --repo <repository-path-or-url> [--commit <sha>] [--last-validated YYYY-MM-DD]
 ```
 
-The command creates `<output-directory>/<normalized-stem>.md` with `createdate`, `title`, and `tags` frontmatter (`.local/bin/kb-utilities/new_doc.py:67-100`) and derives the git provenance fields the referenced repository can provide (`.local/bin/kb-utilities/git_fields.py:167-190`):
+The command creates `<output-directory>/<normalized-stem>.md` with `id`, `createdate`, `title`, and `tags` frontmatter (`.local/bin/kb-utilities/new_doc.py:67-101`) and derives the git provenance fields the referenced repository can provide (`.local/bin/kb-utilities/git_fields.py:167-190`):
 
 - `source_commit` — the full 40-hex sha the article is based on: HEAD of the referenced repository, or `--commit` resolved to its full sha (`.local/bin/kb-utilities/git_fields.py:123-138`).
 - `last_validated` — the `YYYY-MM-DD` date the article was validated against the repository; `--last-validated` when given, otherwise today (`.local/bin/kb-utilities/git_fields.py:141-153`).
@@ -89,7 +89,7 @@ These fields describe the repository the article references, never the notebook 
    kbutil clean <absolute-path-to-the-new-file>
    ```
 
-   This adds id-free frontmatter (`createdate` with a `-07:00` offset, `title` derived from the filename stem, a tags block) to a document without one, and normalizes and suggests tags in a document that already has frontmatter (`.local/bin/kb-utilities/doc_fix.py:164-180`, `.local/bin/kb-utilities/doc_fix.py:388-410`). Tags stay within a ten-tag maximum (`.local/bin/kb-utilities/doc_fix.py:331`).
+   This adds frontmatter (`id` minted with the recovered notebook generator, `createdate` with a `-07:00` offset, `title` derived from the filename stem, a tags block) to a document without one, and normalizes and suggests tags in a document that already has frontmatter (`.local/bin/kb-utilities/doc_fix.py:164-181`, `.local/bin/kb-utilities/doc_fix.py:388-410`). Tags stay within a ten-tag maximum (`.local/bin/kb-utilities/doc_fix.py:331`).
 
 ## Verify what the tools produced
 
@@ -97,6 +97,7 @@ After the tools finish, verify each new document rather than trusting command ou
 
 - the filename stem follows the naming rules, with no ID prefix;
 - the frontmatter title is the normalized, lowercase, space-separated title without a length cap; it matches the stem with dashes as spaces only when the stem was never truncated;
+- an `id` frontmatter field is present, first, and valid: 8 characters from the lowercase Crockford Base32 alphabet (`.local/bin/kb-utilities/kb_common.py`);
 - `createdate`, `title`, and `tags` are present and valid;
 - git-related articles carry the git fields their referenced repository provides
   (`source_commit`, `last_validated`, `git_repo`), and `git_repo` shows no

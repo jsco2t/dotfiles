@@ -10,8 +10,11 @@ convention and fixes both:
   frontmatter title: lowercase kebab-case, at most 42 characters. No ID
   prefix is required and none is minted.
 - The frontmatter title becomes kb_common.normalize_title of the title.
-- A fixed document drops the obsolete ``id`` frontmatter field. Every
-  other field, the tags, and the body are preserved verbatim.
+- The document carries a valid ``id`` frontmatter field: an existing
+  8-character Crockford Base32 id is kept as-is; a missing or invalid id
+  is minted through kb_common.ensure_id and written as the first
+  frontmatter field. Every other field, the tags, and the body are
+  preserved verbatim.
 
 Two documents that map to the same target get distinct names: the second
 and later ones receive a numeric suffix (``-2``, ``-3``, ...) sized so the
@@ -77,7 +80,7 @@ class Fix(NamedTuple):
     fields: dict[str, str]      # frontmatter fields with the fix applied
     tags: list[str]
     body: str
-    dropped_id: bool            # whether an obsolete id field is removed
+    minted_id: bool             # whether a new id field was minted
     reason: str                 # one-line description of what is wrong
 
 
@@ -133,13 +136,19 @@ def plan_file(
     if title != normalized:
         reasons.append("title is not normalized")
     stem = filename[:-3] if filename.endswith(".md") else filename
-    rename = not no_rename and stem != kb_common.normalize_filename(title)
+    # A collision-suffixed stem (same-topic-2 for "Same Topic") is the
+    # stable outcome of an earlier run: it conforms and never renames,
+    # otherwise the -2 and -3 forms of one title would swap every run.
+    rename = (not no_rename and stem != kb_common.normalize_filename(title)
+              and not kb_common.is_collision_stem(stem, title))
     if rename:
         reasons.append("filename does not match the title")
+    new_fields, minted = kb_common.ensure_id(fields)
+    if minted:
+        reasons.append("frontmatter id is missing or invalid")
     if not reasons:
         return (None, "")
 
-    new_fields = {key: value for key, value in fields.items() if key != "id"}
     new_fields["title"] = normalized
     new_basename = take_target(title, taken[directory]) if rename else None
 
@@ -151,7 +160,7 @@ def plan_file(
         fields=new_fields,
         tags=tags,
         body=body,
-        dropped_id="id" in fields,
+        minted_id=minted,
         reason=" and ".join(reasons),
     )
     return (fix, "")
@@ -314,8 +323,8 @@ def main() -> int:
                     if status == "renamed":
                         print(f"  Renamed: {pair[0]} -> {pair[1]}")
                     print(f"  Set the title to: {fix.fields['title']}")
-                    if fix.dropped_id:
-                        print("  Dropped the obsolete id field")
+                    if fix.minted_id:
+                        print(f"  Minted the id field: {fix.fields['id']}")
         if not quiet:
             print()
 

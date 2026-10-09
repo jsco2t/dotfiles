@@ -27,8 +27,10 @@ doc_fix.py --json PATH...
     "## Table of Contents" section is rebuilt from the ## headings outside
     code fences, numbered, with GitHub-style anchors. A file without
     frontmatter gains one whose title is kb_common.title_from_filename of
-    the filename stem (no ID-prefix stripping) and whose createdate is
-    ISO 8601 with a -07:00 offset; it carries no id field. --dry-run
+    the filename stem (no ID-prefix stripping), whose createdate is
+    ISO 8601 with a -07:00 offset, and whose id is minted with the
+    recovered notebook generator (kb_common.generate_ulid_short).
+    --dry-run
     reports the same changes but writes nothing. Directories named in
     kb_common.EXCLUDED_DIRS and hidden directories are never scanned.
 
@@ -359,7 +361,8 @@ class TestDocFixFrontmatter(unittest.TestCase):
         self.assertEqual(fields["title"], "docker networking basics")
         self.assertEqual(fields["title"],
                          kb_common.title_from_filename("docker-networking-basics"))
-        self.assertNotIn("id", fields)
+        # The added frontmatter carries a valid minted id.
+        self.assertTrue(kb_common.is_valid_ulid_short(fields["id"]))
         self.assertRegex(fields["createdate"],
                          r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}-07:00$")
         # The body carries no taggable keywords, so the tags stay empty.
@@ -535,16 +538,28 @@ class TestPortedScriptConventions(unittest.TestCase):
                     f"{sorted(modules - allowed)}",
                 )
 
-    def test_no_id_prefix_or_id_generation_logic(self):
+    def test_no_raw_id_generation_logic(self):
+        # doc_fix mints ids only through the shared kb_common call (any
+        # occurrence of the generator's name must be kb_common-qualified);
+        # the raw generator logic (alphabet, timestamp encoding, dedup
+        # set) must stay in kb_common, and the 8-char ID filename prefix
+        # is never stripped.
         for source in (DOC_FIX, FIX_LINKS):
             with self.subTest(source=source.name):
-                src = source.read_text(encoding="utf-8").lower()
-                for marker in ("ulid", "crockford", "generate_"):
-                    self.assertNotIn(marker, src,
-                                     f"{source.name} carries ID-generation "
+                src = source.read_text(encoding="utf-8")
+                self.assertNotIn("generate_ulid_short",
+                                 src.replace("kb_common.generate_ulid_short",
+                                             ""),
+                                 f"{source.name} mints ids only via "
+                                 "kb_common.generate_ulid_short")
+                low = src.lower()
+                for marker in ("crockford", "random.choices", "_generated_",
+                               "time.time"):
+                    self.assertNotIn(marker, low,
+                                     f"{source.name} carries raw ID-generation "
                                      f"logic ({marker})")
                 self.assertIsNone(
-                    re.search(r"\[0-9a-z\]\{8\}", src),
+                    re.search(r"\[0-9a-z\]\{8\}", low),
                     f"{source.name} still strips the 8-char ID filename "
                     "prefix",
                 )

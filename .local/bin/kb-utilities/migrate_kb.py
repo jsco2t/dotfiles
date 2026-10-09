@@ -10,11 +10,13 @@ old-convention document is a Markdown file that carries any of the old
 - a filename stem that is not ``kb_common.normalize_filename`` of its
   frontmatter title,
 - a title that is not ``kb_common.normalize_title`` of itself, or
-- a stray ``id`` frontmatter field.
+- a missing or invalid ``id`` frontmatter field.
 
 The fix renames the file to ``kb_common.normalize_filename`` of its
 title, rewrites the title to ``kb_common.normalize_title`` of itself,
-and drops the obsolete ``id`` field. Every other field, the tags, and
+and mints a new ``id`` (kb_common.generate_ulid_short, the recovered
+notebook generator) when the field is missing or invalid; an existing
+valid id is kept as-is. Every other field, the tags, and
 the body are preserved verbatim: body wikilinks are NOT rewritten here,
 that is fix_wiki_links.py's job, driven by the {old,new} mapping this
 script optionally writes with --mapping-out.
@@ -59,22 +61,6 @@ import kb_common
 # followed by an underscore.
 _ID_PREFIX_RE = re.compile(r"^[0-9a-z]{8}_")
 
-# A numeric collision suffix on a filename stem: <base>-<digits>.
-_SUFFIX_STEM_RE = re.compile(r"^(.*)-([0-9]+)$")
-
-
-def is_collision_stem(stem: str, title: str) -> bool:
-    """True when stem is a collision-suffixed name for title.
-
-    A stem such as same-topic-2 for "Same Topic" is the stable outcome of
-    a previous run's collision handling: it equals kb_common.normalize_filename
-    of the title with that suffix, so it conforms and is never renamed again.
-    """
-    match = _SUFFIX_STEM_RE.match(stem)
-    if not match:
-        return False
-    return kb_common.normalize_filename(title, suffix=match.group(2)) == stem
-
 
 class Fix(NamedTuple):
     """An old-convention document, with its fix fully decided."""
@@ -86,7 +72,7 @@ class Fix(NamedTuple):
     fields: dict[str, str]      # frontmatter fields with the fix applied
     tags: list[str]
     body: str
-    dropped_id: bool            # whether an obsolete id field is removed
+    minted_id: bool             # whether a new id field was minted
     reason: str                 # one-line description of what is wrong
 
 
@@ -156,19 +142,20 @@ def plan_file(
     reasons = []
     stem = filename[:-3] if filename.endswith(".md") else filename
     plain_stem = kb_common.normalize_filename(title)
-    rename_needed = stem != plain_stem and not is_collision_stem(stem, title)
+    rename_needed = (stem != plain_stem
+                     and not kb_common.is_collision_stem(stem, title))
     if _ID_PREFIX_RE.match(stem):
         reasons.append("filename carries an ID prefix")
     elif rename_needed:
         reasons.append("filename does not match the title")
     if title != normalized:
         reasons.append("title is not normalized")
-    if "id" in fields:
-        reasons.append("stray id field")
+    new_fields, minted = kb_common.ensure_id(fields)
+    if minted:
+        reasons.append("frontmatter id is missing or invalid")
     if not reasons:
         return (None, "already conforms")
 
-    new_fields = {key: value for key, value in fields.items() if key != "id"}
     new_fields["title"] = normalized
     rename = rename_needed
     new_basename = take_target(title, taken[directory]) if rename else None
@@ -181,7 +168,7 @@ def plan_file(
         fields=new_fields,
         tags=tags,
         body=body,
-        dropped_id="id" in fields,
+        minted_id=minted,
         reason=" and ".join(reasons),
     )
     return (fix, "")
@@ -326,8 +313,8 @@ def main() -> int:
             print(f"  Fixed in place: {fix.filename}")
         if fix.old_title != fix.fields["title"]:
             print(f"  Set the title to: {fix.fields['title']}")
-        if fix.dropped_id:
-            print("  Dropped the obsolete id field")
+        if fix.minted_id:
+            print(f"  Minted the id field: {fix.fields['id']}")
 
     if args.mapping_out:
         with open(args.mapping_out, "w", encoding="utf-8") as f:

@@ -1,6 +1,6 @@
 ---
 name: kb
-description: Create one or more standalone Markdown knowledge-base articles from supplied material or prior conversation and write them to an explicitly supplied output location. Use when the user asks to capture a topic as KB entries; requires both an output location and a topic, and applies notebook-specific frontmatter, IDs, and filenames when the target is inside a Git repository named notebook.
+description: Create one or more standalone Markdown knowledge-base articles from supplied material or prior conversation and write them to an explicitly supplied output location. Use when the user asks to capture a topic as KB entries; applies the kb-utilities naming, title, frontmatter, and git-provenance conventions through the kbutil toolkit.
 ---
 
 # Knowledge Base Articles
@@ -48,65 +48,63 @@ For every article:
 
 Avoid chat artifacts, repeated conclusions, generic filler, and unexplained references to "above" or "earlier." A reader should not need the original conversation to use the article.
 
-## Detect notebook mode
+## Naming and title rules
 
-Before naming or writing files, resolve the output location to an absolute path. Starting from the location or its nearest existing parent, use Git to find the repository root. Notebook mode applies only when the output is inside a Git worktree whose repository-root directory is named `notebook`. Do not infer notebook mode merely because another path component contains that word.
+A document is named after its title; no ID prefix is ever minted.
 
-Honor the output location exactly; notebook mode does not implicitly redirect output to a different directory such as `kb/`.
+- **Filename stem.** The stem is the title normalized: lowercased, apostrophes dropped entirely, every other non-alphanumeric character turned into a space, whitespace collapsed and trimmed, then spaces replaced with dashes and the stem truncated to at most 42 characters at a dash boundary (`.local/bin/kb-utilities/kb_common.py:39`, `.local/bin/kb-utilities/kb_common.py:46-89`). A name collision appends a numeric suffix such as `-2`, sized so the whole stem stays within the cap (`.local/bin/kb-utilities/kb_common.py:74-89`).
+- **Frontmatter title.** The title is the normalized text with spaces kept: lowercase, no special characters, no length cap (`.local/bin/kb-utilities/new_doc.py:84-87`). It matches the filename stem with dashes as spaces only when the title was short enough that the stem was never truncated; a truncated stem is shorter than the title (`.local/bin/kb-utilities/kb_common.py:92-94`).
 
-## Write ordinary Markdown outside a notebook repository
+Do not hand-derive these forms when a tool derives them for you; the authoring workflow below does.
 
-Inspect nearby documents and applicable repository guidance for local conventions. When the output is a directory and no stronger convention exists, use a concise `snake_case.md` filename. Do not add notebook IDs or run the bundled notebook maintenance scripts outside notebook mode.
+## Author articles with kbutil
 
-Never overwrite an existing article unless the user explicitly asked to replace or update it. Choose a more specific non-conflicting filename when that preserves the user's intent; ask when it does not.
+The kb-utilities toolkit ships in the dotfiles repository at `.local/bin/kb-utilities/`, with the entrypoint symlink `.local/bin/kbutil` (`.local/bin/kb-utilities/kbutil:1-31`). Invoke `kbutil` directly when `.local/bin` is on the PATH, otherwise `python3 <dotfiles-repo>/.local/bin/kbutil`. Always pass explicit file and directory arguments; never point a toolkit command at a directory you did not create when only one document was requested.
 
-## Write articles in notebook mode
+### Article about a git repository
 
-The helper scripts are bundled with this skill. Refer to them from the directory containing this `SKILL.md`; do not use copies from the target repository.
+A git-related article is one whose subject is a specific git repository, local or remote. Create it with `kbutil new`, which requires the referenced repository explicitly (`--repo`; `.local/bin/kb-utilities/kbutil:165-175`):
 
-For each new article:
+```bash
+kbutil new "<Article Title>" --dir <output-directory> --tags <comma-separated-tags> \
+    --repo <repository-path-or-url> [--commit <sha>] [--last-validated YYYY-MM-DD]
+```
 
-1. Create a temporary semantic filename in the requested output directory using `snake_case.md` with no ID prefix.
-2. Add this YAML frontmatter before the article body:
+The command creates `<output-directory>/<normalized-stem>.md` with `createdate`, `title`, and `tags` frontmatter (`.local/bin/kb-utilities/new_doc.py:67-100`) and derives the git provenance fields the referenced repository can provide (`.local/bin/kb-utilities/git_fields.py:167-190`):
 
-   ```yaml
-   ---
-   id: placeholder
-   createdate: YYYY-MM-DDTHH:MM:SS-07:00
-   title: Descriptive Article Title
-   tags:
-     - relevant-tag
-   ---
-   ```
+- `source_commit` — the full 40-hex sha the article is based on: HEAD of the referenced repository, or `--commit` resolved to its full sha (`.local/bin/kb-utilities/git_fields.py:123-138`).
+- `last_validated` — the `YYYY-MM-DD` date the article was validated against the repository; `--last-validated` when given, otherwise today (`.local/bin/kb-utilities/git_fields.py:141-153`).
+- `git_repo` — the referenced repository's HTTPS URL, with any `user:token@` or `token@` userinfo stripped, so credentials never reach the document (`.local/bin/kb-utilities/git_fields.py:69-104`).
 
-   Use the current date and time with the fixed `-07:00` offset used by the notebook tooling. Choose focused lowercase tags; the cleanup script enforces normalization, exclusions, deduplication, and a ten-tag maximum.
+These fields describe the repository the article references, never the notebook or knowledge base the article lives in. They are derived only from the repository you name with `--repo`; a local path means the fields come from that repository's clone, and a remote URL that is not a local path is recorded as the credential-free HTTPS `git_repo` with no `source_commit` (`.local/bin/kb-utilities/kbutil:22-28`). If the topic names no repository, the article is not git-related: use the plain workflow below.
 
-3. Run the bundled ID tool against that new file only, using absolute paths:
+### Article not about a git repository
 
-   ```bash
-   python3 <skill-directory>/scripts/fix_kb_ids.py <absolute-draft-path>
-   ```
+`kbutil new` always requires a referenced repository, so create the file yourself and let the toolkit add the frontmatter:
 
-   Capture the final renamed path. The tool replaces the placeholder with an eight-character Crockford Base32 ID and prefixes the filename with the same ID.
-
-4. If multiple new articles should link to each other, assign all IDs first and then add links using their final filenames or stems. Do not leave links pointing at the temporary semantic filenames.
-5. Run the bundled document cleanup tool against each final file individually, again using absolute paths:
+1. Write the article body to `<output-directory>/<normalized-stem>.md`, applying the naming rules above by hand.
+2. Run the cleanup tool on that file only:
 
    ```bash
-   python3 <skill-directory>/scripts/doc_fix.py <absolute-final-path>
+   kbutil clean <absolute-path-to-the-new-file>
    ```
 
-   This normalizes and suggests tags and refreshes an existing table of contents. The newly created article is already authorized, so no separate dry-run approval cycle is needed.
+   This adds id-free frontmatter (`createdate` with a `-07:00` offset, `title` derived from the filename stem, a tags block) to a document without one, and normalizes and suggests tags in a document that already has frontmatter (`.local/bin/kb-utilities/doc_fix.py:164-180`, `.local/bin/kb-utilities/doc_fix.py:388-410`). Tags stay within a ten-tag maximum (`.local/bin/kb-utilities/doc_fix.py:331`).
 
-Never run either helper over the whole output directory: doing so could rename or rewrite pre-existing documents outside the requested work.
+## Verify what the tools produced
 
 After the tools finish, verify each new document rather than trusting command output alone:
 
-- the filename is `<8-character-id>_<snake_case_name>.md`;
-- the frontmatter `id` exactly matches the filename prefix;
+- the filename stem follows the naming rules, with no ID prefix;
+- the frontmatter title is the normalized, lowercase, space-separated title without a length cap; it matches the stem with dashes as spaces only when the stem was never truncated;
 - `createdate`, `title`, and `tags` are present and valid;
-- the Markdown body is complete and any inter-article links use final names.
+- git-related articles carry the git fields their referenced repository provides
+  (`source_commit`, `last_validated`, `git_repo`), and `git_repo` shows no
+  userinfo or credential;
+- the Markdown body is complete and any inter-article links use the final filenames or stems.
+
+A rename or creation never overwrites an existing file; a collision receives a numeric suffix (`.local/bin/kb-utilities/new_doc.py:49-64`). If a suffix appeared, confirm it preserves the user's intent.
 
 ## Report the result
 
-List every final article path and title. In notebook mode, include its assigned ID. When the topic was split, briefly state the boundary used so the user can judge whether the grouping is useful. Do not commit or push the new documents unless the user separately requests it.
+List every final article path and title. For git-related articles, include the referenced repository and the `source_commit` recorded. When the topic was split, briefly state the boundary used so the user can judge whether the grouping is useful. Do not commit or push the new documents unless the user separately requests it.

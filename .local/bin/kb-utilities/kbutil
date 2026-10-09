@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""kbutil — single entrypoint for the kb-utilities toolkit.
+
+kbutil routes its subcommands to the sibling modules in its own
+directory, located relative to kbutil's __file__ (never relative to the
+caller's working directory):
+
+    new         create a kb document from a title        (new_doc.py)
+    clean       frontmatter cleanup                      (doc_fix.py)
+    names       fix document names and titles            (fix_kb_ids.py)
+    links       fix wiki-links after renames             (fix_wiki_links.py)
+    fix         migrate old-convention documents         (migrate_kb.py)
+    git-fields  derive the git provenance fields         (git_fields.py)
+    validate    refresh last_validated on a document     (git_fields.py)
+    check       report-only conformance scan             (migrate_kb.py)
+
+clean, names, links and fix run the sibling script with the arguments
+that follow the subcommand word, so `kbutil fix DIR` runs
+`migrate_kb.py DIR` and their behavior is exactly the sibling's own
+CLI. new, git-fields, validate and check are implemented here on top
+of the siblings' functions.
+
+The git fields (source_commit, last_validated, git_repo) describe the
+repository a document REFERENCES. new, git-fields and validate take
+that repository explicitly: a local repository path, or a remote URL
+that is recorded for git_repo (credentials stripped) when no local
+clone exists. They never fall back to the document's enclosing
+repository or the current working directory; without an explicit
+repository they fail with a usage error.
+
+Only the Python standard library is used.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+UTILITIES = Path(__file__).resolve().parent
+if str(UTILITIES) not in sys.path:
+    sys.path.insert(0, str(UTILITIES))
+
+import git_fields
+import kb_common
+import migrate_kb
+import new_doc
+
+# Subcommands that run the sibling script verbatim, with the arguments
+# that follow the subcommand word as the sibling's argv.
+ROUTED_SIBLINGS = {
+    "clean": "doc_fix.py",
+    "names": "fix_kb_ids.py",
+    "links": "fix_wiki_links.py",
+    "fix": "migrate_kb.py",
+}
+
+
+# ── Git provenance ──────────────────────────────────────────────────────────
+
+def derive_fields(
+    repo: str,
+    commit: str | None = None,
+    last_validated: str | None = None,
+) -> dict[str, str]:
+    """Derive the git provenance fields for the referenced repository.
+
+    An existing directory is treated as a local repository and handed to
+    git_fields.derive_git_fields. Anything else must be a remote URL:
+    it is recorded for git_repo with credentials stripped, and carries
+    no source_commit because there is no local clone to resolve a commit
+    from. A path that is neither a usable repository nor a URL raises
+    ValueError.
+    """
+    if os.path.isdir(repo):
+        return git_fields.derive_git_fields(
+            repo, commit=commit, last_validated=last_validated
+        )
+    url = git_fields.normalize_remote_url(repo)
+    if url:
+        return {
+            "last_validated": git_fields._validated_last_validated(last_validated),
+            "git_repo": url,
+        }
+    raise ValueError(f"not a git repository or remote URL: {repo}")
+
+
+# ── Subcommand implementations ──────────────────────────────────────────────
+
+def cmd_new(args: argparse.Namespace) -> int:
+    """Create a document from a title with the referenced repo's fields."""
+    try:
+        fields = derive_fields(args.repo, args.commit, args.last_validated)
+        tags = [tag.strip() for tag in args.tags.split(",") if tag.strip()]
+        path = new_doc.create_document(args.title, tags=tags, directory=args.dir)
+        git_fields.update_git_fields(path, fields)
+    except (ValueError, OSError) as err:
+        print(f"kbutil: {err}", file=sys.stderr)
+        return 1
+    print(path)
+    return 0
+
+
+def cmd_git_fields(args: argparse.Namespace) -> int:
+    """Print the derived git provenance fields for the referenced repo."""
+    try:
+        fields = derive_fields(args.repo, None, args.last_validated)
+    except (ValueError, OSError) as err:
+        print(f"kbutil: {err}", file=sys.stderr)
+        return 1
+    for key in git_fields.GIT_FIELD_KEYS:
+        if key in fields:
+            print(f"{key}: {fields[key]}")
+    return 0
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    """Refresh the git provenance fields on one document."""
+    try:
+        fields = derive_fields(args.repo, None, args.last_validated)
+        git_fields.update_git_fields(args.document, fields)
+    except (ValueError, OSError) as err:
+        print(f"kbutil: {err}", file=sys.stderr)
+        return 1
+    print(args.document)
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Report non-conforming documents; never write anything."""
+    target = os.path.abspath(args.path)
+    if not os.path.isdir(target):
+        print(f"kbutil: '{args.path}' is not a valid directory", file=sys.stderr)
+        return 1
+    md_files = migrate_kb.find_markdown_files(target)
+    print(f"Scanning: {target}")
+    print(f"Found {len(md_files)} markdown files\n")
+    fixes, skipped = migrate_kb.plan_documents(md_files)
+    for fix in fixes:
+        print(f"{fix.filename}: non-conforming ({fix.reason})")
+    for name, note in skipped:
+        print(f"{name}: {note}")
+    return 0
+
+
+def run_sibling(command: str, rest: list[str]) -> int:
+    """Run the routed sibling script on the arguments after the word.
+
+    The sibling gets exactly the caller's arguments after the subcommand
+    word, so `kbutil fix DIR` runs `migrate_kb.py DIR` and the routed
+    behavior is the sibling's own CLI. Routing happens before argparse
+    so the sibling's flags (a leading --mapping-file, for instance) are
+    never parsed by kbutil's own parser, whose REMAINDER handling does
+    not capture a leading option.
+    """
+    sibling = UTILITIES / ROUTED_SIBLINGS[command]
+    proc = subprocess.run([sys.executable, str(sibling), *rest])
+    return proc.returncode
+
+
+def cmd_sibling(args: argparse.Namespace) -> int:
+    """Dispatch entry for the routed subcommands (see run_sibling)."""
+    return run_sibling(args.command, args.rest)
+
+
+# ── Parser ──────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="kbutil",
+        description="kb-utilities toolkit: create, clean, fix, validate "
+                    "and check kb documents.",
+    )
+    sub = parser.add_subparsers(dest="command", metavar="command")
+    sub.required = True
+
+    p = sub.add_parser("new", help="create a kb document from a title")
+    p.add_argument("title", help="document title; the filename derives from it")
+    p.add_argument("--tags", default="", help="comma-separated tags")
+    p.add_argument("--dir", type=Path, default=None,
+                   help="directory to create the document in (default: cwd)")
+    p.add_argument("--repo", required=True,
+                   help="referenced repository: a local path or a remote URL")
+    p.add_argument("--commit", default=None, help="commit sha for source_commit")
+    p.add_argument("--last-validated", dest="last_validated", default=None,
+                   help="validation date as YYYY-MM-DD (default: today)")
+    p.set_defaults(func=cmd_new)
+
+    p = sub.add_parser("clean", help="frontmatter cleanup (doc_fix.py)")
+    p.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_sibling)
+
+    p = sub.add_parser("names", help="fix document names and titles (fix_kb_ids.py)")
+    p.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_sibling)
+
+    p = sub.add_parser("links", help="fix wiki-links after renames (fix_wiki_links.py)")
+    p.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_sibling)
+
+    p = sub.add_parser("fix", help="migrate old-convention documents (migrate_kb.py)")
+    p.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_sibling)
+
+    p = sub.add_parser("git-fields", help="print the derived git provenance fields")
+    p.add_argument("repo", help="referenced repository: a local path or a remote URL")
+    p.add_argument("--last-validated", dest="last_validated", default=None,
+                   help="validation date as YYYY-MM-DD (default: today)")
+    p.set_defaults(func=cmd_git_fields)
+
+    p = sub.add_parser("validate", help="refresh last_validated on a document")
+    p.add_argument("document", help="path to the kb document to refresh")
+    p.add_argument("--repo", required=True,
+                   help="referenced repository: a local path or a remote URL")
+    p.add_argument("--last-validated", dest="last_validated", default=None,
+                   help="validation date as YYYY-MM-DD (default: today)")
+    p.set_defaults(func=cmd_validate)
+
+    p = sub.add_parser("check", help="report non-conforming documents without writing")
+    p.add_argument("path", help="directory containing kb documents")
+    p.set_defaults(func=cmd_check)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Routed subcommands are dispatched pre-parse (in the style of ghtk's
+    # pre-parse --repo strip): their arguments belong to the sibling's
+    # parser, not to kbutil's.
+    if argv and argv[0] in ROUTED_SIBLINGS:
+        return run_sibling(argv[0], argv[1:])
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

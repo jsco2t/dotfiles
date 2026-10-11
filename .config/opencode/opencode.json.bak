@@ -1,0 +1,30 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "external_directory": {
+      "~/Developer/sources/personal/notebook/**": "allow",
+      "~/Developer/sources/personal/projects/**": "allow",
+      "~/.config/opencode/output-styles/": "allow"
+    },
+    "edit": {
+      "*": "allow",
+      "~/Developer/sources/personal/notebook/**": "allow",
+      "~/Developer/sources/personal/projects/**": "allow",
+      "~/.ssh": "deny",
+      "~/.aws": "deny",
+      "~/.kube": "deny",
+      "~/.dotfiles": "deny",
+      "~/.github": "deny",
+      "~/.docker": "deny",
+      "~/.pulumi": "deny",
+      "~/.config/atlassian-toolkit": "deny",
+      "~/.config/anthropic": "deny",
+      "~/.config/gcloud": "deny",
+      "~/.config/gh": "deny",
+      "~/.config/configstore": "deny",
+      "/.local/state": "deny",
+      "~/.local/share": "deny",
+      "~/.cache": "deny"
+    }
+  }
+}

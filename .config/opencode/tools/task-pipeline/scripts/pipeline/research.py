@@ -1,7 +1,8 @@
-"""Planning research: small, narrowly scoped items inside a research budget the human agreed
-to. Each item answers at most three questions in a small JSON file; anything that needs more
-investigation comes back as a followup, which the manager pursues (a new item) or dismisses.
-State lives under state["recon"] (the name older workflows use)."""
+"""Planning research: small, narrowly scoped items, each a few questions answered in a small
+JSON file within its own time box (the stall-detection unit). The research budget is the
+manager's own reporting metadata — not a human approval and never a refusal. Anything that
+needs more investigation comes back as a followup, which the manager pursues (a new item) or
+dismisses. State lives under state["recon"] (the name older workflows use)."""
 from __future__ import annotations
 
 import json
@@ -91,10 +92,6 @@ def cmd_add(wf: Workflow, rid: str, agent: str, purpose: Optional[str], question
         if state["phase"] != "PLANNING":
             raise TPError(f"Research happens only while PLANNING; the workflow is {state['phase']}.")
         scope = scopemod.load_scope(wf)
-        total = budget(state, scope)
-        if not total:
-            raise TPError("There is no research budget in the confirmed scope. A clear, small ask needs none; if "
-                          "this one does, agree a budget and researchers with the human (`tp revise --scope`).")
         errs = []
         if not re.fullmatch(r"R\d+", rid) or rid in items(state):
             errs.append(f"research id {rid!r} must be new and look like R1.")
@@ -127,10 +124,14 @@ def cmd_add(wf: Workflow, rid: str, agent: str, purpose: Optional[str], question
                     errs.append(f"{from_ref} is already decided.")
             except TPError as exc:
                 errs += exc.lines
-        if not errs and reserved(state) + box > total:
-            errs.append(f"research budget: {reserved(state)} of {total} agent-min reserved; {rid} needs {box} more. "
-                        "Ask the human whether to spend more (`tp research extend --minutes N --answer \"...\"`), "
-                        "or drop or shrink an item.")
+        if not errs:
+            total = budget(state, scope)
+            if reserved(state) + box > total:
+                # The budget is reporting metadata: note the overdraw, refuse nothing. The
+                # per-item time box (≤ research_item_minutes) stays the stall-detection unit.
+                wf.noticed("manager", f"research overdraw: {reserved(state) + box} of {total or 0} agent-min "
+                           f"reserved after {rid} — raise the reporting budget with `tp research extend` if the "
+                           "estimate should grow.")
         if errs:
             raise TPError(*errs)
         items(state)[rid] = {"agent": agent, "purpose": purpose, "questions": questions, "done_when": done_when,
@@ -143,15 +144,17 @@ def cmd_add(wf: Workflow, rid: str, agent: str, purpose: Optional[str], question
         return f"{rid} added ({purpose}, {box} min). {summary(state, scope)}. `tp dispatch {rid}` when ready."
 
 
-def cmd_extend(wf: Workflow, minutes: int, answer: str) -> str:
+def cmd_extend(wf: Workflow, minutes: int, answer: Optional[str] = None,
+               note: Optional[str] = None) -> str:
     with wf.locked():
         state = wf.load()
         if state["phase"] != "PLANNING" or minutes < 1:
             raise TPError("The research budget grows only while PLANNING, by a positive number of minutes.")
         state["research_extra"] = int(state.get("research_extra", 0)) + minutes
         wf.save(state)
-        wf.decision(f"research extend +{minutes} min", answer)
-        return f"research budget +{minutes} agent-min. {summary(state, scopemod.load_scope(wf))}."
+        wf.decision(f"research extend +{minutes} min", answer or note or "manager re-estimate",
+                    who="human" if answer else "manager")
+        return f"research budget +{minutes} agent-min (reporting metadata). {summary(state, scopemod.load_scope(wf))}."
 
 
 def cmd_dismiss(wf: Workflow, ref: str, reason: str) -> str:
@@ -245,7 +248,7 @@ def record(wf: Workflow, state: Dict[str, Any], rid: str) -> str:
            f"{len(data['answers'])} answers, {len(data.get('unknowns', []))} unknowns. Fact-check one answer "
            f"(`tp show {rid} --part answers`) before you rely on it."]
     if item["followups"]:
-        out.append("Followups — decide each (pursue within the budget, or dismiss with a reason):")
+        out.append("Followups — decide each (pursue with a new item, or dismiss with a reason):")
         out += [f"  {f['id']}: {f['question']} — {f['why']}" + (f" [{f['agent']}]" if f.get("agent") else "")
                 for f in item["followups"]]
     out.append(summary(state, scopemod.load_scope(wf)) or "")

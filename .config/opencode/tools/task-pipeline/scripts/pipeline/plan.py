@@ -10,8 +10,8 @@ from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import scope as scopemod
-from .common import (TPError, Workflow, agent_minutes, catalog, limit, load_json, minutes_since, net_agent_minutes,
-                     now_iso, sha_file, words)
+from .common import (TPError, Workflow, agent_minutes, catalog, limit, load_json, minutes_since, now_iso,
+                     sha_file, words)
 
 BUILTIN_TASK_CHECKS = {"docs": "every relative link resolves, and every code citation is written repo-relative "
                                "(`path/to/file.go:12`, `:12-20`) and points at a real line (a citation whose lines "
@@ -343,28 +343,9 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
             errs.append(f"conventions {ref!r} must name an existing file as `wf:<path in the workflow folder>` "
                         "or `<workspace>:<path>`.")
     errs += _validate_batches(plan, scope)
-    budget = scope.get("budget_minutes")
-    if budget:
-        left = budget - (net_agent_minutes(wf, state) if wf else 0.0)
-        # The budget gate sizes REMAINING work: accepted tasks' minutes are already
-        # inside agent_minutes, so counting their full estimates in the critical
-        # path again would double-count them and block every amendment after a
-        # mid-plan burn.
-        done = ({tid for tid, ts in (state or {}).get("tasks", {}).items()
-                 if ts.get("status") in ("accepted", "skipped")} if state else set())
-        pending = {tid: t for tid, t in tasks.items() if tid not in done}
-        total = sum(lane_minutes(t, scope) for t in pending.values())
-        span, chain = critical_path(pending, scope)
-        lanes = limit("max_in_flight")
-        work = math.ceil(total / lanes)
-        sessions, tail = review_tail(plan, scope)
-        if max(span, work) + tail > left:
-            what = (f"critical path is {span} min ({' -> '.join(chain)})" if span >= work
-                    else f"work totals {total} lane-min = {work} min over {lanes} lanes")
-            if tail:
-                what += f", plus a {tail}-min review tail ({sessions} review sessions and their verification)"
-            errs.append(f"{what}, but the budget leaves {left:.0f} of {budget} min — cut or merge tasks, "
-                        "or fewer review lenses.")
+    # Budgets never gate the plan: an over-budget plan is accepted and the numbers are
+    # reported in plan.md, the digest, and the report. The right solution lands; the
+    # manager sizes the budget metadata itself and may extend it at any time.
     return errs
 
 

@@ -47,7 +47,7 @@ Then run the manager loop below from Stage 1.
 
 ## Manager rules
 
-1. **Only the human decides** scope, the research budget, plan approval, and anything off the
+1. **Only the human decides** scope, participants, plan approval, and anything off the
    plan. Ask with the `question` tool; record their words verbatim (`--answer` / `--feedback`).
 2. **At most 3 subagents in flight**, only agents confirmed in scope.json (script-enforced).
    Dispatch them with the `task` tool, one call per agent, naming the subagent by its roster
@@ -69,8 +69,7 @@ ask for content (`all/every files|lines|…`, `exhaustive`, `end-to-end`). It fa
 at once, so fix every question before re-running. When the questions will not fit:
 
 - **Split into more items, never into compound questions** — more questions means more `R<n>`
-  items, each with its own agent and time box. If that overruns the research budget, ask the human
-  and `tp research extend --minutes N --answer "..."`.
+  items, each with its own agent and time box.
 - **Move detail into a referenced file.** A question that needs rules, lists, or long paths stays
   under 40 words by pointing at a file you wrote in the workflow dir, e.g. `Group the notes per the
   rules in <wf>/research/R1-q1.md; output each batch's name, note filenames, and dominant repo
@@ -79,7 +78,7 @@ at once, so fix every question before re-running. When the questions will not fi
 - **Cut words honestly.** Drop articles and hedging, prefer repo-relative paths, and split a
   two-clause question into two items rather than semicolon-chaining it.
 
-## Stage 1 — Scope and research budget (one round with the human)
+## Stage 1 — Scope and budget metadata (one round with the human)
 
 1. Save the request verbatim to a file, then run `tp init <location> --title "<title>"
    --request-file <file> [--budget <minutes>]`. It creates the workflow's own
@@ -94,11 +93,11 @@ at once, so fix every question before re-running. When the questions will not fi
    when it has a direct bearing on the output; prefer the specific reviewers (correctness,
    security, api-compat, test) over broad ones; if unsure whether one should take part, ask.
 5. **One `question` call** (at most 4 questions) covering the output (kind, format, where),
-   participants (multiple choice, several allowed), review (`none` or `final`), the research budget
-   you propose (none, or N agent-minutes and why), and the time budget if not given — settled as N
-   minutes or an explicit "no fixed budget" (`budget_declined: true` in scope.json; a silent null
-   is refused). Any conventions/policies the human names go into a workflow-dir file listed in
-   `conventions`: they freeze with the plan and reach every brief.
+   participants (multiple choice, several allowed), review (`none` or `final`), and any
+   conventions/policies the work must honor (go into a workflow-dir file listed in
+   `conventions`: they freeze with the plan and reach every brief). **Never ask the human to
+   approve or pick a time budget** — for research or tasks: size budgets yourself as reporting
+   metadata, and never cut, merge, or shrink work to fit one. The right solution lands.
 6. Write `scope.json` (`tp schema scope`), `tp scope check`, show the human the key lines of
    `scope.md`, and confirm (`question`: Confirm / Change): `tp scope confirm --answer "..."`.
 
@@ -112,7 +111,8 @@ at once, so fix every question before re-running. When the questions will not fi
   `tp record <id> --agent-id <the task call's id>` as each returns. Fact-check one answer per item.
 - **Followups** come back in the result; decide each: `tp research add … --from R1.F2`, or
   `tp research dismiss R1.F2 --reason "..."`. Submit refuses while any is undecided.
-- Out of budget → ask the human, then `tp research extend --minutes N --answer "..."`.
+- Out of budget is not a stop: add items freely; each keeps its ≤15-min box (stall detection).
+  `tp research extend --minutes N --note "..."` grows the reporting budget.
 
 ## Stage 3 — Plan (you write it)
 
@@ -126,8 +126,7 @@ at once, so fix every question before re-running. When the questions will not fi
 - Parallel tasks write disjoint paths; shared files (`index.md`) go to one integration task.
 - Code is test-forward: `test_cmd` (the task's package, not the whole suite) and `tests_paths`.
 - `docs` is a built-in task check; `docs-all` a built-in final check. Define repo commands in `checks`.
-- With `review: final`, split packages over 10 tasks into `review_batches`. The budget includes
-  the review tail.
+- With `review: final`, split packages over 10 tasks into `review_batches`.
 - `tp plan check` until clean, then `tp plan submit`. `tp next` warns once planning passes 45 min.
 
 ## Stage 4 — Approval
@@ -150,8 +149,12 @@ Loop on `tp next`:
   `tp record <id> --agent-id <the task call's id>`; if the hand-back sat stalled (backend silent,
   no tool calls), add `--dead-minutes N` (`tp clock <id> --dead-minutes N --note "..."` corrects
   one already recorded).
-- **Budget honesty.** `tp next` warns at 80% and over; dispatch refuses over budget. A bigger
-  number is not a plan change: `tp budget extend --minutes N --answer "<the human's words>"`.
+- **Time reports, never gates.** The meter (net of dead clock) shows in `tp next`, `tp digest`,
+  and the report; nothing is refused for being over budget and no work is compressed to fit one.
+  Time vs estimate flags suspicious hand-backs — that is stall detection, not a limit.
+- **Present a digest at a reasonable interval** — after each dispatch wave settles, or whenever
+  the human asks: run `tp digest` and show its output (agents in flight, progress by group,
+  minutes by phase). Narrate decisions and results; let the digest carry the status.
 - **Mechanical corrections batch.** Widen a write set (`tp widen <id> --path <file> --reason
   "..."` — allowed even after acceptance; refuses paths a live task owns) and fix checks
   (`tp amend --reason "..."`) in one call per round; ask the human **once per round** if at all.

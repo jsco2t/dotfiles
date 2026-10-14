@@ -332,6 +332,7 @@
   "max_batch_tasks": 10,
   "max_fix_rounds": 2,
   "max_in_flight": 3,
+  "max_lost_retries": 3,
   "max_participants": 8,
   "max_path_expand": 200,
   "max_research_questions": 3,

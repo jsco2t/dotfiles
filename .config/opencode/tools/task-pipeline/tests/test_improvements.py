@@ -30,39 +30,34 @@ def set_state(h: Harness, **fields) -> None:
     p.write_text(json.dumps(st, indent=1))
 
 
-class BudgetTest(unittest.TestCase):
-    """T2/T3: the budget is honest, extendable while EXECUTING, and gates dispatch."""
+class BudgetReportingTest(unittest.TestCase):
+    """Budgets are reporting metadata the manager sizes itself — never a human question,
+    never a gate, never a reason to cut work. Time vs estimate feeds stall detection only."""
 
     def setUp(self) -> None:
-        self.h = h = Harness()
-        h.approved(budget_minutes=200)
+        self.h = Harness()
+        self.h.approved(budget_minutes=200)
 
     def tearDown(self) -> None:
         self.h.close()
 
-    def test_next_warns_near_and_over_budget(self) -> None:
-        set_state(self.h, agent_minutes=170.0)
-        warnings = self.h.next()["warnings"]
-        self.assertTrue(any("80%" in w or "near" in w.lower() for w in warnings), warnings)
-        set_state(self.h, agent_minutes=210.0)
-        warnings = self.h.next()["warnings"]
-        self.assertTrue(any("over budget" in w.lower() for w in warnings), warnings)
-
-    def test_dispatch_refuses_over_budget_until_extended(self) -> None:
+    def test_next_never_warns_about_the_budget_and_still_reports_the_meter(self) -> None:
         set_state(self.h, agent_minutes=999.0)
-        err = self.h.tp("dispatch", "T01", expect=2).text
-        self.assertIn("budget", err)
-        self.assertIn("budget extend", err)
-        out = self.h.tp("budget", "extend", "--minutes", "1000", "--answer", "Take what you need.").out
-        self.assertIn("1200", out)
-        res = json.loads((self.h.wf / "scope.json").read_text())
-        self.assertEqual(res["budget_minutes"], 1200)
-        self.assertEqual(self.h.state()["budget_minutes"], 1200)
-        self.h.tp("dispatch", "T01")  # works now
-        self.assertIn("budget extend +1000", (self.h.wf / "decisions.md").read_text())
+        out = self.h.next()
+        self.assertEqual([w for w in out["warnings"] if "budget" in w.lower()], [])
+        self.assertIn("999", self.h.tp("next").out.splitlines()[0])
 
-    def test_extend_needs_the_humans_answer(self) -> None:
-        self.h.tp("budget", "extend", "--minutes", "60", expect=2)
+    def test_dispatch_does_not_gate_on_the_budget(self) -> None:
+        set_state(self.h, agent_minutes=999.0)
+        self.h.tp("dispatch", "T01")     # the right solution lands even when the meter is over
+        self.assertIn("T01", self.h.state()["in_flight"])
+
+    def test_budget_extend_is_metadata_not_an_approval(self) -> None:
+        self.h.tp("budget", "extend", "--minutes", "100", "--note", "manager re-estimate after scoping.")
+        self.assertEqual(json.loads((self.h.wf / "scope.json").read_text())["budget_minutes"], 300)
+        self.assertIn("manager re-estimate", (self.h.wf / "decisions.md").read_text())
+        self.h.tp("budget", "extend", "--minutes", "50", "--answer", "Sure, take more.")  # human may volunteer
+        self.assertEqual(json.loads((self.h.wf / "scope.json").read_text())["budget_minutes"], 350)
 
     def test_headline_shows_net_of_dead_minutes(self) -> None:
         set_state(self.h, agent_minutes=100.0, dead_minutes=40.0)
@@ -295,7 +290,7 @@ class FinalCheckTest(unittest.TestCase):
 
 
 class ScopeBudgetTest(unittest.TestCase):
-    """D4: a null budget is an error unless the human explicitly declined one."""
+    """A null budget is fine: the manager sizes budgets itself, and never asks the human."""
 
     def setUp(self) -> None:
         self.h = Harness()
@@ -303,17 +298,11 @@ class ScopeBudgetTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.h.close()
 
-    def test_null_budget_needs_an_explicit_decline(self) -> None:
+    def test_null_budget_needs_nothing_from_the_human(self) -> None:
         self.h.init()
         self.h.write_json("scope.json", self.h.scope(budget_minutes=None))
-        err = self.h.tp("scope", "check", expect=2).text
-        self.assertIn("budget_declined", err)
-        scope = self.h.read_json("scope.json")
-        scope["budget_declined"] = True
-        scope["answers"] = scope.get("answers", []) + [
-            {"q": "Time budget for this?", "a": "No fixed budget — take what it needs."}]
-        self.h.write_json("scope.json", scope)
-        self.h.tp("scope", "check")
+        self.h.tp("scope", "check")     # no budget_declined, no question: budgets are metadata
+        self.assertIn("none set", (self.h.wf / "scope.md").read_text())
 
 
 class TriageHintTest(unittest.TestCase):

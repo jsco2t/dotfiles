@@ -199,7 +199,7 @@ GUIDE = {
              "`tp accept {id} --note \"...\"` or `tp reject {id} --reason \"...\"`.",
     "triage": "Triage {id}: `tp show {id} --part blocking`, check each against the source, then "
               "`tp triage {id} --accept-all`, or `--dismiss F# --reason \"...\"` and/or `--assign F#=T##`.",
-    "followup": "Decide {id} ({why}): pursue it (`tp research add ... --from {id}`, within the budget) or "
+    "followup": "Decide {id} ({why}): pursue it (`tp research add ... --from {id}`) or "
                 "`tp research dismiss {id} --reason \"...\"`.",
     "human": "Stop and ask the human{about}: {why}. Record the answer with `tp resolve`.",
     "wait": "Wait for {ids} to hand back; end your turn if nothing else is actionable.",
@@ -211,6 +211,32 @@ GUIDE = {
 }
 
 
+def _liveness_warning(wf: Workflow, state: Dict[str, Any], acts: List[Dict[str, Any]]) -> Optional[str]:
+    """The workflow-level analog of the supervisor's tool-call recency: if `tp next` runs
+    twice in a row with no event in between (no dispatch, record, accept, resolve, …) and
+    the same action set, the pipeline has stopped changing — say for how long and why."""
+    fp = "|".join([state["phase"], str(len(state["in_flight"])),
+                   str(sum(ts["status"] in DONE_STATES for ts in state["tasks"].values())),
+                   ",".join(f"{a['action']}:{a.get('id', '')}" for a in acts)])
+    events = len(wf.events())
+    now = now_iso()
+    mark = state.get("next_check")
+    with wf.locked():
+        state = wf.load()
+        state["next_check"] = {"fp": fp, "events": events, "since": mark["since"] if mark and
+                               mark.get("fp") == fp and mark.get("events") == events else now}
+        wf.save(state)
+    if mark and mark.get("fp") == fp and mark.get("events") == events:
+        idle = minutes_since(mark["since"])
+        if state["in_flight"]:
+            return (f"no state change for {idle:.0f} min while {', '.join(state['in_flight'])} "
+                    f"is/are in flight — end your turn and wait for its hand-back, or check the "
+                    f"backend/harness if it is far past its estimate.")
+        return (f"no state change for {idle:.0f} min and nothing is in flight — run the action "
+                f"above, or resolve what blocks it with the human.")
+    return None
+
+
 def cmd_next(wf: Workflow, as_json: bool) -> str:
     state = wf.load()
     acts = actions(wf, state)
@@ -219,18 +245,10 @@ def cmd_next(wf: Workflow, as_json: bool) -> str:
     if state["phase"] in ("SCOPING", "PLANNING") and spent > limit("planning_warn_minutes"):
         warnings.append(f"Planning has taken {spent:.0f} agent-min (target {limit('planning_warn_minutes')}): "
                         "submit what you have, with open questions for the human.")
-    budget = scopemod.load_scope(wf).get("budget_minutes")
-    if state["phase"] == "EXECUTING" and budget:
-        warn_at = limit("budget_warn_pct") / 100 * budget
-        if spent > budget:
-            warnings.append(f"OVER BUDGET: {spent:.0f} of {budget} agent-min and work remains — "
-                            "either the meter is carrying dead clock (`tp record --dead-minutes N`, `tp lost`) "
-                            "or the run needs more time: `tp budget extend --minutes N --answer \"<the human's "
-                            "words>\"`. Do not start more work without one of the two.")
-        elif spent >= warn_at:
-            warnings.append(f"Budget nearly spent: {spent:.0f} of {budget} agent-min "
-                            f"({limit('budget_warn_pct')}%). Finish what is in flight, or agree more time "
-                            "with the human (`tp budget extend`) before dispatching again.")
+    if state["phase"] != "DONE":
+        idle = _liveness_warning(wf, state, acts)
+        if idle:
+            warnings.append(idle)
     if as_json:
         return json.dumps({"phase": state["phase"], "actions": acts, "agent_minutes": round(spent, 1),
                            "budget_minutes": state.get("budget_minutes"), "warnings": warnings})
@@ -251,6 +269,81 @@ def cmd_next(wf: Workflow, as_json: bool) -> str:
         out.append(f"→ all at once: `tp dispatch {' '.join(ready)}` (one Bash call — never chain dispatches "
                    "with separators), then send every printed call in one message.")
     return "\n".join(out)
+
+
+_GROUP_LABEL = {"code": "coding", "tests": "coding", "kb": "writing", "docs": "writing",
+                "tutorial": "writing"}
+
+
+def cmd_digest(wf: Workflow) -> str:
+    """The human-digestable status report: who is running, what is done by group, where the
+    minutes went. The manager presents it at a reasonable interval — after each dispatch wave
+    settles, or whenever the human asks — instead of narrating every start."""
+    state = wf.load()
+    if state["phase"] == "DONE":
+        return f"DONE — report: {wf.root / 'report.md'}; present it to the human (answer-first)."
+    scope = scopemod.load_scope(wf)
+    budget = scope.get("budget_minutes")
+    spent = net_agent_minutes(wf, state)
+    flight = ", ".join(f"{tid} ({fl['step']} · {fl.get('agent') or 'resumed agent'}, "
+                       f"{minutes_since(fl['since']):.0f}m)"
+                       for tid, fl in state["in_flight"].items())
+    lines = []
+    if state["phase"] in ("SCOPING", "PLANNING", "AWAITING_APPROVAL"):
+        recon = state.get("recon", {})
+        r_done = sum(1 for r in recon.values() if r.get("status") == "done")
+        head = f"{state['phase']} · meter {spent:.0f}" + (f" of {budget} agent-min" if budget else " agent-min")
+        if state["phase"] == "PLANNING":
+            head += f" · research {r_done}/{len(recon)} items done" if recon else " · no research planned"
+        lines.append(head)
+        minutes = sum(e.get("minutes", 0.0) for e in wf.events()
+                      if e["kind"] == "record" and str(e.get("id", "")).startswith("R"))
+        if minutes:
+            lines.append(f"Time: research {minutes:.0f}m")
+    else:
+        plan, scope2, tasks = _loaded(wf, state)
+        groups: Dict[str, List[int]] = {}
+        mins: Dict[str, float] = {}
+        per_task: Dict[str, float] = {}
+        for e in wf.events():
+            if e["kind"] == "record" and "minutes" in e:
+                per_task[e.get("id", "?")] = per_task.get(e.get("id", "?"), 0.0) + e["minutes"]
+        for tid, t in tasks.items():
+            kind = planmod.task_kind(t, scope2)
+            label = _GROUP_LABEL.get(kind or "", kind or "other")
+            ok = state["tasks"].get(tid, {}).get("status") in DONE_STATES
+            g = groups.setdefault(label, [0, 0])
+            g[1] += 1
+            g[0] += 1 if ok else 0
+            mins[label] = mins.get(label, 0.0) + per_task.get(tid, 0.0)
+        recon = state.get("recon", {})
+        if recon:
+            g = groups.setdefault("research", [0, 0])
+            g[0] += sum(1 for r in recon.values() if r.get("status") == "done")
+            g[1] += len(recon)
+            mins["research"] = mins.get("research", 0.0) + sum(m for k, m in per_task.items()
+                                                               if str(k).startswith("R"))
+        reviews = state.get("reviews", {})
+        if reviews:
+            g = groups.setdefault("review", [0, 0])
+            g[0] += sum(1 for s in reviews.values() if s.get("status") == "done")
+            g[1] += len(reviews)
+            mins["review"] = mins.get("review", 0.0) + sum(m for k, m in per_task.items() if "/" in str(k))
+        accepted = sum(1 for ts in state["tasks"].values() if ts["status"] in DONE_STATES)
+        inflight = sum(minutes_since(fl["since"]) for fl in state["in_flight"].values())
+        lines.append(f"{state['phase']} · {accepted}/{len(state['tasks'])} tasks accepted · meter "
+                     f"{spent:.0f}" + (f" of {budget} agent-min" if budget else " agent-min")
+                     + (f" (+{inflight:.0f}m in flight)" if inflight else ""))
+        prog = " · ".join(f"{lbl} {ok}/{n}" for lbl, (ok, n) in groups.items())
+        if prog:
+            lines.append(f"Progress: {prog}")
+        tline = " · ".join(f"{lbl} {m:.0f}m" for lbl, m in
+                           sorted(mins.items(), key=lambda kv: (-kv[1], kv[0])))
+        lines.append(f"Time: {tline or '0m'}")
+    if flight:
+        lines.append(f"Agents in flight: {flight}")
+    lines.append("Next: `tp next`.")
+    return "\n".join(lines)
 
 
 def _headline(wf: Workflow, state: Dict[str, Any]) -> str:
@@ -368,12 +461,6 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
         plan, scope, tasks = _loaded(wf, state)
         if tid not in tasks:
             raise TPError(f"{tid} is not a task in the approved plan.")
-        budget = scope.get("budget_minutes")
-        if budget and net_agent_minutes(wf, state) > budget:
-            raise TPError(f"the meter is over budget: {net_agent_minutes(wf, state):.0f} of {budget} agent-min. "
-                          "If the overage is dead clock, freeze it (`tp lost <id>` / `tp record --dead-minutes N`); "
-                          "if the run genuinely needs more time, `tp budget extend --minutes N --answer "
-                          "\"<the human's words>\"`. Dispatching on an over budget meter hides the overrun.")
         ts, task = state["tasks"][tid], tasks[tid]
         if ts["status"] == "pending" and _deps_open(task, state):
             raise TPError(f"{tid} waits on {', '.join(_deps_open(task, state))} (not accepted yet).")
@@ -542,8 +629,18 @@ def _fail(wf: Workflow, ts: Dict[str, Any], tid: str, findings: List[str], fixin
     lines = [f"  - {f}" for f in findings]
     if ts["round"] > _cap(ts):
         ts["status"] = "blocked"
-        ts["blocked"] = {"kind": "rounds", "summary": f"{tid} still fails after {_cap(ts)} fix rounds"}
         wf.event("blocked", id=tid, reason="rounds")
+        prior = wf.run_dir(tid) / f"findings-{ts['round'] - 1}.json"
+        if ts["round"] > 1 and prior.is_file() and json.loads(prior.read_text()) == findings:
+            # The last two rounds reproduced the exact same findings: the loop was not
+            # converging, so burning the cap was the stall — say so instead of a bare count.
+            ts["blocked"] = {"kind": "rounds", "summary": f"{tid} failed rounds "
+                             f"{ts['round'] - 1} and {ts['round']} with identical findings — the fix loop "
+                             "is not converging"}
+            return "\n".join([f"BLOCKED {tid}: same findings as the previous round ({ts['round'] - 1} → "
+                              f"{ts['round']}) — the fix loop is not converging; the human decides "
+                              "(retry with a new approach, skip, or revise the plan)."] + lines)
+        ts["blocked"] = {"kind": "rounds", "summary": f"{tid} still fails after {_cap(ts)} fix rounds"}
         return "\n".join([f"BLOCKED {tid}: still failing after {_cap(ts)} fix rounds — the human decides "
                           "(retry, skip, or revise the plan)."] + lines)
     ts["status"] = "needs_fix"
@@ -646,6 +743,15 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bo
             msgs.append(f"credited {wait:.0f} min of human-wait.")
         ws = _ws(scope, task["workspace"])
         changed = snapshot.diff(snapshot.load(Path(fl["snap"])), snapshot.take(ws, [wf.root]))
+        if ts["round"] == 0 and effective in ("tests", "impl", "author") and not changed:
+            # A first hand-back that left the workspace untouched is a stall or a lie: no
+            # time threshold involved, and it cannot false-positive on slow-but-working
+            # agents. Round 0 only — a fix round may legitimately land byte-identical
+            # content (and looping fix rounds are the findings-cycle detector's job).
+            # Review steps are exempt — reviewers legitimately change nothing.
+            findings.append("The agent reports done but wrote nothing: the workspace is unchanged since "
+                            "dispatch. Verify (did it work in the wrong place?), then reject it as a fix "
+                            "round or mark the dispatch lost.")
         allowed = list(task["paths"]) + list(PIPELINE_OWNED)
         for other in fl.get("concurrent", []):
             if other in tasks and tasks[other]["workspace"] == task["workspace"]:
@@ -708,6 +814,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bo
         if effective in ("author", "impl"):
             findings += _task_checks(wf, task, scope, plan, label)
         del state["in_flight"][tid]
+        state.setdefault("lost_counts", {}).pop(tid, None)  # a real hand-back resets the loss streak
         if findings:
             out = _fail(wf, ts, tid, findings, fixing=effective)
         elif effective == "tests":
@@ -871,12 +978,26 @@ def cmd_lost(wf: Workflow, tid: str, summary: str) -> str:
                           f"({elapsed:.0f} in-flight minutes frozen out of the meter as dead clock).",
                          "prior": prior, "step": step}
         ts["status"] = "blocked"
+        streak = state.setdefault("lost_counts", {})
+        streak[tid] = streak.get(tid, 0) + 1
         wf.save(state)
         wf.event("lost", id=tid, summary=summary, dead_minutes=round(elapsed, 1))
+        tail = ""
+        cap = limit("max_lost_retries")
+        if streak[tid] >= cap:
+            # Break the re-dispatch loop the way the supervisor breaks an agent's: after
+            # `max_lost_retries` consecutive losses the task stays blocked for the human
+            # (three identical losses happened in one real run); the streak resets on the
+            # next real hand-back.
+            wf.event("lost_breaker", id=tid, losses=streak[tid])
+            tail = (f"\nLOSS BREAKER: {tid} has now been lost {streak[tid]} times in a row — it stays blocked "
+                    f"until the human decides (change the approach, change the machine, or skip). The streak "
+                    f"resets on its next real hand-back.")
         return (f"{tid} marked lost — {elapsed:.0f} in-flight minutes are dead clock, out of the meter. "
                 f"Check the workspace for stranded edits before re-dispatching. To run it again: "
                 f"`tp resolve --task {tid} --action retry --answer \"<the human's words or 'manager: re-run'>\"` "
-                f"then `tp dispatch {tid}` (fresh brief; a task_id resume cannot work, the session is gone).")
+                f"then `tp dispatch {tid}` (fresh brief; a task_id resume cannot work, the session is gone)."
+                + tail)
 
 
 def cmd_clock(wf: Workflow, tid: str, dead: float, note: str) -> str:

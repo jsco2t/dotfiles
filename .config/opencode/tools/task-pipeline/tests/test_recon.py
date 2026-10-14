@@ -81,16 +81,17 @@ class ResearchTest(unittest.TestCase):
         self.assertIn("domain-researcher",
                       self.add("R1", ["Which k8s distros?"], expect=2, agent="domain-researcher").text)
 
-    def test_items_draw_down_the_agreed_budget_and_only_the_human_extends_it(self) -> None:
-        for rid in ("R1", "R2", "R3"):
-            self.add(rid, [f"Which areas does {rid} cover?"])
-        text = self.add("R4", ["Which areas does R4 cover?"], expect=2).text
-        self.assertIn("45 of 45", text)
-        self.assertIn("research extend", text)
-        self.h.tp("research", "extend", "--minutes", "15", "--answer", "Yes, one more item.")
-        self.add("R4", ["Which areas does R4 cover?"])
-        self.assertIn("one more item", (self.h.wf / "decisions.md").read_text())
-        self.assertIn("60 agent-min", self.h.tp("next").out)
+    def test_items_report_against_the_declared_budget_and_the_manager_extends_it(self) -> None:
+        # The budget is reporting metadata: drawing past it is noted, not refused, and
+        # extending it is a manager bookkeeping act, not a human approval.
+        for rid in ("R1", "R2", "R3", "R4"):
+            self.add(rid, [f"Which areas does {rid} cover?"])      # 60 reserved of 45 declared
+        out = self.h.tp("next").out
+        self.assertIn("60 of 45", out)
+        self.h.tp("research", "extend", "--minutes", "15", "--note", "manager: R4 was missed in the estimate.")
+        self.add("R5", ["Which areas does R5 cover?"])
+        self.assertIn("manager: R4 was missed", (self.h.wf / "decisions.md").read_text())
+        self.assertIn("75 of 60", self.h.tp("next").out)
 
     def test_a_time_box_is_at_most_15_minutes(self) -> None:
         self.assertIn("15", self.add("R1", ["Which areas?"], 2, "codebase-researcher", "map", "--minutes", "25").text)
@@ -195,9 +196,11 @@ class NoResearchTest(unittest.TestCase):
             h.confirmed()
             qf = h.root / "q"
             qf.write_text("Which areas?")
+            # No budget, no researcher in scope: the roster gate still applies, but the
+            # missing budget itself is never a refusal.
             res = h.tp("research", "add", "R1", "--agent", "codebase-researcher", "--purpose", "map",
                        "--questions-file", str(qf), "--done-when", "x", expect=2)
-            self.assertIn("no research budget", res.text)
+            self.assertIn("not a confirmed research participant", res.text)
         finally:
             h.close()
 

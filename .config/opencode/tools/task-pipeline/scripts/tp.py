@@ -98,6 +98,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s = sub.add_parser("next", help="what to do next")
     s.add_argument("--json", action="store_true")
+    sub.add_parser("digest", help="human-digestable status report: agents in flight, progress by "
+                                  "group, minutes by phase — present it at a reasonable interval")
 
     s = sub.add_parser("survey", help="deterministic structure map of a repository")
     s.add_argument("path")
@@ -115,7 +117,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("ref")
 
     for name in ("research", "recon"):  # recon: the name older workflows use
-        s = sub.add_parser(name, help="planning research inside the agreed budget")
+        s = sub.add_parser(name, help="planning research: small items, each with a stall-detection time box")
         rs = s.add_subparsers(dest="what", required=True)
         a = rs.add_parser("add", help="add one small research item")
         a.add_argument("id")
@@ -126,9 +128,10 @@ def parser() -> argparse.ArgumentParser:
         a.add_argument("--done-when", required=True)
         a.add_argument("--minutes", type=int, help="time box, at most 15 (default 15)")
         a.add_argument("--from", dest="from_ref", help="the followup this item pursues, e.g. R1.F2")
-        e = rs.add_parser("extend", help="grow the research budget with the human's agreement")
+        e = rs.add_parser("extend", help="raise the research budget (reporting metadata, never a refusal)")
         e.add_argument("--minutes", type=int, required=True)
-        e.add_argument("--answer", required=True)
+        e.add_argument("--answer", help="the human's words, when they volunteer a budget")
+        e.add_argument("--note", help="the manager's reason (the default)")
         d = rs.add_parser("dismiss", help="decide a followup is not worth pursuing")
         d.add_argument("ref")
         d.add_argument("--reason", required=True)
@@ -165,11 +168,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s.add_argument("--path", action="append", required=True, help="a file or folder to add to the write set")
     s.add_argument("--reason", required=True, help="why: the finding or correction that demands it")
-    s = sub.add_parser("budget", help="time-budget commands")
+    s = sub.add_parser("budget", help="time-budget metadata (reports; gates nothing)")
     bs = s.add_subparsers(dest="what", required=True)
-    be = bs.add_parser("extend", help="grow the whole-job budget with the human's agreement (no re-approval)")
+    be = bs.add_parser("extend", help="raise the whole-job budget — manager bookkeeping, never a human approval")
     be.add_argument("--minutes", type=int, required=True)
-    be.add_argument("--answer", required=True, help="the human's words, verbatim")
+    be.add_argument("--answer", help="the human's words, when they volunteer a budget")
+    be.add_argument("--note", help="the manager's reason (the default)")
     s = sub.add_parser("lost", help="mark an in-flight dispatch dead (harness interrupt, restart, host loss): "
                                     "freeze its clock, block the task, point at a fresh re-dispatch")
     s.add_argument("id")
@@ -291,6 +295,8 @@ def dispatch(args: argparse.Namespace) -> str:
         return run.cmd_status(wf, args.json)
     if c == "next":
         return run.cmd_next(wf, args.json)
+    if c == "digest":
+        return run.cmd_digest(wf)
     if c == "survey":
         return cmd_survey(wf, args)
     if c == "scope":
@@ -306,7 +312,7 @@ def dispatch(args: argparse.Namespace) -> str:
             return research.cmd_add(wf, args.id, args.agent, args.purpose, Path(args.questions_file), args.done_when,
                                     args.minutes, args.from_ref)
         if args.what == "extend":
-            return research.cmd_extend(wf, args.minutes, args.answer)
+            return research.cmd_extend(wf, args.minutes, args.answer, args.note)
         if args.what == "dismiss":
             return research.cmd_dismiss(wf, args.ref, args.reason)
         return research.cmd_drop(wf, args.id, args.reason)
@@ -326,7 +332,7 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "widen":
         return planmod.cmd_widen(wf, args.id, args.path, args.reason)
     if c == "budget":
-        return scopemod.cmd_budget_extend(wf, args.minutes, args.answer)
+        return scopemod.cmd_budget_extend(wf, args.minutes, args.answer, args.note)
     if c == "lost":
         return run.cmd_lost(wf, args.id, args.summary)
     if c == "clock":

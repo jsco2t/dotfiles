@@ -59,19 +59,21 @@ class PlanCheckTest(unittest.TestCase):
         tasks = [self.h.task(f"T{i:02d}", f"area{i}/article.md") for i in range(1, 44)]
         text = self.check(self.h.plan(tasks), expect=2).text
         self.assertIn("tasks", text)
-        self.assertIn("budget", text)
 
-    def test_plan_that_cannot_finish_in_the_budget_is_refused(self) -> None:
-        # 30 tasks x 20 min over 3 lanes = 200 min > the 180-min budget.
+    def test_an_over_budget_plan_is_accepted_and_reported(self) -> None:
+        # Budgets report; they never compress the work. 30 tasks x 20 min over 3 lanes
+        # = 200 min against a 180-min budget: check passes, plan.md shows both numbers.
         tasks = [self.h.task(f"T{i:02d}", f"a{i}.md", estimate_min=20) for i in range(1, 31)]
-        text = self.check(self.h.plan(tasks), expect=2).text
-        self.assertIn("budget", text)
-        self.assertIn("200", text)
+        self.check(self.h.plan(tasks))
+        plan_md = (self.h.wf / "plan.md").read_text()
+        self.assertIn("200", plan_md)
+        self.assertIn("180", plan_md)
 
-    def test_a_long_dependency_chain_counts_against_the_budget(self) -> None:
+    def test_a_long_dependency_chain_is_reported_not_refused(self) -> None:
         tasks = [self.h.task(f"T{i:02d}", f"a{i}.md", estimate_min=25,
                              depends_on=[f"T{i - 1:02d}"] if i > 1 else []) for i in range(1, 9)]
-        self.assertIn("critical path", self.check(self.h.plan(tasks), expect=2).text)
+        self.check(self.h.plan(tasks))
+        self.assertIn("min", (self.h.wf / "plan.md").read_text())
 
     def test_overlapping_paths_need_an_ordering(self) -> None:
         plan = self.h.plan([self.h.task("T01", "arch/**"), self.h.task("T02", "arch/overview.md")])
@@ -122,16 +124,17 @@ class ReviewPlanTest(unittest.TestCase):
         self.h.write_json("plan.json", plan)
         return self.h.tp("plan", "check", expect=expect)
 
-    def test_the_review_tail_counts_against_the_budget(self) -> None:
+    def test_the_review_tail_is_reported_not_refused(self) -> None:
         tasks = [self.h.task(f"T0{i}", f"a{i}.md") for i in range(1, 4)]
         self.check(self.h.plan(tasks), budget_minutes=30)                      # 15 min of work: fits
         h2 = Harness()
         try:
             h2.confirmed(budget_minutes=30, **FINAL_REVIEW)
             h2.write_json("plan.json", h2.plan([h2.task(f"T0{i}", f"a{i}.md") for i in range(1, 4)]))
-            text = h2.tp("plan", "check", expect=2).text                      # + 28 min review tail: over
-            self.assertIn("review", text)
-            self.assertIn("budget", text)
+            h2.tp("plan", "check")                                             # + 28 min review tail: over, and fine
+            plan_md = (h2.wf / "plan.md").read_text()
+            self.assertIn("review session", plan_md)
+            self.assertIn("30", plan_md)
         finally:
             h2.close()
 

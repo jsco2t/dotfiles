@@ -19,7 +19,7 @@ class RosterSuggestTest(unittest.TestCase):
         out = self.h.tp("roster", "suggest", "--kinds", "kb", wf=False).out
         self.assertIn("kb: author    kb-author", out)
         self.assertIn("doc-reviewer", out)
-        self.assertIn("only with a research budget", out)
+        self.assertIn("no human approval", out)
         for absent in ("architecture-reviewer", "code-reviewer", "security-reviewer", "project-manager",
                        "test-planner"):
             self.assertNotIn(absent, out)
@@ -167,10 +167,12 @@ class ScopeCheckTest(unittest.TestCase):
         res = self.check(expect=2, review="per-task")
         self.assertIn("reviewer", res.text)
 
-    def test_research_needs_an_agreed_budget_and_a_researcher(self) -> None:
+    def test_research_is_a_manager_decision_and_budget_metadata(self) -> None:
+        # Budgets are never approved by the human: researchers need no agreed budget, and
+        # the manager sizes one itself. A budget with no researcher stays a metadata error.
         kb = {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."}
         liaison = {"agent": "atlassian-liaison", "role": "research", "why": "Reads the epic's child issues for D1."}
-        self.assertIn("research budget", self.check(expect=2, participants=[kb, liaison]).text)
+        self.check(participants=[kb, liaison])                      # researchers, no budget: fine
         self.assertIn("research participant", self.check(
             expect=2, participants=[kb], research={"budget_minutes": 45, "why": "Epic children are thin."}).text)
         self.check(participants=[kb, liaison], research={"budget_minutes": 45, "why": "Epic children are thin."})

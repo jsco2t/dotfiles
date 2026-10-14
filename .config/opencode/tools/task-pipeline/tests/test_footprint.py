@@ -12,7 +12,7 @@ from harness import SKILL
 
 OPENCODE = SKILL.parents[1]                 # ~/.config/opencode
 AGENTS = OPENCODE / "agent"                 # the deployed OpenCode agent definitions
-COMMAND = OPENCODE / "command" / "oc-task-pipeline.md"
+COMMAND = OPENCODE / "command" / "task-pipeline.md"
 STYLES = OPENCODE / "output-styles"
 CATALOG = json.loads((SKILL / "references" / "catalog.json").read_text())
 # Agents whose skills fan out (code-sleuth and tutorial-builder do not, so their agents stay without it).
@@ -34,7 +34,10 @@ def permission(front: str, name: str):
 class FootprintTest(unittest.TestCase):
     def test_the_command_file_is_small(self) -> None:
         # Anything `tp.py` prints on demand (`tp next`, `tp schema`) stays out of the command.
-        self.assertLess(len(COMMAND.read_bytes()), 12_000)
+        # 14,000: the command grew when lost-dispatch recovery, budget honesty, `tp widen`,
+        # and `tp baseline` became first-class (the 2026-10 improvement round) — the old
+        # 12,000 cap could only be met by deleting those playbooks.
+        self.assertLess(len(COMMAND.read_bytes()), 14_000)
 
     def test_core_style_is_small(self) -> None:
         self.assertLess(len((STYLES / "answer-first-core.md").read_bytes()), 1_500)

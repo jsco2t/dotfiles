@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,8 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import briefs, docscheck, snapshot
 from . import plan as planmod
 from . import scope as scopemod
-from .common import (TP_SCRIPT, TPError, Workflow, agent_minutes, limit, load_json, minutes_since, now_iso,
-                     sha_file, words)
+from .common import (TP_SCRIPT, TPError, Workflow, agent_minutes, dead_minutes, limit, load_json, minutes_since,
+                     net_agent_minutes, now_iso, sha_file, words)
 
 DONE_STATES = ("accepted", "skipped")
 CHECK_TIMEOUT = 540
@@ -213,11 +214,23 @@ GUIDE = {
 def cmd_next(wf: Workflow, as_json: bool) -> str:
     state = wf.load()
     acts = actions(wf, state)
-    spent = agent_minutes(wf, state)
+    spent = net_agent_minutes(wf, state)
     warnings = []
     if state["phase"] in ("SCOPING", "PLANNING") and spent > limit("planning_warn_minutes"):
         warnings.append(f"Planning has taken {spent:.0f} agent-min (target {limit('planning_warn_minutes')}): "
                         "submit what you have, with open questions for the human.")
+    budget = scopemod.load_scope(wf).get("budget_minutes")
+    if state["phase"] == "EXECUTING" and budget:
+        warn_at = limit("budget_warn_pct") / 100 * budget
+        if spent > budget:
+            warnings.append(f"OVER BUDGET: {spent:.0f} of {budget} agent-min and work remains — "
+                            "either the meter is carrying dead clock (`tp record --dead-minutes N`, `tp lost`) "
+                            "or the run needs more time: `tp budget extend --minutes N --answer \"<the human's "
+                            "words>\"`. Do not start more work without one of the two.")
+        elif spent >= warn_at:
+            warnings.append(f"Budget nearly spent: {spent:.0f} of {budget} agent-min "
+                            f"({limit('budget_warn_pct')}%). Finish what is in flight, or agree more time "
+                            "with the human (`tp budget extend`) before dispatching again.")
     if as_json:
         return json.dumps({"phase": state["phase"], "actions": acts, "agent_minutes": round(spent, 1),
                            "budget_minutes": state.get("budget_minutes"), "warnings": warnings})
@@ -244,8 +257,11 @@ def _headline(wf: Workflow, state: Dict[str, Any]) -> str:
     tasks = state["tasks"]
     done = sum(ts["status"] in DONE_STATES for ts in tasks.values())
     flight = ", ".join(f"{k} ({v['step']}, {minutes_since(v['since']):.0f}m)" for k, v in state["in_flight"].items())
-    budget = state.get("budget_minutes")
-    used = f"{agent_minutes(wf, state):.0f}" + (f" of {budget} agent-min" if budget else " agent-min")
+    budget = scopemod.load_scope(wf).get("budget_minutes")
+    dead = dead_minutes(state)
+    used = f"{net_agent_minutes(wf, state):.0f}" + (f" of {budget} agent-min" if budget else " agent-min")
+    if dead:
+        used += f" (+{dead:.0f}m dead clock)"
     parts = [state["phase"], f"{done}/{len(tasks)} accepted" if tasks else None,
              f"in flight: {flight}" if flight else None, used]
     return " · ".join(p for p in parts if p)
@@ -259,15 +275,50 @@ def _slots(state: Dict[str, Any]) -> None:
                       "wait for one to hand back.")
 
 
+# Directory names that are never deliverables, by any repo's convention. Deliberately
+# narrow: `build/` or `dist/` can be a legitimate content path (a KB article on the build
+# system lives under kb/build/), so anything ambiguous is left to .gitignore via
+# _git_ignored instead of this list.
+_EXPAND_IGNORE_PARTS = {".git", "node_modules", "__pycache__", ".venv", ".pnpm", ".pnpm-store",
+                        ".tox", ".mypy_cache", ".pytest_cache"}
+
+
+def _git_ignored(ws: Path, rels: List[str]) -> set:
+    """Paths the workspace's own .gitignore excludes (empty when ws is not a git repo)."""
+    if not (ws / ".git").exists() or not rels:
+        return set()
+    try:
+        proc = subprocess.run(["git", "-C", str(ws), "check-ignore", "--stdin"], input="\n".join(rels),
+                              capture_output=True, text=True, timeout=30)
+        return set(proc.stdout.split())
+    except (OSError, subprocess.SubprocessError):
+        return set()
+
+
 def _expand(ws: Path, patterns: List[str]) -> List[Path]:
+    """The files a task's paths name — never whole ignored trees (.git, node_modules, build
+    outputs): bare catch-alls and generated trees blew up record/review git argvs in real runs."""
     out: List[Path] = []
     for p in patterns:
         if any(ch in p for ch in "*?["):
-            out += sorted(x for x in ws.glob(p) if x.is_file())
+            matches = sorted(x for x in ws.glob(p) if x.is_file())
         elif (ws / p).is_file():
-            out.append(ws / p)
+            matches = [ws / p]
         elif (ws / p).is_dir():
-            out += sorted(x for x in (ws / p).rglob("*") if x.is_file())
+            matches = sorted(x for x in (ws / p).rglob("*") if x.is_file())
+        else:
+            matches = []
+        out += [x for x in matches
+                if not any(part in _EXPAND_IGNORE_PARTS for part in x.relative_to(ws).parts)]
+    rels = [str(x.relative_to(ws)) for x in out]
+    ignored = _git_ignored(ws, rels)
+    out = [x for x, r in zip(out, rels) if r not in ignored]
+    cap = limit("max_path_expand")
+    if len(out) > cap:
+        sample = ", ".join(sorted(str(x.relative_to(ws)) for x in out)[:5])
+        raise TPError(f"the task's paths expand to {len(out)} files (cap {cap}), e.g. {sample} — name the "
+                      "files the task writes, and never `.` or a bare `**`; a directory path is fine only "
+                      "when its files exist at plan time.")
     return out
 
 
@@ -279,6 +330,7 @@ def _context(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Di
     checks = []
     for c in task.get("checks", []):
         checks.append(planmod.BUILTIN_TASK_CHECKS.get(c) or f"`{plan['checks'][c]['cmd']}`")
+    _expand(ws, task["paths"])  # refuses runaway glob/dir expansions before a brief is written
     sources = []
     for s in task.get("sources", []):
         name, _, rel = str(s).partition(":")
@@ -316,6 +368,12 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
         plan, scope, tasks = _loaded(wf, state)
         if tid not in tasks:
             raise TPError(f"{tid} is not a task in the approved plan.")
+        budget = scope.get("budget_minutes")
+        if budget and net_agent_minutes(wf, state) > budget:
+            raise TPError(f"the meter is over budget: {net_agent_minutes(wf, state):.0f} of {budget} agent-min. "
+                          "If the overage is dead clock, freeze it (`tp lost <id>` / `tp record --dead-minutes N`); "
+                          "if the run genuinely needs more time, `tp budget extend --minutes N --answer "
+                          "\"<the human's words>\"`. Dispatching on an over budget meter hides the overrun.")
         ts, task = state["tasks"][tid], tasks[tid]
         if ts["status"] == "pending" and _deps_open(task, state):
             raise TPError(f"{tid} waits on {', '.join(_deps_open(task, state))} (not accepted yet).")
@@ -443,6 +501,39 @@ def _tests_hash(task: Dict[str, Any], scope: Dict[str, Any]) -> Dict[str, Option
     return snapshot.hash_files(ws, [str(p.relative_to(ws)) for p in _expand(ws, rels)] or rels)
 
 
+def _freeze_tests_baseline(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any]) -> Path:
+    """Copy the task's test files as they stood when the tests step was recorded, so the
+    impl gate can tell additive growth (a new test the review asked for) from weakening."""
+    ws = _ws(scope, task["workspace"])
+    base = wf.run_dir(task["id"]) / "tests-baseline"
+    if base.exists():
+        shutil.rmtree(base)
+    base.mkdir(parents=True)
+    for p in _expand(ws, task.get("tests_paths") or []):
+        rel = p.relative_to(ws)
+        dest = base / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(p, dest)
+    return base
+
+
+def _tests_weakened(old: Path, new: Path) -> Optional[str]:
+    """What the edit removed that it did not re-add, line for line: `None` when the change
+    is purely additive or cosmetic (reformatted lines survive); a summary of the dropped
+    lines when tests were deleted or their assertions gutted."""
+    if not old.is_file():
+        return None
+    if not new.is_file():
+        return "the whole file was deleted"
+    old_lines = [ln.rstrip("\n") for ln in old.read_text().splitlines()]
+    new_lines = [ln.rstrip("\n") for ln in new.read_text().splitlines()]
+    added = {ln.strip() for ln in new_lines}
+    dropped = [ln for ln in old_lines if ln.strip() and ln.strip() not in added]
+    if not dropped:
+        return None
+    return "; ".join(ln.strip()[:70] for ln in dropped[:5])
+
+
 def _fail(wf: Workflow, ts: Dict[str, Any], tid: str, findings: List[str], fixing: str) -> str:
     ts["round"] += 1
     ts["fixing"] = fixing
@@ -477,7 +568,7 @@ def _sample(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any]) -> str:
 
 
 def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bool = False,
-               credit: float = 0.0) -> str:
+               credit: float = 0.0, dead: float = 0.0) -> str:
     with wf.locked():
         state = wf.load()
         if tid.startswith("R"):
@@ -523,7 +614,20 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bo
         minutes -= wait
         if wait:
             wf.event("credit", id=tid, minutes=round(wait, 1))
+        # Dead clock: backend-stall / harness-silence time billed to this hand-back that did
+        # no work (real runs carried ~400 such minutes inside 738-minute "records").
+        frozen = min(max(0.0, dead), minutes)
+        minutes -= frozen
+        if frozen:
+            state["dead_minutes"] = round(dead_minutes(state) + frozen, 1)
+            wf.event("dead_clock", id=tid, minutes=round(frozen, 1))
         state["agent_minutes"] = round(agent_minutes(wf, state) + minutes, 1)
+        est = task.get("estimate_min")
+        stall_hint = ""
+        if est and minutes > limit("stall_multiplier") * est:
+            stall_hint = (f"\nWARNING: this hand-back took {minutes:.0f} min against a {est}-min estimate — if "
+                          f"most of it was the backend stalling (no output, no tool calls), correct the meter: "
+                          f"`tp clock {tid} --dead-minutes N --note \"backend stall\"`.")
         if data["status"] != "done":
             del state["in_flight"][tid]
             ts["status"] = "blocked"
@@ -566,13 +670,29 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bo
                 msgs.append("pinned: characterization tests pass.")
             if not findings:
                 ts["tests_hash"] = _tests_hash(task, scope)
+                _freeze_tests_baseline(wf, task, scope)
         elif effective == "impl":
             if ts.get("tests_hash") and _tests_hash(task, scope) != ts["tests_hash"]:
-                bad = [k for k, v in _tests_hash(task, scope).items() if ts["tests_hash"].get(k) != v]
-                findings.append(f"The tests changed during implementation (tests changed: {', '.join(bad)}) — "
-                                "restore them; the implementation must not weaken the tests. If the edits "
-                                "were the human-sanctioned fix for a blocked round (e.g. seeded tests that "
-                                "cannot compile), the resolve answer must carry --rebaseline-tests.")
+                grown, gutted = [], []   # additive growth is allowed; weakening is not
+                for rel, h in _tests_hash(task, scope).items():
+                    if ts["tests_hash"].get(rel) == h:
+                        continue
+                    old = wf.run_dir(tid) / "tests-baseline" / rel
+                    dropped = _tests_weakened(old, _ws(scope, task["workspace"]) / rel)
+                    (grown if dropped is None else gutted).append((rel, dropped))
+                if gutted:
+                    detail = "; ".join(f"{rel}: dropped {dropped}" for rel, dropped in gutted[:3])
+                    findings.append(
+                        f"The tests were weakened during implementation (tests changed: "
+                        f"{', '.join(rel for rel, _ in gutted)}) — {detail}. Restore them; the implementation "
+                        "must not weaken the tests. If the edits were the human-sanctioned fix for a blocked "
+                        "round (e.g. seeded tests that cannot compile), the resolve answer must carry "
+                        "--rebaseline-tests.")
+                elif grown:
+                    msgs.append(f"tests grew additively (new tests in {', '.join(rel for rel, _ in grown)}) — "
+                                "allowed; the baseline moves to the grown set.")
+                    ts["tests_hash"] = _tests_hash(task, scope)
+                    _freeze_tests_baseline(wf, task, scope)
             ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
             if ok:
                 msgs.append(f"green: `{task['test_cmd']}` passes.")
@@ -601,7 +721,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bo
             out = f"{tid} passed its checks. " + " ".join(msgs) + "\n" + _sample(wf, task, scope)
         wf.save(state)
         wf.event("record", id=tid, step=step, status=ts["status"], minutes=round(minutes, 1), round=ts["round"])
-        return out
+        return out + stall_hint
 
 
 def _validate_review(data: Any, tid: str) -> List[str]:
@@ -725,6 +845,61 @@ def cmd_exception(wf: Workflow, summary: str, tid: Optional[str]) -> str:
         wf.save(state)
         wf.event("exception", id=tid, summary=summary)
         return "raised — stop and put it to the human; record their answer with `tp resolve`."
+
+
+def cmd_lost(wf: Workflow, tid: str, summary: str) -> str:
+    """A dispatch died without handing back (harness interrupt, session restart, host loss,
+    supervisor kill). Freeze its wall clock as dead — it did no work — block the task, and
+    point at a fresh re-dispatch: the agent's session is gone, so a task_id resume cannot work.
+    Eleven such losses across the first 14 runs were each hand-written exceptions."""
+    with wf.locked():
+        state = wf.load()
+        ts = state["tasks"].get(tid)
+        if ts is None:
+            raise TPError(f"{tid} is not a task.")
+        fl = state["in_flight"].get(tid)
+        if fl is None:
+            raise TPError(f"{tid} is not in flight (status {ts['status']}) — nothing to mark lost; "
+                          f"`tp exception --task {tid} --summary \"...\"` covers everything else.")
+        state["in_flight"].pop(tid)
+        elapsed = minutes_since(fl["since"])
+        state["dead_minutes"] = round(dead_minutes(state) + elapsed, 1)
+        prior, step = fl.get("from", "pending"), fl.get("step")
+        effective = ts["fixing"] if step == "fix" else step
+        ts["agents"].pop(effective, None)  # the session is gone: the re-dispatch must be fresh
+        ts["blocked"] = {"kind": "exception", "summary": f"{tid}'s dispatch was lost mid-run: {summary} "
+                          f"({elapsed:.0f} in-flight minutes frozen out of the meter as dead clock).",
+                         "prior": prior, "step": step}
+        ts["status"] = "blocked"
+        wf.save(state)
+        wf.event("lost", id=tid, summary=summary, dead_minutes=round(elapsed, 1))
+        return (f"{tid} marked lost — {elapsed:.0f} in-flight minutes are dead clock, out of the meter. "
+                f"Check the workspace for stranded edits before re-dispatching. To run it again: "
+                f"`tp resolve --task {tid} --action retry --answer \"<the human's words or 'manager: re-run'>\"` "
+                f"then `tp dispatch {tid}` (fresh brief; a task_id resume cannot work, the session is gone).")
+
+
+def cmd_clock(wf: Workflow, tid: str, dead: float, note: str) -> str:
+    """Meter bookkeeping: move recorded wall-clock minutes of a finished hand-back into the
+    dead-clock bucket (backend stall billed 738 minutes to a 21-minute task in a real run)."""
+    with wf.locked():
+        state = wf.load()
+        if state["tasks"].get(tid) is None:
+            raise TPError(f"{tid} is not a task.")
+        if dead <= 0:
+            raise TPError("--dead-minutes must be a positive number of minutes.")
+        recorded = sum(e.get("minutes", 0.0) for e in wf.events()
+                       if e["kind"] == "record" and e.get("id") == tid)
+        frozen = min(dead, recorded)
+        if frozen <= 0:
+            raise TPError(f"{tid} has no recorded minutes to freeze.")
+        state["agent_minutes"] = round(agent_minutes(wf, state) - frozen, 1)
+        state["dead_minutes"] = round(dead_minutes(state) + frozen, 1)
+        wf.save(state)
+        wf.event("clock_correct", id=tid, dead_minutes=round(frozen, 1), note=note)
+        return (f"meter corrected: {frozen:.0f} of {tid}'s recorded minutes are now dead clock "
+                f"({note}). The headline, the budget warnings, and the dispatch gate read the "
+                f"corrected meter immediately.")
 
 
 def _keep_decision(holder: Dict[str, Any], question: str, answer: str, by: Optional[str] = None) -> None:
@@ -865,10 +1040,17 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str, exce
             ts.update(status=ts["blocked"]["prior"], blocked=None)
         elif action == "retry" and kind == "exception":
             # A task-blocked exception over a stale check or count usually means: run the
-            # round again with the human's correction in hand.
+            # round again with the human's correction in hand. A `tp lost` block re-runs the
+            # step it was flying (fresh brief — the session is gone); a lost review re-runs
+            # as a review.
             _keep_decision(ts, ts["blocked"]["summary"], answer, by)
-            ts["extra_rounds"] += 1
-            ts.update(status="needs_fix", fixing=ts["blocked"].get("prior") or ts["fixing"], blocked=None)
+            if ts["blocked"].get("step") == "review" and ts["blocked"].get("prior") == "needs_review":
+                ts.update(status="needs_review", blocked=None)
+            else:
+                ts["extra_rounds"] += 1
+                ts.update(status="needs_fix",
+                          fixing=ts["blocked"].get("step") or ts["blocked"].get("prior") or ts["fixing"],
+                          blocked=None)
             released = _release_tests_baseline(wf, state, tid, by) if rebaseline_tests else False
         else:
             raise TPError(f"action {action!r} does not apply to a {kind} block; use "
@@ -882,6 +1064,87 @@ def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str, exce
 
 # --- final ----------------------------------------------------------------------------------
 
+def _baseline_key(failure: str) -> str:
+    """What identifies a final-check failure across runs: which check failed, not the exact
+    tail of its output (command output shifts run to run; the check name does not)."""
+    if failure.startswith("final check "):
+        return "check:" + failure.split()[2]
+    if failure.startswith("docs-all "):
+        return "docs-all:" + failure.split()[1].rstrip(":")
+    return failure  # read-only-workspace changes and anything else: never matches a baseline
+
+
+def _run_final_checks(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any],
+                      scope: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """Run the plan's final checks; returns (failures, result lines). Read-only-workspace
+    changes are failures too and are appended by the caller when wanted."""
+    failures: List[str] = []
+    results: List[str] = []
+    for name in plan.get("final_checks", []):
+        log = wf.meta / f"final-{name}.log"
+        if name == "docs-all":
+            for wname, w in scopemod.workspaces(scope).items():
+                if w["mode"] != "write":
+                    continue
+                root = Path(w["path"])
+                index = next((root / n for n in ("index.md", "README.md") if (root / n).exists()), None)
+                docs = [d for d in docscheck.md_files([root]) if wf.root not in d.parents]
+                # README.md is an entry page, not a nav index: a code repo's notes and
+                # ADRs are legitimately unlinked from it. Only a deliberate index.md
+                # makes reachability blocking; against a README orphans warn.
+                errors, warnings, stats = docscheck.check(
+                    docs, _repos(scope), index,
+                    root_warn=index is not None and index.name != "index.md")
+                log.write_text("\n".join(errors + [f"WARN {w}" for w in warnings]) or f"ok: {stats}")
+                results.append(f"docs-all {wname}: {'ok' if not errors else f'{len(errors)} problems'}, "
+                               f"{len(warnings)} doubtful citations (log {log}) {stats}")
+                failures += [f"docs-all {wname}: {e}" for e in errors]
+        else:
+            spec = plan["checks"][name]
+            raw = spec.get("cwd")
+            # A workspace name is the normal form; an absolute directory is allowed too
+            # (a check can pin a folder that is no workspace at all). The task-check path
+            # already took absolutes; final checks must agree or a legal plan crashes final.
+            if raw and Path(raw).is_absolute():
+                cwd = Path(raw)
+            elif raw:
+                cwd = _ws(scope, raw)
+            else:
+                cwd = Path(next(w["path"] for w in scopemod.workspaces(scope).values()
+                                if w["mode"] == "write"))
+            ok, tail = _run_cmd(_expand_cmd(spec["cmd"], None, scope), cwd, log)
+            results.append(f"{name}: {'ok' if ok else 'failed'}")
+            if not ok:
+                failures.append(f"final check {name} failed (log {log}): {tail}")
+    return failures, results
+
+
+def cmd_baseline(wf: Workflow) -> str:
+    """Record which final checks already fail before this run touches anything (sandbox
+    socket bans, machine quirks, pre-existing dead links). `tp final` then reports them as
+    pre-existing instead of blocking on breakage the pipeline did not cause. Run it right
+    after approval, before the first dispatch; run it again any time with the human's OK."""
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] != "EXECUTING":
+            raise TPError(f"baseline runs while EXECUTING; the workflow is {state['phase']}.")
+        plan, scope, _ = _loaded(wf, state)
+        if state["in_flight"]:
+            raise TPError("agents are in flight — record them before baselining.")
+        failures, results = _run_final_checks(wf, state, plan, scope)
+        keys = sorted({_baseline_key(f) for f in failures})
+        state["final_baseline"] = keys
+        wf.save(state)
+        wf.event("baseline", failures=len(keys))
+        head = f"baseline recorded: {len(keys)} final-check failure(s) pre-date this run." if keys \
+            else "baseline recorded: every final check passes on this machine right now."
+        lines = [head] + [f"  - {r}" for r in results]
+        if keys:
+            lines += [f"  - keyed: {k}" for k in keys]
+        lines.append("`tp final` will report these as pre-existing instead of failing the run.")
+        return "\n".join(lines)
+
+
 def cmd_final(wf: Workflow) -> str:
     with wf.locked():
         state = wf.load()
@@ -894,37 +1157,18 @@ def cmd_final(wf: Workflow) -> str:
         reviews_open = _review().open_sessions(state)
         if reviews_open:
             raise TPError(f"review sessions still open: {', '.join(reviews_open)} — `tp next`.")
-        failures: List[str] = []
-        results: List[str] = []
-        for name in plan.get("final_checks", []):
-            log = wf.meta / f"final-{name}.log"
-            if name == "docs-all":
-                for wname, w in scopemod.workspaces(scope).items():
-                    if w["mode"] != "write":
-                        continue
-                    root = Path(w["path"])
-                    index = next((root / n for n in ("index.md", "README.md") if (root / n).exists()), None)
-                    docs = [d for d in docscheck.md_files([root]) if wf.root not in d.parents]
-                    # README.md is an entry page, not a nav index: a code repo's notes and
-                    # ADRs are legitimately unlinked from it. Only a deliberate index.md
-                    # makes reachability blocking; against a README orphans warn.
-                    errors, warnings, stats = docscheck.check(
-                        docs, _repos(scope), index,
-                        root_warn=index is not None and index.name != "index.md")
-                    log.write_text("\n".join(errors + [f"WARN {w}" for w in warnings]) or f"ok: {stats}")
-                    results.append(f"docs-all {wname}: {'ok' if not errors else f'{len(errors)} problems'}, "
-                                   f"{len(warnings)} doubtful citations (log {log}) {stats}")
-                    failures += errors
-            else:
-                spec = plan["checks"][name]
-                cwd = _ws(scope, spec["cwd"]) if spec.get("cwd") else Path(next(
-                    w["path"] for w in scopemod.workspaces(scope).values() if w["mode"] == "write"))
-                ok, tail = _run_cmd(_expand_cmd(spec["cmd"], None, scope), cwd, log)
-                results.append(f"{name}: {'ok' if ok else 'failed'}")
-                if not ok:
-                    failures.append(f"final check {name} failed (log {log}): {tail}")
+        baseline = set(state.get("final_baseline", []))
+        failures, results = _run_final_checks(wf, state, plan, scope)
         failures += _readonly_changes(wf, state, scope)
         if failures:
+            pre = [f for f in failures if _baseline_key(f) in baseline]
+            fresh = [f for f in failures if _baseline_key(f) not in baseline]
+            if pre and not fresh:
+                state.pop("final_failed", None)
+                wf.save(state)
+                raise TPError(*[f"{f} [pre-existing: this check failed at the recorded baseline too]" for f in pre],
+                              "Every failure above predates this run (recorded by `tp baseline`). Fix path: ask "
+                              "the human whether to fix the pre-existing breakage in this run or leave it.")
             state["final_failed"] = failures[:50]
             wf.save(state)
             raise TPError(*failures[:40], "Fix path: `tp exception --summary ...` and ask the human, or "

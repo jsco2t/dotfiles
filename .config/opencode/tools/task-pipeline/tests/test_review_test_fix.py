@@ -35,6 +35,9 @@ STRONGER_TEST_PY = "import unittest\nfrom calc import mul\n\nclass T(unittest.Te
                    "    def test_mul(self):\n        self.assertEqual(mul(2, 3), 6)\n" \
                    "    def test_mul_zero(self):\n        self.assertEqual(mul(0, 3), 0)\n"
 
+WEAKER_TEST_PY = "import unittest\nfrom calc import mul\n\nclass T(unittest.TestCase):\n" \
+                 "    def test_mul(self):\n        self.assertTrue(mul(2, 3) is not None)\n"
+
 S1 = "B1/test-reviewer"
 
 
@@ -113,14 +116,30 @@ class ReviewMayStrengthenTestsTest(unittest.TestCase, HarnessReviewMixin):
     def test_an_impl_step_test_edit_without_a_review_finding_is_still_caught(self) -> None:
         h = self.h
         # A plain manager-rejected fix round carries no review sanction: the frozen
-        # tests hash must still hold, so a test edit here stays "tests changed".
+        # tests baseline still holds. Additive growth is allowed (the gate diffs against
+        # the frozen baseline), but weakening an existing test is caught here as before.
+        h.tp("reject", "T01", "--reason", "manager fact check: the impl summary is wrong")
+        h.tp("dispatch", "T01")
+        (self.app / "test_calc.py").write_text(WEAKER_TEST_PY)
+        h.result("T01", "fix", changed=["test_calc.py"])
+        out = h.tp("record", "T01").out
+        self.assertIn("tests were weakened", out)
+        self.assertEqual(h.state()["tasks"]["T01"]["status"], "needs_fix")
+
+    def test_an_impl_step_may_add_tests_without_a_review_finding(self) -> None:
+        h = self.h
+        # The kub-523 case that motivated the gate: a review finding demands more tests,
+        # the routing lands the edit in an unsanctioned round, and the old gate denied the
+        # whole round-trip. Appending tests weakens nothing — the gate allows it and moves
+        # the baseline; test_cmd still gates correctness.
         h.tp("reject", "T01", "--reason", "manager fact check: the impl summary is wrong")
         h.tp("dispatch", "T01")
         (self.app / "test_calc.py").write_text(STRONGER_TEST_PY)
         h.result("T01", "fix", changed=["test_calc.py"])
         out = h.tp("record", "T01").out
-        self.assertIn("tests changed", out)
-        self.assertEqual(h.state()["tasks"]["T01"]["status"], "needs_fix")
+        self.assertNotIn("tests changed", out)
+        self.assertIn("additively", out)
+        self.assertEqual(h.state()["tasks"]["T01"]["status"], "needs_check")
 
 
 class HarnessRuntimeStateTest(unittest.TestCase):

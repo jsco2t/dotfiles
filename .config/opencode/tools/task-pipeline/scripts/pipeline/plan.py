@@ -10,8 +10,8 @@ from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import scope as scopemod
-from .common import (TPError, Workflow, agent_minutes, catalog, limit, load_json, minutes_since, now_iso,
-                     sha_file, words)
+from .common import (TPError, Workflow, agent_minutes, catalog, limit, load_json, minutes_since, net_agent_minutes,
+                     now_iso, sha_file, words)
 
 BUILTIN_TASK_CHECKS = {"docs": "every relative link resolves, and every code citation is written repo-relative "
                                "(`path/to/file.go:12`, `:12-20`) and points at a real line (a citation whose lines "
@@ -263,6 +263,11 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
             pp = PurePosixPath(str(p))
             if pp.is_absolute() or ".." in pp.parts or not str(p).strip():
                 errs.append(f"{tid}: path {p} leaves the workspace; paths are relative to it.")
+            elif str(p).strip() in (".", "./", "**", "**/*"):
+                # Bare catch-alls exploded record/review argvs in real runs ('.' once ate
+                # .git objects; 'dash/**' once ate ~1000 node_modules files). Name files.
+                errs.append(f"{tid}: path {p!r} names the whole workspace — list the files the task "
+                            "writes (a dir path like `pkg/` is fine when the files exist at plan time).")
         for src in t.get("sources", []):
             prefix, _, ref = str(src).partition(":")
             if prefix == "research":
@@ -340,7 +345,7 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
     errs += _validate_batches(plan, scope)
     budget = scope.get("budget_minutes")
     if budget:
-        left = budget - (agent_minutes(wf, state) if wf else 0.0)
+        left = budget - (net_agent_minutes(wf, state) if wf else 0.0)
         # The budget gate sizes REMAINING work: accepted tasks' minutes are already
         # inside agent_minutes, so counting their full estimates in the critical
         # path again would double-count them and block every amendment after a
@@ -514,6 +519,52 @@ AMENDABLE_KEYS = {"paths", "test_cmd", "tests_paths", "checks", "estimate_min", 
 _DONE = ("accepted", "skipped")
 
 
+def _write_approved_snapshot(wf: Workflow, plan: Dict[str, Any]) -> None:
+    """The amendment contract snapshot: per-task approved details plus the plan-level
+    final_checks, so later amends diff against what was last sanctioned."""
+    (wf.root / "plan.approved.json").write_text(json.dumps(
+        {"tasks": plan["tasks"], "final_checks": plan.get("final_checks", [])}, indent=1))
+
+
+def cmd_widen(wf: Workflow, tid: str, paths: List[str], reason: str) -> str:
+    """Grow one task's write set while EXECUTING — the one mechanical correction a fix round
+    legitimately needs after acceptance (review findings keep landing just outside the paths).
+    Allowed on accepted tasks: the approved contract's paths grow with the decision recorded;
+    everything else about the task stays frozen. Overlaps with live tasks are refused."""
+    state = wf.load()
+    if state["phase"] != "EXECUTING":
+        raise TPError(f"widen applies while EXECUTING; the workflow is {state['phase']}.")
+    if tid not in state["tasks"]:
+        raise TPError(f"{tid} is not a task.")
+    if sha_file(wf.plan_json) != state.get("plan_approved_sha"):
+        raise TPError("plan.json changed after approval — `tp amend --reason \"...\"` first (or restore it).")
+    plan = load_plan(wf)
+    scope = scopemod.load_scope(wf)
+    task = next((t for t in plan["tasks"] if t["id"] == tid), None)
+    added = [p for p in dict.fromkeys(str(p).strip() for p in paths) if p and p not in task["paths"]]
+    if not added:
+        raise TPError("no new paths: every path is already in the task's write set.")
+    tasks = {t["id"]: t for t in plan["tasks"]}
+    live = [o for o in plan["tasks"] if o["id"] != tid and o.get("workspace") == task["workspace"]
+            and state["tasks"][o["id"]]["status"] not in _DONE]
+    clashes = [f"{tid} would write {p}, but {o['id']} ({o['id']}'s paths include {q}) owns it"
+               for o in live for p in added for q in o["paths"] if paths_overlap(p, q)]
+    if clashes:
+        raise TPError(*clashes, "order the tasks with depends_on, or ask the human and `tp revise`.")
+    errs = [p for p in added if PurePosixPath(p).is_absolute() or ".." in PurePosixPath(p).parts]
+    if errs:
+        raise TPError(*[f"{p} leaves the workspace; paths are relative to it." for p in errs])
+    task["paths"] = task["paths"] + added
+    (wf.plan_json).write_text(json.dumps(plan, indent=1) + "\n")
+    _write_approved_snapshot(wf, plan)
+    state["plan_approved_sha"] = state["plan_submitted_sha"] = sha_file(wf.plan_json)
+    wf.save(state)
+    wf.decision(f"widen {tid} paths", f"{', '.join(added)} — {reason}", who="manager")
+    wf.event("widen", id=tid, paths=added, reason=reason)
+    return (f"widen {tid}: + {', '.join(added)} — the write set grows in plan.json and the approved "
+            f"snapshot; the decision is in decisions.md. `tp next` for what runs.")
+
+
 def cmd_amend(wf: Workflow, reason: str) -> str:
     """Correct mechanical plan details while EXECUTING without a full approval round-trip:
     per-task paths/test_cmd/checks/estimate/brief/sources only, and only for tasks with no
@@ -548,7 +599,7 @@ def cmd_amend(wf: Workflow, reason: str) -> str:
     if errs:
         raise TPError(*errs)
     if not snap.exists():
-        snap.write_text(json.dumps({"tasks": plan["tasks"]}, indent=1))
+        _write_approved_snapshot(wf, plan)
     state["plan_approved_sha"] = state["plan_submitted_sha"] = sha_file(wf.plan_json)
     state["conventions_sha"] = conventions_shas(plan, scope, wf.root)
     # An amendment may remove a review batch: prune its sessions so `tp next`

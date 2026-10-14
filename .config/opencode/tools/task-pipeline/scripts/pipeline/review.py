@@ -325,6 +325,15 @@ def cmd_triage(wf: Workflow, sid: str, accept_all: bool, dismiss: List[str], rea
                                     from_review=True)
                    for tid, lines in sorted(lines_by.items())}
         out = list(by_task.values())
+        for tid in sorted(by_task):
+            patches = sorted((wf.run_dir(tid)).glob("*.patch")) if wf.run_dir(tid).exists() else []
+            if patches:
+                # A blocked hand-back that preserved its work as a patch: the fix round can
+                # verify and adopt it instead of starting over (real runs parked impl work
+                # this way and the tool never mentioned it).
+                out.append(f"NOTE {tid}: a parked patch exists from an earlier round — "
+                           f"{', '.join(p.name for p in patches[:3])}. Its fix round can verify and "
+                           "adopt it instead of starting over; say so in the fix prompt if so.")
         s["accepted"] = sorted(set(s["accepted"]) | {f["id"] for f in kept})
         s["fix_tasks"] = sorted(by_task)
         s["status"] = "waiting_fixes" if kept else "done"

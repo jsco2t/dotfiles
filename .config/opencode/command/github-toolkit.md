@@ -3,7 +3,7 @@ description: >-
   Interact with GitHub — pull requests (diff, files, review threads, inline comments, reviews, CI
   checks, queue scan), issues, commits→PRs, PR creation, and GitHub Actions workflows (list,
   inspect runs, trigger a workflow_dispatch) — via the sandbox-safe `ghtk` CLI. Use
-  /oc-github-toolkit when the task needs GitHub PRs, issues, reviews, CI, or Actions workflows.
+  /github-toolkit when the task needs GitHub PRs, issues, reviews, CI, or Actions workflows.
   Triggering a workflow requires explicit user approval.
 ---
 

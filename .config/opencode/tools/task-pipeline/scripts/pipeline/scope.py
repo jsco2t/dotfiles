@@ -2,6 +2,7 @@
 checked, rendered, and frozen when the human confirms it."""
 from __future__ import annotations
 
+import json
 import math
 import re
 from pathlib import Path
@@ -141,6 +142,11 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     budget = scope.get("budget_minutes")
     if budget is not None and (not isinstance(budget, int) or not 15 <= budget <= 2880):
         errs.append("budget_minutes must be a whole number of minutes between 15 and 2880 (or null).")
+    elif budget is None and not scope.get("budget_declined"):
+        # A silent null once let a whole run execute with no budget at all. Absence must be
+        # an explicit human decision, not an oversight.
+        errs.append("budget_minutes is null — set the minutes the human agreed to, or, if they "
+                    "explicitly declined a budget, record it with \"budget_declined\": true.")
     research = scope.get("research")
     rb = research_budget(scope)
     researchers = participants(scope, "research")
@@ -222,6 +228,33 @@ def cmd_confirm(wf: Workflow, answer: str) -> str:
     wf.decision("scope confirm", answer)
     wf.event("scope_confirm")
     return "scope confirmed and frozen. Now PLANNING — run `tp next`."
+
+
+def cmd_budget_extend(wf: Workflow, minutes: int, answer: str) -> str:
+    """Grow the time budget while PLANNING or EXECUTING with the human's agreement — the
+    parallel of `tp research extend` for the whole-job budget. Bumping a number is not a
+    plan change: no phase bounce, no re-approval; the answer is the audit trail."""
+    if minutes < 1:
+        raise TPError("budget extend needs a positive number of minutes.")
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] not in ("PLANNING", "EXECUTING"):
+            raise TPError(f"budget extend applies while PLANNING or EXECUTING; the workflow is {state['phase']}.")
+        scope = load_scope(wf)
+        old = scope.get("budget_minutes")
+        new = int(old or 0) + minutes
+        if new > 2880:
+            raise TPError(f"budget_minutes would reach {new}; the cap is 2880.")
+        scope["budget_minutes"] = new
+        scope.pop("budget_declined", None)
+        wf.scope_json.write_text(json.dumps(scope, indent=1) + "\n")
+        state["budget_minutes"] = new
+        state["scope_sha"] = state["scope_checked_sha"] = sha_file(wf.scope_json)
+        wf.save(state)
+        wf.decision(f"budget extend +{minutes} min", f"{old or 'none'} → {new}: {answer}")
+        wf.event("budget_extend", minutes=minutes, budget=new)
+        return (f"budget is now {new} agent-min (was {old or 'none'}). `tp next` — the meter and the "
+                "dispatch gate read the new number immediately.")
 
 
 def cmd_suggest(kinds: List[str]) -> str:

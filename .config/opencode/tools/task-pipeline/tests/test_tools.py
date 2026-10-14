@@ -199,10 +199,10 @@ class FanoutCheckTest(unittest.TestCase):
     def test_since_counts_only_after_a_marker(self) -> None:
         self.store([
             self.part("m1", _tool_use("task", subagent_type="code-author", description="early"), 1),
-            self.text_part("m2", "/oc-task-pipeline <location> <request>", 2),
+            self.text_part("m2", "/task-pipeline <location> <request>", 2),
             self.part("m3", _tool_use("task", subagent_type="code-author", description="late"), 3),
         ])
-        out = self.run_check("ses_manager", "--db", str(self.db), "--since", "/oc-task-pipeline")
+        out = self.run_check("ses_manager", "--db", str(self.db), "--since", "/task-pipeline")
         self.assertIn("task calls: 1", out)
 
     def test_a_jsonl_export_is_read_the_same_way(self) -> None:

@@ -160,6 +160,25 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("amend", help="amend mechanical plan details while EXECUTING (paths, test_cmd, checks, estimate, brief, sources)")
     s.add_argument("--reason", required=True)
+    s = sub.add_parser("widen", help="grow one task's write set while EXECUTING — even after acceptance "
+                                      "(the one mechanical correction a fix round legitimately needs)")
+    s.add_argument("id")
+    s.add_argument("--path", action="append", required=True, help="a file or folder to add to the write set")
+    s.add_argument("--reason", required=True, help="why: the finding or correction that demands it")
+    s = sub.add_parser("budget", help="time-budget commands")
+    bs = s.add_subparsers(dest="what", required=True)
+    be = bs.add_parser("extend", help="grow the whole-job budget with the human's agreement (no re-approval)")
+    be.add_argument("--minutes", type=int, required=True)
+    be.add_argument("--answer", required=True, help="the human's words, verbatim")
+    s = sub.add_parser("lost", help="mark an in-flight dispatch dead (harness interrupt, restart, host loss): "
+                                    "freeze its clock, block the task, point at a fresh re-dispatch")
+    s.add_argument("id")
+    s.add_argument("--summary", required=True)
+    s = sub.add_parser("clock", help="correct the meter after a recorded hand-back whose wall clock was "
+                                     "mostly backend stall")
+    s.add_argument("id")
+    s.add_argument("--dead-minutes", type=float, required=True, dest="dead_minutes")
+    s.add_argument("--note", required=True)
     s = sub.add_parser("approve", help="record the human's approval")
     s.add_argument("--answer", required=True)
     s = sub.add_parser("revise", help="record the human's revision request")
@@ -180,6 +199,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--trim-summary", action="store_true",
                    help="the summary is over the word limit: cut it to the limit instead of failing "
                         "(manager fix for a mechanical rejection; nothing else in the result changes)")
+    s.add_argument("--dead-minutes", type=float, default=0.0, dest="dead_minutes", metavar="MIN",
+                   help="minutes of this hand-back that were backend stall (no output, no tool "
+                        "calls): freeze them out of the budget meter as dead clock")
     s = sub.add_parser("accept", help="accept a task after your fact check")
     s.add_argument("id")
     s.add_argument("--note", required=True)
@@ -301,6 +323,16 @@ def dispatch(args: argparse.Namespace) -> str:
         return planmod.cmd_check(wf) if args.what == "check" else planmod.cmd_submit(wf)
     if c == "amend":
         return planmod.cmd_amend(wf, args.reason)
+    if c == "widen":
+        return planmod.cmd_widen(wf, args.id, args.path, args.reason)
+    if c == "budget":
+        return scopemod.cmd_budget_extend(wf, args.minutes, args.answer)
+    if c == "lost":
+        return run.cmd_lost(wf, args.id, args.summary)
+    if c == "clock":
+        return run.cmd_clock(wf, args.id, args.dead_minutes, args.note)
+    if c == "baseline":
+        return run.cmd_baseline(wf)
     if c == "approve":
         return planmod.cmd_approve(wf, args.answer)
     if c == "revise":
@@ -317,7 +349,8 @@ def dispatch(args: argparse.Namespace) -> str:
         return "\n\n".join(done)
     if c == "record":
         return run.after_record(wf, run.cmd_record(wf, args.id, args.agent_id,
-                                                   trim_summary=args.trim_summary, credit=args.credit))
+                                                   trim_summary=args.trim_summary, credit=args.credit,
+                                                   dead=args.dead_minutes))
     if c == "sample":
         return run.cmd_sample(wf, args.id)
     if c == "accept":

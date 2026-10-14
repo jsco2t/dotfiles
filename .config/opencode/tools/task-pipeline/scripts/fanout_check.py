@@ -4,7 +4,7 @@
 Sources, mixed freely:
   - a session id (ses_…) or a whole manager session: read from the OpenCode store
     (default ~/.local/share/opencode/opencode.db, override with --db). Use --since to count
-    only from a marker, e.g. --since /oc-task-pipeline for the command that started the run.
+    only from a marker, e.g. --since /task-pipeline for the command that started the run.
   - a JSONL export: one OpenCode part object per line
     ({"type":"tool","tool":"task","state":{"input":{...}}}, ...).
 

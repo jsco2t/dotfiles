@@ -2,7 +2,7 @@
 description: >-
   Interact with Jira or Confluence on ciqinc.atlassian.net — search/read/create/edit issues, JQL,
   comments, transitions, change history, worklogs (log/list time), projects, users, and Confluence
-  pages. Use /oc-atlassian-toolkit when the task needs Jira tickets or Confluence content.
+  pages. Use /atlassian-toolkit when the task needs Jira tickets or Confluence content.
 ---
 
 # Atlassian toolkit (Jira + Confluence CLI)

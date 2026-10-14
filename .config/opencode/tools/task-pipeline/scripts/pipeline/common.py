@@ -52,6 +52,18 @@ def agent_minutes(wf: "Workflow", state: Dict[str, Any]) -> float:
     return float(sum(e.get("minutes", 0.0) for e in wf.events() if e["kind"] == "record"))
 
 
+def dead_minutes(state: Dict[str, Any]) -> float:
+    """Clock frozen out of the meter: lost dispatches (session/harness died mid-flight) and
+    stall time the manager flagged with `--dead-minutes`. Backend stalls used to bill ~400
+    dead minutes to a run as if agents had worked; this keeps them out of the budget meter."""
+    return float(state.get("dead_minutes", 0.0))
+
+
+def net_agent_minutes(wf: "Workflow", state: Dict[str, Any]) -> float:
+    """The meter the budget is held against: gross hand-back minutes minus dead clock."""
+    return max(0.0, agent_minutes(wf, state) - dead_minutes(state))
+
+
 def sha_file(path: Path) -> Optional[str]:
     if not path.exists():
         return None

@@ -174,6 +174,12 @@ class Harness:
         d.mkdir(parents=True, exist_ok=True)
         (d / f"result-{step}.json").write_text(json.dumps(data))
 
+    def noticed(self, source: str, text: str) -> None:
+        """A mid-run observation outside the plan, as an agent's result or review would add."""
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        from pipeline.common import Workflow
+        Workflow(self.wf).noticed(source, text)
+
     def review(self, tid: str, n: int, verdict: str, findings: Optional[List[Dict[str, Any]]] = None) -> None:
         d = self.run_dir(tid)
         d.mkdir(parents=True, exist_ok=True)

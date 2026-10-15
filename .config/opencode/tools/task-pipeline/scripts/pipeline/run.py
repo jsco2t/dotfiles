@@ -4,6 +4,7 @@ research.py and end-of-pipeline review in review.py; this module routes to them.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -183,7 +184,11 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
     everything_done = all(ts["status"] in DONE_STATES for ts in state["tasks"].values())
     if (everything_done and not state["in_flight"] and not state.get("blocked")
             and not _review().open_sessions(state)):
-        acts.append({"action": "final"})
+        pending = _closeout_pending(wf, state)
+        if pending:
+            acts.append({"action": "closeout", "why": pending})
+        else:
+            acts.append({"action": "final"})
     if not any(a["action"] in ("dispatch", "fix", "review", "final") for a in acts) and state["in_flight"]:
         acts.append({"action": "wait", "ids": list(state["in_flight"])})
     return acts
@@ -207,6 +212,10 @@ GUIDE = {
     "halted": "Halted. Tell the human where work stopped (`halt.json`), then stop. `tp resume --answer \"...\"` "
               "continues.",
     "final": "`tp final` — package checks and the report.",
+    "closeout": "Classify the noticed items (`tp closeout --item N --class ... --note \"...\"` — the note "
+                "names the issue and its consequence in plain language), render the decision with "
+                "`tp closeout --ask`, ask it once, record the answer (`tp closeout --decide --answer \"...\"`), "
+                "then `tp final`.",
     "done": "Report to the human from report.md.",
 }
 
@@ -493,7 +502,21 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
             rnd = ts["round"]
             brief, result = run / f"brief-fix-{rnd}.md", run / "result-fix.json"
             ctx["cap"] = _cap(ts)
-            text = briefs.fix(task, rnd, ctx, ts["findings"], result, same_agent=bool(act["agent_id"]))
+            findings = list(ts["findings"])
+            prev = run / (f"snap-{ts['fixing']}-0.json" if rnd == 1 else f"snap-fix-{rnd - 1}.json")
+            if prev.exists():
+                # Staleness guard: findings were computed against the failing round's
+                # snapshot; accepted concurrent work may have landed since (one real run's
+                # fix agent reverted accepted sibling work off a stale 'revert them').
+                ws0 = _ws(scope, task["workspace"])
+                since = snapshot.diff(snapshot.load(prev), snapshot.take(ws0, [wf.root]))
+                allowed = list(task["paths"]) + list(PIPELINE_OWNED)
+                concurrent = [c for c in since if not snapshot.matches(c, allowed)]
+                if concurrent:
+                    findings = [f"Since the failing round, these files outside your paths changed — likely "
+                                f"accepted concurrent work; never revert them on the strength of an older "
+                                f"finding: {', '.join(concurrent[:10])}."] + findings
+            text = briefs.fix(task, rnd, ctx, findings, result, same_agent=bool(act["agent_id"]))
             label = f"fix-{rnd}"
         else:
             brief, result = run / f"brief-{step}-{ts['round']}.md", run / f"result-{step}.json"
@@ -754,18 +777,19 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bo
             msgs.append(f"credited {wait:.0f} min of human-wait.")
         ws = _ws(scope, task["workspace"])
         changed = snapshot.diff(snapshot.load(Path(fl["snap"])), snapshot.take(ws, [wf.root]))
-        if ts["round"] == 0 and effective in ("tests", "impl", "author") and not changed:
+        if step != "fix" and effective in ("tests", "impl", "author") and not changed:
             if fl.get("head") and _git_head(ws) != fl["head"]:
                 # A commit-only task: git history moved, the tree did not (snapshot skips
                 # .git). The agent did work — a real run flagged this by hand against git.
                 msgs.append("workspace tree unchanged, but git history advanced (a commit) — "
                             "counted as work.")
             else:
-                # A first hand-back that left the workspace untouched is a stall or a lie:
-                # no time threshold involved, and it cannot false-positive on
-                # slow-but-working agents. Round 0 only — a fix round may legitimately land
-                # byte-identical content (and looping fix rounds are the findings-cycle
-                # detector's job). Review steps are exempt — reviewers change nothing.
+                # A first authoring hand-back that left the workspace untouched is a stall
+                # or a lie: no time threshold involved, and it cannot false-positive on
+                # slow-but-working agents. Authoring dispatches only — a fix round (step
+                # fix, even at round 0 after a reopen) may legitimately land byte-identical
+                # content, and looping fix rounds are the findings-cycle detector's job.
+                # Review steps are exempt — reviewers change nothing.
                 findings.append("The agent reports done but wrote nothing: the workspace is unchanged since "
                                 "dispatch. Verify (did it work in the wrong place?), then reject it as a fix "
                                 "round or mark the dispatch lost.")
@@ -1283,6 +1307,129 @@ def cmd_baseline(wf: Workflow) -> str:
         return "\n".join(lines)
 
 
+# --- closeout --------------------------------------------------------------------------------
+
+CLOSEOUT_CLASSES = ("deferred", "followup", "observation")
+
+
+def _noticed_text(raw: str) -> str:
+    """A noticed line minus its `(source, ×N)` marker, normalized for stable keys."""
+    m = re.match(r"\([^)]*\) (.*)$", raw, re.S)
+    return " ".join((m.group(1) if m else raw).split())
+
+
+def _closeout_unclassified(wf: Workflow, state: Dict[str, Any]) -> int:
+    """How many open noticed items have no classification yet."""
+    items = wf.noticed_items()
+    if not items:
+        return 0
+    cls = state.get("closeout", {}).get("items", {})
+    return len(items) - len({_noticed_text(r) for r in items} & set(cls))
+
+
+def _closeout_pending(wf: Workflow, state: Dict[str, Any]) -> Optional[str]:
+    """What still blocks the report, or None: unclassified noticed items, or deferred /
+    follow-up work without the human's recorded answer."""
+    items = wf.noticed_items()
+    if not items:
+        return None
+    unclassified = _closeout_unclassified(wf, state)
+    if unclassified:
+        return f"{unclassified} noticed item(s) unclassified"
+    if any(v.get("class") in ("deferred", "followup") for v in state.get("closeout", {}).get("items", {}).values()) \
+            and not state.get("closeout", {}).get("decision"):
+        return "deferred or follow-up work awaits the human's decision"
+    return None
+
+
+def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = None,
+                 note: Optional[str] = None, decide: bool = False, answer: Optional[str] = None,
+                 ask: bool = False) -> str:
+    """The closeout gate between the last accept and the report: classify every noticed item,
+    and put the deferred or follow-up work to the human once, verbatim recorded. A real run
+    silently deferred 20 ticket-scope gaps this way; this makes the deferral a decision. The
+    note on a deferred or follow-up item is what the human reads when deciding, so it must
+    state the issue and its consequence in plain language — never bare file paths."""
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] != "EXECUTING":
+            raise TPError(f"closeout applies while EXECUTING; the workflow is {state['phase']}.")
+        items = wf.noticed_items()
+        if ask:
+            marks = state.get("closeout", {}).get("items", {})
+            if state.get("closeout", {}).get("decision"):
+                raise TPError("the human's decision is already recorded — `tp final` writes the report.")
+            unclassified = _closeout_unclassified(wf, state)
+            if unclassified:
+                raise TPError(f"{unclassified} noticed item(s) unclassified — classify them first (`tp closeout`).")
+            chosen = sorted(((text, e) for text, e in marks.items()
+                             if e.get("class") in ("deferred", "followup")),
+                            key=lambda kv: kv[1]["class"])
+            if not chosen:
+                raise TPError("nothing is deferred or a follow-up, so no human decision is needed — `tp final`.")
+            out = [f"DEFERRAL DECISION — {len(chosen)} noticed item(s) are ticket-scope work this run did not "
+                   "do. How should they be handled — accept the deferral, file follow-up tasks, or extend "
+                   "the run?", ""]
+            for i, (text, e) in enumerate(chosen, 1):
+                out.append(f"{i}. {text}")
+                out.append(f"   Why it matters: {e.get('note')}")
+            out += ["", "Ask this with `question` (record the answer verbatim):",
+                    "tp closeout --decide --answer \"<the human's words>\""]
+            return "\n".join(out)
+        if decide:
+            unclassified = _closeout_unclassified(wf, state)
+            if unclassified:
+                raise TPError(f"{unclassified} noticed item(s) unclassified — classify them first (`tp closeout`).")
+            if not any(v.get("class") in ("deferred", "followup")
+                       for v in state.get("closeout", {}).get("items", {}).values()):
+                raise TPError("nothing was deferred or made a follow-up; no human decision is needed — "
+                              "run `tp final`.")
+            if not answer:
+                raise TPError("--decide needs --answer \"<the human's words>\".")
+            state.setdefault("closeout", {})["decision"] = {"ts": now_iso(), "answer": answer}
+            wf.save(state)
+            wf.decision("closeout: deferred and follow-up work", answer, who="human")
+            wf.event("closeout_decision")
+            return "human decision recorded. `tp final` writes the report."
+        if item is not None:
+            if cls not in CLOSEOUT_CLASSES:
+                raise TPError(f"--class must be one of {', '.join(CLOSEOUT_CLASSES)}.")
+            if cls in ("deferred", "followup") and (not note or len(note.strip()) < 12):
+                raise TPError(f"--class {cls} needs --note in plain language: what the issue is and what "
+                              "consequence leaving it has (the note is what the human reads when deciding) — "
+                              "never a bare file path or ticket shorthand.")
+            if not 1 <= item <= len(items):
+                raise TPError(f"no noticed item #{item} ({len(items)} open) — `tp closeout` lists them.")
+            text = _noticed_text(items[item - 1])
+            entry = {"class": cls}
+            if note:
+                entry["note"] = note
+            state.setdefault("closeout", {}).setdefault("items", {})[text] = entry
+            wf.save(state)
+            wf.event("closeout_class", cls=cls)
+            pending = _closeout_pending(wf, state)
+            tail = ("`tp closeout --ask` renders the decision brief; ask it with `question`, then "
+                    "`tp closeout --decide --answer \"<the human's words>\"`."
+                    if pending == "deferred or follow-up work awaits the human's decision"
+                    else ("`tp final` writes the report." if pending is None else "`tp closeout` continues."))
+            return f"item #{item} classified {cls}" + (f" — {note}" if note else "") + f". {tail}"
+        if not items:
+            return "nothing was noticed outside the plan — `tp final` writes the report."
+        marks = state.get("closeout", {}).get("items", {})
+        out = [f"CLOSEOUT — {len(items)} noticed item(s), "
+               f"{sum(1 for r in items if _noticed_text(r) in marks)} classified:"]
+        for n, raw in enumerate(items, 1):
+            text = _noticed_text(raw)
+            c = marks.get(text, {}).get("class", "UNCLASSIFIED")
+            extra = marks.get(text, {}).get("note")
+            out.append(f"  {n}. [{c}]" + (f" ({extra})" if extra and c != "UNCLASSIFIED" else "") + f" {raw}")
+        out += ["Classify each: tp closeout --item N --class deferred|followup|observation [--note \"...\"]",
+                "Then, if anything is deferred or a follow-up, ask the human once (accept the deferral, file "
+                "follow-up tasks, or extend the run) and record it:",
+                "  tp closeout --decide --answer \"<the human's words>\""]
+        return "\n".join(out)
+
+
 def cmd_final(wf: Workflow) -> str:
     with wf.locked():
         state = wf.load()
@@ -1295,6 +1442,12 @@ def cmd_final(wf: Workflow) -> str:
         reviews_open = _review().open_sessions(state)
         if reviews_open:
             raise TPError(f"review sessions still open: {', '.join(reviews_open)} — `tp next`.")
+        pending = _closeout_pending(wf, state)
+        if pending:
+            raise TPError(f"the closeout gate is open: {pending} — classify the noticed items "
+                          "(`tp closeout --item N --class deferred|followup|observation --note \"...\"`), "
+                          "render the decision (`tp closeout --ask`), and record the human's answer "
+                          "(`tp closeout --decide --answer \"...\"`).")
         baseline = set(state.get("final_baseline", []))
         failures, results = _run_final_checks(wf, state, plan, scope)
         failures += _readonly_changes(wf, state, scope)
@@ -1361,7 +1514,22 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
     out += ["", "## Final checks", ""] + ([f"- {r}" for r in results] or ["- none planned"])
     noticed = wf.noticed_items()
     if noticed:
-        out += ["", "## Noticed, not in plan (for you to decide)", ""] + [f"- {n}" for n in noticed]
+        marks = state.get("closeout", {}).get("items", {})
+        groups: Dict[str, List[str]] = {"deferred": [], "followup": [], "observation": [], "unclassified": []}
+        for raw in noticed:
+            m = re.match(r"\(([^)]*)\) (.*)$", raw, re.S)
+            meta = m.group(1) if m else ""
+            text = _noticed_text(raw)
+            e = marks.get(text, {})
+            line = f"- ({meta}) {text}" + (f" — {e['note']}" if e.get("note") else "")
+            groups[e.get("class", "unclassified")].append(line)
+        titles = {"deferred": "Deferred with the human's OK (decision in `decisions.md`)",
+                  "followup": "Follow-ups the run did not do (decision in `decisions.md`)",
+                  "observation": "Observations — no action taken",
+                  "unclassified": "Noticed, unresolved"}
+        for key, lines_ in groups.items():
+            if lines_:
+                out += ["", f"## {titles[key]}", ""] + lines_
     out += ["", "Human decisions are in `decisions.md`; every brief, result, review, and check log is under `runs/`."]
     return "\n".join(out) + "\n"
 

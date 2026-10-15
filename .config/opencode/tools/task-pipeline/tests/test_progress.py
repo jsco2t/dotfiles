@@ -30,7 +30,8 @@ class CoreCommandsTest(unittest.TestCase):
         out = self.h.tp("--help", wf=False).text
         for cmd in ("revise", "halt", "resume", "approve", "amend", "dispatch", "record",
                     "exception", "resolve", "final", "status", "next", "research", "plan",
-                    "scope", "note", "noticed", "report", "check-docs", "show", "triage"):
+                    "scope", "note", "noticed", "report", "check-docs", "show", "triage",
+                    "closeout"):
             self.assertRegex(out, rf"\b{cmd}\b", cmd)
 
     def setUp(self) -> None:
@@ -291,6 +292,161 @@ class DigestTest(unittest.TestCase):
         out = h.tp("digest").out
         self.assertIn("coding 1/1", out)
         self.assertIn("writing 0/2", out)
+
+
+class CloseoutTest(unittest.TestCase):
+    """The closeout gate: ticket-scope work found mid-run is a human decision, never a
+    silent deferral. `tp final` refuses while noticed items are unclassified or a deferral
+    lacks the human's recorded answer."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def run_to_closeout(self, noticed: list) -> None:
+        h = self.h
+        h.approved()
+        h.tp("dispatch", "T01")
+        h.good_article("architecture/overview.md")
+        h.result("T01", "author", changed=["architecture/overview.md"], noticed=noticed[:1])
+        h.tp("record", "T01", "--agent-id", "a-1")
+        h.tp("accept", "T01", "--note", "ok")
+        h.author("T02", "build/guide.md", agent_id="a-2")
+        h.tp("accept", "T02", "--note", "ok")
+        h.tp("dispatch", "T03")
+        (h.kb / "index.md").write_text("# KB\n\n- [O](architecture/overview.md)\n- [B](build/guide.md)\n")
+        h.result("T03", "author", changed=["index.md"], noticed=noticed[1:])
+        h.tp("record", "T03", "--agent-id", "a-3")
+        h.tp("accept", "T03", "--note", "ok")
+
+    def test_final_refuses_until_items_are_classified(self) -> None:
+        self.run_to_closeout(["webhookauth.go still writes admission-webhook.yaml non-atomically.",
+                              "docs still say the kubelet dir is kept when it is not."])
+        self.assertEqual(self.h.next()["actions"][0]["action"], "closeout")
+        res = self.h.tp("final", expect=2)
+        self.assertIn("closeout", res.text)
+        self.assertNotEqual(self.h.state()["phase"], "DONE")
+
+    def test_classify_then_decide_releases_the_report(self) -> None:
+        h = self.h
+        self.run_to_closeout(["webhookauth.go still writes admission-webhook.yaml non-atomically.",
+                              "vet needs the dash SPA built; environmental, pre-existing."])
+        h.tp("closeout", "--item", "1", "--class", "deferred",
+             "--note", "same hazard class as KUB-522; needs its own task")
+        h.tp("closeout", "--item", "2", "--class", "observation")
+        self.assertEqual(h.next()["actions"][0]["action"], "closeout")   # deferral undecided
+        h.tp("closeout", "--decide", "--answer", "Accept the deferral; file KUB-600 for webhookauth.")
+        self.assertEqual(h.next()["actions"][0]["action"], "final")
+        h.tp("final")
+        report = (h.wf / "report.md").read_text()
+        self.assertIn("Deferred with the human's OK", report)
+        self.assertIn("webhookauth.go", report)
+        self.assertIn("KUB-600", (h.wf / "decisions.md").read_text())
+        self.assertIn("Observations", report)
+
+    def test_observations_alone_need_no_human_decision(self) -> None:
+        h = self.h
+        self.run_to_closeout(["vet needs the dash SPA built; environmental, pre-existing."])
+        h.tp("closeout", "--item", "1", "--class", "observation")
+        self.assertEqual(h.next()["actions"][0]["action"], "final")
+        h.tp("final")
+        self.assertEqual(h.state()["phase"], "DONE")
+
+    def test_deferrals_need_a_plain_language_note(self) -> None:
+        # The decision brief is what the human actions: a deferred item whose note is a bare
+        # file path is not a decision, it is a riddle (the kub-522 complaint).
+        h = self.h
+        self.run_to_closeout(["webhookauth.go still writes admission-webhook.yaml non-atomically.",
+                              "vet needs the dash SPA built; environmental, pre-existing."])
+        res = h.tp("closeout", "--item", "1", "--class", "deferred", expect=2)
+        self.assertIn("--note", res.text)
+        self.assertIn("consequence", res.text)
+        h.tp("closeout", "--item", "1", "--class", "deferred",
+             "--note", "a crash mid-write can tear the admission config the apiserver reads; "
+                       "the same hazard KUB-522 removes elsewhere.")
+        h.tp("closeout", "--item", "2", "--class", "observation")   # observations need no note
+
+    def test_ask_renders_an_answer_first_decision_brief(self) -> None:
+        h = self.h
+        self.run_to_closeout(["webhookauth.go still writes admission-webhook.yaml non-atomically.",
+                              "vet needs the dash SPA built; environmental, pre-existing."])
+        h.tp("closeout", "--item", "1", "--class", "deferred",
+             "--note", "a crash mid-write can tear the admission config the apiserver reads.")
+        h.tp("closeout", "--item", "2", "--class", "observation")
+        out = h.tp("closeout", "--ask").out
+        self.assertIn("How should they be handled", out.splitlines()[0])   # the decision leads
+        self.assertIn("webhookauth.go still writes", out)                  # the issue, verbatim
+        self.assertIn("Why it matters: a crash mid-write", out)            # the consequence
+        self.assertIn("accept the deferral", out)                          # the options
+        self.assertNotIn("environmental, pre-existing", out)               # observations stay out
+
+    def test_ask_refuses_unclassified_or_already_decided(self) -> None:
+        h = self.h
+        self.run_to_closeout(["first gap.", "second gap."])
+        h.tp("closeout", "--item", "1", "--class", "observation")
+        self.assertIn("unclassified", h.tp("closeout", "--ask", expect=2).text)
+        h.tp("closeout", "--item", "2", "--class", "observation")
+        self.assertIn("no human decision", h.tp("closeout", "--ask", expect=2).text)
+        h.tp("closeout", "--item", "2", "--class", "deferred", "--note", "work for a later task.")
+        h.tp("closeout", "--decide", "--answer", "accepted; filed a follow-up.")
+        self.assertIn("already", h.tp("closeout", "--ask", expect=2).text)
+
+    def test_items_noticed_after_the_decision_reopen_the_gate(self) -> None:
+        h = self.h
+        self.run_to_closeout(["first gap."])
+        h.tp("closeout", "--item", "1", "--class", "observation")
+        h.tp("resolve", "--task", "T02", "--action", "reopen", "--answer", "the late gap touches this task")
+        h.tp("dispatch", "T02")
+        h.good_article("build/guide.md")
+        h.result("T02", "fix", changed=["build/guide.md"], noticed=["a late gap worth its own task."])
+        h.tp("record", "T02", "--agent-id", "a-late")
+        h.tp("accept", "T02", "--note", "ok")
+        self.assertEqual(h.next()["actions"][0]["action"], "closeout")
+        self.assertIn("closeout", h.tp("final", expect=2).text)
+
+    def test_dedupe_merges_repeated_notices(self) -> None:
+        import tempfile
+        from pipeline.common import Workflow
+        with tempfile.TemporaryDirectory() as tmp:
+            wf = Workflow(Path(tmp))
+            wf.noticed("T05", "webhookauth.go still writes the pair non-atomically.")
+            wf.noticed("T05 review", "webhookauth.go  still writes the pair\nnon-atomically.")
+            wf.noticed("T03", "a different gap entirely.")
+            text = (wf.root / "noticed.md").read_text()
+            self.assertEqual(text.count("webhookauth.go still writes the pair non-atomically."), 1)
+            self.assertIn("×2", text)
+            self.assertEqual(len(wf.noticed_items()), 2)
+            self.assertIsNotNone(wf.noticed_resolve(1, "settled"))
+
+
+class StaleFixBriefTest(unittest.TestCase):
+    """A fix-round brief carries a staleness guard: files that changed since the failing
+    round — usually accepted concurrent work — are named, so the fix agent never reverts
+    them on the strength of a stale finding (the T05 incident in the kub-522 run)."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+        self.h.approved()
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def test_fix_brief_names_concurrent_work(self) -> None:
+        h = self.h
+        h.tp("dispatch", "T01")
+        h.good_article("architecture/overview.md")
+        (h.kb / "stray.md").write_text("# stray\n")            # foreign file: the round fails
+        h.result("T01", "author", changed=["architecture/overview.md"])
+        h.tp("record", "T01", "--agent-id", "a-1")
+        self.assertEqual(h.state()["tasks"]["T01"]["status"], "needs_fix")
+        (h.kb / "build").mkdir()
+        (h.kb / "build" / "guide.md").write_text("# guide\n")  # concurrent accepted work lands
+        h.tp("dispatch", "T01")
+        brief = (h.run_dir("T01") / "brief-fix-1.md").read_text()
+        self.assertIn("never revert", brief)
+        self.assertIn("build/guide.md", brief)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -176,8 +177,22 @@ class Workflow:
         if not path.exists():
             path.write_text("# Noticed, not in plan\n\nObservations outside the plan. Never actioned "
                             "without the human.\n\n")
+        clean = " ".join(str(text).split())
+        lines = path.read_text().splitlines()
+        for i, ln in enumerate(lines):
+            if not ln.startswith("- ") or "RESOLVED:" in ln or ") " not in ln:
+                continue
+            # Merge repeats: each later fix round re-notices the same gap, and a pile of
+            # duplicates hides the real decisions (184 lines once carried 173 unique items).
+            marker, seen = ln[2:].split(") ", 1)
+            if " ".join(seen.split()) == clean:
+                m = re.search(r", ×(\d+)$", marker)
+                count = int(m.group(1)) + 1 if m else 2
+                lines[i] = f"- ({re.sub(r', ×\d+$', '', marker)}, ×{count}) {seen}"
+                path.write_text("\n".join(lines) + "\n")
+                return
         with open(path, "a") as handle:
-            handle.write(f"- ({source}) {text.strip()}\n")
+            handle.write(f"- ({source}) {clean}\n")
 
     def noticed_items(self) -> List[str]:
         """Open (unresolved) noticed items — resolved ones are struck through, not listed."""

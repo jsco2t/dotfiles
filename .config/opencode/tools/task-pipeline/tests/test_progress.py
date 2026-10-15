@@ -39,7 +39,8 @@ class CoreCommandsTest(unittest.TestCase):
 
 class EmptyHandbackTest(unittest.TestCase):
     """A `done` hand-back that changed nothing in the workspace is a stall or a lie,
-    whatever the clock says."""
+    whatever the clock says — unless the work itself changed nothing (a commit-only task:
+    git history moved, the tree did not)."""
 
     def setUp(self) -> None:
         self.h = Harness()
@@ -54,6 +55,26 @@ class EmptyHandbackTest(unittest.TestCase):
         out = self.h.tp("record", "T01", "--agent-id", "a-1").out
         self.assertIn("wrote nothing", out)
         self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
+
+    def test_a_commit_only_task_is_not_flagged(self) -> None:
+        # The reported false positive: a task whose job is to commit pre-existing work
+        # changes no tree files, but git history moved. Verify the agent's claim against
+        # git, like the manager did by hand.
+        from harness import git
+        git(self.h.kb, "init", "-q", "-b", "main")
+        (self.h.kb / "README.md").write_text("# kb\n")
+        git(self.h.kb, "add", "-A")
+        git(self.h.kb, "commit", "-q", "-m", "base")
+        self.h.good_article("architecture/overview.md")     # uncommitted work, in the tree
+        self.h.approved()                                   # dispatch snapshot holds the article
+        self.h.tp("dispatch", "T01")
+        git(self.h.kb, "add", "-A")
+        git(self.h.kb, "commit", "-q", "-m", "T01: commit the article")
+        self.h.result("T01", "author", changed=[])
+        out = self.h.tp("record", "T01", "--agent-id", "a-1").out
+        self.assertNotIn("wrote nothing", out)
+        self.assertIn("commit", out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_check")
 
     def test_review_steps_may_change_nothing(self) -> None:
         h = self.h

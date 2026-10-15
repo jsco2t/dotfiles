@@ -105,7 +105,9 @@ def author(task: Dict[str, Any], step: str, rnd: int, ctx: Dict[str, Any], resul
                 f"Write the tests for this task first, in {', '.join(f'`{p}`' for p in ctx['tests_paths'])}. "
                 + ("They must fail now, for the reason the task names (red): "
                    if mode == "red" else "They pin today's behaviour and must pass now: ")
-                + f"`{task['test_cmd']}`. Do not write production code.", ""]
+                + f"`{task['test_cmd']}`. Touch no file outside the test paths — no production code, "
+                "no stubs, no 'temporary' implementations; the red check fails the step for any "
+                "production edit, and premature implementation has cost real runs their dispatch.", ""]
     elif step == "impl":
         out += ["## This step: implementation", "",
                 f"Make the tests pass: `{task['test_cmd']}` must succeed. Do not edit the tests "

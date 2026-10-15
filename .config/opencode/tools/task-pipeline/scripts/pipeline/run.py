@@ -446,6 +446,16 @@ def _context(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Di
     }
 
 
+def _git_head(ws: Path) -> Optional[str]:
+    """The workspace's git HEAD, or None when it is not a git work tree."""
+    try:
+        proc = subprocess.run(["git", "-C", str(ws), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              timeout=15)
+        return proc.stdout.strip() if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def cmd_dispatch(wf: Workflow, tid: str) -> str:
     with wf.locked():
         state = wf.load()
@@ -497,7 +507,8 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
         for other in state["in_flight"].values():
             other.setdefault("concurrent", []).append(tid)
         state["in_flight"][tid] = {"step": step, "since": now_iso(), "snap": str(snap), "agent": act["agent"],
-                                   "concurrent": list(state["in_flight"]), "from": ts["status"]}
+                                   "concurrent": list(state["in_flight"]), "from": ts["status"],
+                                   "head": _git_head(_ws(scope, task["workspace"]))}
         ts["status"], ts["step"] = "in_flight", step
         ts["started"] = ts["started"] or now_iso()
         wf.save(state)
@@ -744,14 +755,20 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bo
         ws = _ws(scope, task["workspace"])
         changed = snapshot.diff(snapshot.load(Path(fl["snap"])), snapshot.take(ws, [wf.root]))
         if ts["round"] == 0 and effective in ("tests", "impl", "author") and not changed:
-            # A first hand-back that left the workspace untouched is a stall or a lie: no
-            # time threshold involved, and it cannot false-positive on slow-but-working
-            # agents. Round 0 only — a fix round may legitimately land byte-identical
-            # content (and looping fix rounds are the findings-cycle detector's job).
-            # Review steps are exempt — reviewers legitimately change nothing.
-            findings.append("The agent reports done but wrote nothing: the workspace is unchanged since "
-                            "dispatch. Verify (did it work in the wrong place?), then reject it as a fix "
-                            "round or mark the dispatch lost.")
+            if fl.get("head") and _git_head(ws) != fl["head"]:
+                # A commit-only task: git history moved, the tree did not (snapshot skips
+                # .git). The agent did work — a real run flagged this by hand against git.
+                msgs.append("workspace tree unchanged, but git history advanced (a commit) — "
+                            "counted as work.")
+            else:
+                # A first hand-back that left the workspace untouched is a stall or a lie:
+                # no time threshold involved, and it cannot false-positive on
+                # slow-but-working agents. Round 0 only — a fix round may legitimately land
+                # byte-identical content (and looping fix rounds are the findings-cycle
+                # detector's job). Review steps are exempt — reviewers change nothing.
+                findings.append("The agent reports done but wrote nothing: the workspace is unchanged since "
+                                "dispatch. Verify (did it work in the wrong place?), then reject it as a fix "
+                                "round or mark the dispatch lost.")
         allowed = list(task["paths"]) + list(PIPELINE_OWNED)
         for other in fl.get("concurrent", []):
             if other in tasks and tasks[other]["workspace"] == task["workspace"]:

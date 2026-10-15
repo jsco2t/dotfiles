@@ -39,7 +39,9 @@ The first word selects the mode; the rest are positional arguments.
 
 - **`resume`** — the workflow directory ($1). Skip to _Resume_ at the end.
 - **`halt`** (or `hault`) — no arguments. Skip to _Halt_ at the end.
-- **`status`** — the workflow directory ($1). Run `tp status`, present it answer-first, and stop.
+- **`status`** — the workflow directory ($1). Run `tp status`, present it answer-first, and stop:
+  for looking at a workflow from outside without driving it. (Mid-run, "status?" is not this
+  mode — see the Stage 5 status bullet.)
 - **Anything else** — a new pipeline: **$1 is the location** for the planning documents (ask if
   missing); **everything after it is the request**, verbatim including quoting (ask if missing).
 
@@ -50,8 +52,8 @@ Then run the manager loop below from Stage 1.
 1. **Only the human decides** scope, participants, plan approval, and anything off the
    plan. Ask with the `question` tool; record their words verbatim (`--answer` / `--feedback`).
 2. **At most 3 subagents in flight**, only agents confirmed in scope.json (script-enforced).
-   Dispatch them with the `task` tool, one call per agent, naming the subagent by its roster
-   name (`tp roster suggest` lists them). Never ad-hoc agents outside the roster.
+   Dispatch with the `task` tool, one call per agent, by roster name (`tp roster suggest`
+   lists them). Never ad-hoc agents outside the roster.
 3. **Structured files, not messages.** Agents read a brief file and write JSON; their reply is
    one line. Read only the part you need: `tp show <id> --part …`, `tp schema <name>`.
 4. **The approved plan is the contract.** Outside it: `tp note "<one line>"`; blocking:
@@ -96,8 +98,8 @@ at once, so fix every question before re-running. When the questions will not fi
    participants (multiple choice, several allowed), review (`none` or `final`), and any
    conventions/policies the work must honor (go into a workflow-dir file listed in
    `conventions`: they freeze with the plan and reach every brief). **Never ask the human to
-   approve or pick a time budget** — for research or tasks: size budgets yourself as reporting
-   metadata, and never cut, merge, or shrink work to fit one. The right solution lands.
+   approve or pick a time budget** — size budgets yourself as reporting metadata; never cut,
+   merge, or shrink work to fit one. The right solution lands.
 6. Write `scope.json` (`tp schema scope`), `tp scope check`, show the human the key lines of
    `scope.md`, and confirm (`question`: Confirm / Change): `tp scope confirm --answer "..."`.
 
@@ -122,8 +124,7 @@ at once, so fix every question before re-running. When the questions will not fi
 - **Paths name the repo files the task writes.** Never `.` or a bare `**` — plan check refuses
   catch-alls and >200-file expansions (real runs blew up record/review git argvs on `.git` and
   `node_modules`). Name each file, optional ones too ("may not change" in the brief); a directory
-  path only when its files exist at plan time.
-- Parallel tasks write disjoint paths; shared files (`index.md`) go to one integration task.
+  path only when its files exist at plan time.- Parallel tasks write disjoint paths; shared files (`index.md`) go to one integration task.
 - Code is test-forward: `test_cmd` (the task's package, not the whole suite) and `tests_paths`.
 - `docs` is a built-in task check; `docs-all` a built-in final check. Define repo commands in `checks`.
 - With `review: final`, split packages over 10 tasks into `review_batches`.
@@ -151,10 +152,9 @@ Loop on `tp next`:
   one already recorded).
 - **Time reports, never gates.** The meter (net of dead clock) shows in `tp next`, `tp digest`,
   and the report; nothing is refused for being over budget and no work is compressed to fit one.
-  Time vs estimate flags suspicious hand-backs — that is stall detection, not a limit.
-- **Present a digest at a reasonable interval** — after each dispatch wave settles, or whenever
-  the human asks: run `tp digest` and show its output (agents in flight, progress by group,
-  minutes by phase). Narrate decisions and results; let the digest carry the status.
+- **Present a digest at a reasonable interval** — after each dispatch wave settles: run `tp
+  digest` and show its output (agents in flight, progress and minutes by group). Narrate
+  decisions and results; let the digest carry the status.
 - **Mechanical corrections batch.** Widen a write set (`tp widen <id> --path <file> --reason
   "..."` — allowed even after acceptance; refuses paths a live task owns) and fix checks
   (`tp amend --reason "..."`) in one call per round; ask the human **once per round** if at all.
@@ -169,15 +169,19 @@ Loop on `tp next`:
 - **human** → stop, ask with `question`, then
   `tp resolve [--task <id> | --review <id>] --action … --answer "..."`. A needs_input question
   that scope, plan, or decisions already settle, answer yourself.
-- **wait** → end your turn; the human's next message re-invokes you.
+- **wait** → end your turn only when `tp next` itself says to wait for in-flight agents; their
+  hand-backs arrive in this conversation and re-invoke you.
+- **A status question mid-run** ("status?", "how's it going?") → `tp digest`, present it
+  answer-first, then `tp next` and **keep working in the same turn** — a status answer never ends
+  the turn. Work stops only for `human`, `halt`, or `wait` actions.
 - **A dispatch dies** (harness interrupt, restart, host loss; resume returns "Task cancelled") →
   check the workspace for stranded edits, then `tp lost <id> --summary "..."` (freezes the dead
-  clock, blocks the task), then `tp resolve --task <id> --action retry` and a fresh
-  `tp dispatch <id>`. A `task_id` resume only works in the same OpenCode session.
+  clock, blocks the task), then `tp resolve --task <id> --action retry` and a fresh dispatch.
+  A `task_id` resume only works in the same OpenCode session.
 - **An agent far past its estimate** → a running `task` call cannot be stopped: note it, raise
   `tp exception --task <id> --summary "..."` if it must be abandoned, and keep agent commands
   short-returning (the supervisor kills ~35 min of silence): the task's package tests, not the
-  whole suite.
+  suite.
 
 ## Stage 6 — Final
 
@@ -192,13 +196,12 @@ review outcome, and what the human should decide. Committing and pushing are the
   where work stopped and what runs next. Tell the human, stop.
 - **Resume mode** (`/task-pipeline resume <dir>`) → `tp status`; if halted,
   `tp resume --answer "<their words>"`; then `tp next`. An agent lost mid-run: check the workspace
-  for stranded edits, then `tp lost <id> --summary "..."` and re-dispatch fresh after resolving
-  (a `task_id` resume cannot work once the session is gone).
+  for stranded edits, then `tp lost <id> --summary "..."`, resolve, and re-dispatch fresh (a
+  `task_id` resume cannot work once the session is gone).
 - **Status mode** → `tp status`, present answer-first, stop.
 - Unattended runs need no permission prompts: keep the workflow and write workspaces
   sandbox-writable, and allow
   `Bash(python3 ~/.config/opencode/tools/task-pipeline/scripts/tp.py:*)` in `permission`.
-
 ## Special Instructions
 
 ### Coding Related Tasks

@@ -1,11 +1,13 @@
 """Scope: what will be delivered, who works on it, the time budget, and the research budget —
-checked, rendered, and frozen when the human confirms it."""
+checked, rendered, and frozen when the human confirms it. Budgets are the manager's reporting
+metadata: they forecast and report, and never gate or shrink the work."""
 from __future__ import annotations
 
+import json
 import math
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from .common import TPError, Workflow, catalog, limit, load_json, now_iso, sha_file
 
@@ -138,6 +140,9 @@ def validate(scope: Dict[str, Any]) -> List[str]:
                     "drop it or choose a review mode.")
     elif mode != "none" and not reviewers:
         errs.append(f"review '{mode}' needs a reviewer participant.")
+    if mode == "none" and "code" in deliverable_kinds(scope):
+        errs.append("code deliverables are always reviewed: set review to final (or per-task) and confirm a reviewer "
+                    "(`tp roster suggest --kinds code`).")
 
     budget = scope.get("budget_minutes")
     if budget is not None and (not isinstance(budget, int) or not 15 <= budget <= 2880):
@@ -148,9 +153,6 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     if research is not None and (not isinstance(research, dict) or not isinstance(research.get("budget_minutes", 0), int)
                                  or research.get("budget_minutes", 0) < 0):
         errs.append("research must be {\"budget_minutes\": <agent-minutes>, \"why\": \"...\"}.")
-    elif researchers and not rb:
-        errs.append(f"{', '.join(researchers)} can only run inside a research budget agreed with the human "
-                    "(`research.budget_minutes`).")
     elif rb and not researchers:
         errs.append("a research budget needs at least one research participant.")
     elif rb:
@@ -206,8 +208,9 @@ def cmd_check(wf: Workflow) -> str:
     wf.save(state)
     wf.event("scope_check")
     return (f"scope ok — rendered {wf.root / 'scope.md'}.\n"
-            "Present it to the human (including the research budget, or that there is none) and ask them to "
-            "confirm (AskUserQuestion). On yes: `tp scope confirm --answer \"<their words>\"`.")
+            "Present it to the human and ask them to confirm (AskUserQuestion); the budgets in it are your "
+            "own estimates, shown for information, not for approval. On yes: "
+            "`tp scope confirm --answer \"<their words>\"`.")
 
 
 def cmd_confirm(wf: Workflow, answer: str) -> str:
@@ -223,6 +226,37 @@ def cmd_confirm(wf: Workflow, answer: str) -> str:
     wf.decision("scope confirm", answer)
     wf.event("scope_confirm")
     return "scope confirmed and frozen. Now PLANNING — run `tp next`."
+
+
+def cmd_budget_extend(wf: Workflow, minutes: int, answer: Optional[str], note: Optional[str]) -> str:
+    """Raise the whole-job budget while PLANNING or EXECUTING. It is the manager's re-estimate —
+    bookkeeping that keeps the forecast and the report honest, never a human approval and never a
+    gate; when the human volunteers words, they are recorded as theirs."""
+    if minutes < 1:
+        raise TPError("budget extend needs a positive number of minutes.")
+    if not (answer or note):
+        raise TPError("say why: --note \"<your re-estimate>\", or --answer \"<the human's words>\" if they gave one.")
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] not in ("PLANNING", "EXECUTING"):
+            raise TPError(f"budget extend applies while PLANNING or EXECUTING; the workflow is {state['phase']}.")
+        scope = load_scope(wf)
+        old = scope.get("budget_minutes")
+        new = int(old or 0) + minutes
+        if new > 2880:
+            raise TPError(f"budget_minutes would reach {new}; the cap is 2880.")
+        scope["budget_minutes"] = new
+        wf.scope_json.write_text(json.dumps(scope, indent=2) + "\n")
+        (wf.root / "scope.md").write_text(render(scope))
+        # The frozen scope moves with the number, or every later check would read it as tampered.
+        state["budget_minutes"] = new
+        state["scope_sha"] = state["scope_checked_sha"] = sha_file(wf.scope_json)
+        wf.save(state)
+        wf.decision(f"budget extend +{minutes} min", f"{old or 'none'} → {new}: {answer or note}",
+                    who="human" if answer else "manager")
+        wf.event("budget_extend", minutes=minutes, budget=new)
+        return (f"budget is now {new} min (was {old or 'none'}) — reported in `tp next`, `tp digest`, and the "
+                "report; it gates nothing.")
 
 
 def cmd_suggest(kinds: List[str]) -> str:
@@ -246,7 +280,7 @@ def cmd_suggest(kinds: List[str]) -> str:
         for agent in s.get("research", []):
             out.append(f"  {kind}: research? {agent} — {cat['agents'][agent]['use']}")
     out.append("Reviewers run once, at the end, in bulk — choose only the lenses this change needs.")
-    out.append("Researchers run only with a research budget agreed with the human; a clear, small ask needs none. "
-               "Other research agents: " + ", ".join(sorted(a for a, e in cat["agents"].items()
-                                                              if "research" in e["roles"])) + ".")
+    out.append("Research is the manager's call, and a clear, small ask needs none; size its budget yourself as "
+               "reporting metadata. Other research agents: "
+               + ", ".join(sorted(a for a, e in cat["agents"].items() if "research" in e["roles"])) + ".")
     return "\n".join(out)

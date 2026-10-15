@@ -169,6 +169,14 @@ class Harness:
         data = {"task": tid, "step": step, "status": status, "summary": summary,
                 "changed": extra.pop("changed", []), "noticed": extra.pop("noticed", []),
                 "questions": extra.pop("questions", [])}
+        acceptance = extra.pop("acceptance", "auto")  # None: the agent left it out
+        if acceptance == "auto" and status == "done" and step in ("author", "impl", "fix"):
+            # A compliant agent: one piece of evidence per Done-when item of the task.
+            task = next((t for t in self.read_json("plan.json")["tasks"] if t["id"] == tid), {})
+            acceptance = [{"criterion": i, "evidence": f"{tid} criterion {i}: shown in the deliverable"}
+                          for i in range(1, len(task.get("acceptance", [])) + 1)]
+        if isinstance(acceptance, list):
+            data["acceptance"] = acceptance
         data.update(extra)
         d = self.run_dir(tid)
         d.mkdir(parents=True, exist_ok=True)

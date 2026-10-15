@@ -65,16 +65,22 @@ class ResearchTest(unittest.TestCase):
         self.assertIn("domain-researcher",
                       self.add("R1", ["Which k8s distros?"], expect=2, agent="domain-researcher").text)
 
-    def test_items_draw_down_the_agreed_budget_and_only_the_human_extends_it(self) -> None:
+    def test_items_report_against_the_budget_and_the_manager_extends_it(self) -> None:
+        # The research budget is reporting metadata: drawing past it is reported, never refused,
+        # and raising it is the manager's bookkeeping (the human may still volunteer words).
         for rid in ("R1", "R2", "R3"):
             self.add(rid, [f"Which areas does {rid} cover?"])
-        text = self.add("R4", ["Which areas does R4 cover?"], expect=2).text
-        self.assertIn("45 of 45", text)
-        self.assertIn("research extend", text)
-        self.h.tp("research", "extend", "--minutes", "15", "--answer", "Yes, one more item.")
-        self.add("R4", ["Which areas does R4 cover?"])
-        self.assertIn("one more item", (self.h.wf / "decisions.md").read_text())
-        self.assertIn("60 agent-min", self.h.tp("next").out)
+        text = self.add("R4", ["Which areas does R4 cover?"]).text
+        self.assertIn("60 of 45", text)
+        self.assertIn("past the research budget", text)
+        self.assertNotIn("research overdraw", (self.h.wf / "noticed.md").read_text()
+                         if (self.h.wf / "noticed.md").exists() else "")   # metadata, not a closeout item
+        self.h.tp("research", "extend", "--minutes", "15", "--note", "manager: R4 was missed in the estimate.")
+        self.assertRegex((self.h.wf / "decisions.md").read_text(), r"research extend \+15 min · manager: .*R4 was missed")
+        self.assertIn("60 of 60", self.h.tp("next").out)
+        self.h.tp("research", "extend", "--minutes", "15", "--answer", "Yes, take more.")
+        self.assertIn("· human: Yes, take more.", (self.h.wf / "decisions.md").read_text())
+        self.h.tp("research", "extend", "--minutes", "15", expect=2)        # a reason is still required
 
     def test_a_time_box_is_at_most_15_minutes(self) -> None:
         self.assertIn("15", self.add("R1", ["Which areas?"], 2, "codebase-researcher", "map", "--minutes", "25").text)
@@ -175,9 +181,11 @@ class NoResearchTest(unittest.TestCase):
             h.confirmed()
             qf = h.root / "q"
             qf.write_text("Which areas?")
+            # No researcher in scope: the roster gate refuses it. A missing budget never would.
             res = h.tp("research", "add", "R1", "--agent", "codebase-researcher", "--purpose", "map",
                        "--questions-file", str(qf), "--done-when", "x", expect=2)
-            self.assertIn("no research budget", res.text)
+            self.assertIn("not a confirmed research participant", res.text)
+            self.assertNotIn("budget", res.text)
         finally:
             h.close()
 

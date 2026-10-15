@@ -26,7 +26,9 @@ class CodeFlowTest(unittest.TestCase):
         git(self.app, "init", "-q", "-b", "main")
         git(self.app, "add", "-A")
         git(self.app, "commit", "-q", "-m", "init")
-        scope = dict(CODE, workspaces=[{"name": "app", "path": str(self.app), "mode": "write"}])
+        scope = dict(CODE, workspaces=[{"name": "app", "path": str(self.app), "mode": "write"}], review="final",
+                     participants=CODE["participants"] + [  # code is always reviewed
+                         {"agent": "correctness-reviewer", "role": "reviewer", "why": "Checks mul's edge cases."}])
         task = {"id": "T01", "title": "mul", "serves": ["D1"], "agent": "code-author", "workspace": "app",
                 "paths": ["calc.py", "test_calc.py"], "sources": ["app:calc.py"],
                 "brief": "Add mul(a, b) beside add.", "acceptance": ["mul(2, 3) == 6"],
@@ -92,9 +94,7 @@ class CodeFlowTest(unittest.TestCase):
 
     def test_code_review_gets_the_change_against_the_approval_baseline(self) -> None:
         base = git(self.app, "rev-parse", "HEAD").strip()
-        scope = dict(self.scope, review="final", participants=CODE["participants"] + [
-            {"agent": "correctness-reviewer", "role": "reviewer", "why": "Checks mul's edge cases."}])
-        self.h.approved(plan=self.plan, **scope)
+        self.h.approved(plan=self.plan, **self.scope)
         self.write_tests()
         self.h.tp("record", "T01")
         self.h.tp("dispatch", "T01")

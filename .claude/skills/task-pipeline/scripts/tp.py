@@ -98,6 +98,18 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s = sub.add_parser("next", help="what to do next")
     s.add_argument("--json", action="store_true")
+    sub.add_parser("digest", help="status for the human: progress and agent time by group, and each in-flight "
+                                  "agent's evidence of progress (its writes since dispatch and since your last look)")
+    s = sub.add_parser("closeout", help="the gate before the report: classify every noticed item, and record the "
+                                        "human's decision on deferred or follow-up work; `tp final` waits for it")
+    s.add_argument("--item", type=int, help="the noticed item's number, as `tp closeout` lists them")
+    s.add_argument("--class", dest="cls", help="deferred (work left undone) | followup (its own task to file) | "
+                                               "observation (no action)")
+    s.add_argument("--note", help="deferred/followup: the issue and its consequence, in plain language "
+                                  "(what the human reads when deciding)")
+    s.add_argument("--ask", action="store_true", help="render the decision to put to the human")
+    s.add_argument("--decide", action="store_true", help="record the human's answer to that decision")
+    s.add_argument("--answer", help="the human's words, verbatim (--decide)")
 
     s = sub.add_parser("survey", help="deterministic structure map of a repository")
     s.add_argument("path")
@@ -115,7 +127,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("ref")
 
     for name in ("research", "recon"):  # recon: the name older workflows use
-        s = sub.add_parser(name, help="planning research inside the agreed budget")
+        s = sub.add_parser(name, help="planning research: small items, each in its own small time box")
         rs = s.add_subparsers(dest="what", required=True)
         a = rs.add_parser("add", help="add one small research item")
         a.add_argument("id")
@@ -126,9 +138,11 @@ def parser() -> argparse.ArgumentParser:
         a.add_argument("--done-when", required=True)
         a.add_argument("--minutes", type=int, help="time box, at most 15 (default 15)")
         a.add_argument("--from", dest="from_ref", help="the followup this item pursues, e.g. R1.F2")
-        e = rs.add_parser("extend", help="grow the research budget with the human's agreement")
+        e = rs.add_parser("extend", help="raise the research budget (your re-estimate: reporting metadata, never "
+                                         "a refusal)")
         e.add_argument("--minutes", type=int, required=True)
-        e.add_argument("--answer", required=True)
+        e.add_argument("--note", help="your reason (the usual case)")
+        e.add_argument("--answer", help="the human's words, when they volunteered a number")
         d = rs.add_parser("dismiss", help="decide a followup is not worth pursuing")
         d.add_argument("ref")
         d.add_argument("--reason", required=True)
@@ -159,6 +173,24 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("what", choices=["check", "submit", "amend"])
     s.add_argument("--answer", help="amend: the human's agreement, verbatim (without it, amend only checks)")
 
+    s = sub.add_parser("widen", help="add a file the same deliverable needs to one task's write set while EXECUTING, "
+                                     "even after acceptance (two per task on your say-so; more takes the human)")
+    s.add_argument("id")
+    s.add_argument("--path", action="append", required=True, help="one file to add (repeatable)")
+    s.add_argument("--reason", required=True, help="the finding or correction that needs it")
+    s.add_argument("--answer", help="the human's words, verbatim: needed past two files for the task")
+    s = sub.add_parser("budget", help="the time budget: reporting metadata that gates nothing")
+    bs = s.add_subparsers(dest="what", required=True)
+    be = bs.add_parser("extend", help="raise the whole-job budget (your re-estimate; no human approval needed)")
+    be.add_argument("--minutes", type=int, required=True)
+    be.add_argument("--note", help="your reason (the usual case)")
+    be.add_argument("--answer", help="the human's words, when they volunteered a number")
+    s = sub.add_parser("lost", help="mark an in-flight task's dispatch lost (session restart, crash, or a TaskStop "
+                                    "on a stuck agent): frees the slot, blocks the task for a fresh re-run")
+    s.add_argument("id")
+    s.add_argument("--summary", required=True, help="what happened, and the evidence")
+    sub.add_parser("baseline", help="record which final checks already fail before the run (right after approval)")
+
     s = sub.add_parser("approve", help="record the human's approval")
     s.add_argument("--answer", required=True)
     s = sub.add_parser("revise", help="record the human's revision request")
@@ -186,7 +218,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--review", help="a review session, e.g. B1/doc-reviewer")
     s.add_argument("--action", required=True, choices=["answer", "retry", "skip", "reopen", "accept", "clear"])
     s.add_argument("--answer", required=True)
-    s.add_argument("--by", choices=["human", "manager"], help="who decided; recorded in decisions.md and the report")
+    s.add_argument("--by", choices=["human", "manager"], required=True,
+                   help="who decided; recorded in decisions.md and the report")
     s.add_argument("--findings", default="", help="--review reopen: comma-separated finding ids to send back")
     s.add_argument("--assign", action="append", default=[], help="--review reopen: F#=T## for a finding no task "
                    "path matches")
@@ -250,6 +283,18 @@ def dispatch(args: argparse.Namespace) -> str:
         return run.cmd_status(wf, args.json)
     if c == "next":
         return run.cmd_next(wf, args.json)
+    if c == "digest":
+        return run.cmd_digest(wf)
+    if c == "closeout":
+        return run.cmd_closeout(wf, args.item, args.cls, args.note, args.decide, args.answer, args.ask)
+    if c == "widen":
+        return planmod.cmd_widen(wf, args.id, args.path, args.reason, args.answer)
+    if c == "budget":
+        return scopemod.cmd_budget_extend(wf, args.minutes, args.answer, args.note)
+    if c == "lost":
+        return run.cmd_lost(wf, args.id, args.summary)
+    if c == "baseline":
+        return run.cmd_baseline(wf)
     if c == "survey":
         return cmd_survey(wf, args)
     if c == "scope":
@@ -265,7 +310,7 @@ def dispatch(args: argparse.Namespace) -> str:
             return research.cmd_add(wf, args.id, args.agent, args.purpose, Path(args.questions_file), args.done_when,
                                     args.minutes, args.from_ref)
         if args.what == "extend":
-            return research.cmd_extend(wf, args.minutes, args.answer)
+            return research.cmd_extend(wf, args.minutes, args.answer, args.note)
         if args.what == "dismiss":
             return research.cmd_dismiss(wf, args.ref, args.reason)
         return research.cmd_drop(wf, args.id, args.reason)

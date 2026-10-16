@@ -232,7 +232,7 @@ class RecordTest(unittest.TestCase):
         self.assertEqual(statuses(self.h)["T01"], "blocked")
         acts = self.h.next()["actions"]
         self.assertEqual(acts[0]["action"], "human")
-        self.h.tp("resolve", "--task", "T01", "--action", "retry", "--answer", "One more try.")
+        self.h.tp("resolve", "--task", "T01", "--action", "retry", "--answer", "One more try.", "--by", "human")
         self.assertEqual(statuses(self.h)["T01"], "needs_fix")
 
     def test_needs_input_blocks_until_answered(self) -> None:
@@ -241,7 +241,7 @@ class RecordTest(unittest.TestCase):
         out = self.h.tp("record", "T01").out
         self.assertIn("Is kb/ markdown only?", out)
         self.assertEqual(statuses(self.h)["T01"], "blocked")
-        self.h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "Yes, markdown only.")
+        self.h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "Yes, markdown only.", "--by", "human")
         self.assertEqual(statuses(self.h)["T01"], "in_flight")
         self.assertIn("Yes, markdown only.", (self.h.wf / "decisions.md").read_text())
 
@@ -336,14 +336,15 @@ class ExceptionTest(unittest.TestCase):
         self.assertEqual(statuses(self.h)["T01"], "blocked")
         self.assertEqual(self.h.state()["in_flight"], {})
         self.assertEqual(self.h.next()["actions"][0]["action"], "human")
-        self.h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "Re-run it with the same brief.")
+        self.h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "Re-run it with the same brief.",
+                  "--by", "human")
         self.assertEqual(statuses(self.h)["T01"], "pending")
         self.h.tp("dispatch", "T01")
 
     def test_workflow_level_exception_blocks_until_resolved(self) -> None:
         self.h.tp("exception", "--summary", "The source repo moved to a new commit mid-run.")
         self.assertEqual(self.h.next()["actions"][0]["action"], "human")
-        self.h.tp("resolve", "--action", "answer", "--answer", "Keep the original pin.")
+        self.h.tp("resolve", "--action", "answer", "--answer", "Keep the original pin.", "--by", "human")
         self.assertNotEqual(self.h.next()["actions"][0]["action"], "human")
 
     def test_answers_reach_every_later_brief_for_their_task(self) -> None:
@@ -353,7 +354,7 @@ class ExceptionTest(unittest.TestCase):
         h.tp("exception", "--task", "T01", "--summary", "One note per finding, or per root cause?")
         h.tp("resolve", "--task", "T01", "--action", "answer", "--by", "human", "--answer", "One note per root cause.")
         h.tp("exception", "--summary", "Cite the pinned commit or main?")
-        h.tp("resolve", "--action", "answer", "--answer", "Cite the pinned commit.")
+        h.tp("resolve", "--action", "answer", "--answer", "Cite the pinned commit.", "--by", "human")
         h.tp("dispatch", "T01", "T02")
         t01 = (h.run_dir("T01") / "brief-author-0.md").read_text()
         self.assertIn("One note per finding, or per root cause?", t01)
@@ -375,7 +376,7 @@ class ExceptionTest(unittest.TestCase):
         h.tp("dispatch", "T01")
         h.result("T01", "author", status="needs_input", questions=["Is kb/ markdown only?"])
         h.tp("record", "T01", "--agent-id", "a1")
-        h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "Yes, markdown only.")
+        h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "Yes, markdown only.", "--by", "human")
         p = h.kb / "architecture" / "overview.md"
         p.parent.mkdir(parents=True)
         p.write_text("# Overview\n\nSee [missing](nope.md).\n")
@@ -444,7 +445,7 @@ class BatchReviewTest(unittest.TestCase):
     def test_the_brief_covers_the_whole_batch_and_the_change_as_a_file(self) -> None:
         self.accept_all()
         self.h.tp("exception", "--summary", "Merge notes that share a root cause?")
-        self.h.tp("resolve", "--action", "answer", "--answer", "Yes, one note per root cause.")
+        self.h.tp("resolve", "--action", "answer", "--answer", "Yes, one note per root cause.", "--by", "human")
         self.h.tp("dispatch", S1)
         brief = (self.h.wf / "runs" / "B1" / "brief-doc-reviewer-1.md").read_text()
         for needle in ("architecture/overview.md", "build/guide.md", "T01", "T02", "Do not edit",
@@ -520,7 +521,7 @@ class BatchReviewTest(unittest.TestCase):
         h.tp("record", S1)
         self.assertEqual(h.state()["reviews"][S1]["status"], "blocked")
         self.assertEqual(h.next()["actions"][0]["action"], "human")
-        h.tp("resolve", "--review", S1, "--action", "accept", "--answer", "Ship it; I'll fix F1 by hand.")
+        h.tp("resolve", "--review", S1, "--action", "accept", "--answer", "Ship it; I'll fix F1 by hand.", "--by", "human")
         self.assertEqual(h.state()["reviews"][S1]["status"], "done")
 
     def fix_and_accept(self, tid: str, rel: str) -> None:
@@ -567,7 +568,8 @@ class BatchReviewTest(unittest.TestCase):
         out = h.tp("record", S1).out
         self.assertIn("1 blocking", out)
         self.assertIn("--action clear", out)
-        res = h.tp("resolve", "--review", S1, "--action", "accept", "--answer", "Not the reviewer.", expect=2)
+        res = h.tp("resolve", "--review", S1, "--action", "accept", "--answer", "Not the reviewer.", "--by", "human",
+                   expect=2)
         self.assertIn("F1", res.text)
         self.assertEqual(h.state()["reviews"][S1]["status"], "blocked")
         h.tp("resolve", "--review", S1, "--action", "clear", "--by", "manager",
@@ -622,7 +624,8 @@ class BatchReviewTest(unittest.TestCase):
         h.tp("dispatch", S1)
         self.review(S1, 1, "changes", [self.finding("F1", "build/guide.md:3")])
         h.tp("record", S1)
-        res = h.tp("resolve", "--review", S1, "--action", "reopen", "--findings", "F1", "--answer", "x", expect=2)
+        res = h.tp("resolve", "--review", S1, "--action", "reopen", "--findings", "F1", "--answer", "x", "--by", "manager",
+                   expect=2)
         self.assertIn("needs_triage", res.text)
 
     def test_more_findings_for_a_task_join_its_waiting_fix_round(self) -> None:
@@ -634,14 +637,14 @@ class BatchReviewTest(unittest.TestCase):
         self.review(S1, 1, "changes", [self.finding("F1", "build/guide.md:3")])
         h.tp("record", S1)
         h.tp("triage", S1, "--accept-all")
-        h.tp("resolve", "--task", "T02", "--action", "reopen", "--answer", "Also link the overview.")
+        h.tp("resolve", "--task", "T02", "--action", "reopen", "--answer", "Also link the overview.", "--by", "manager")
         ts = h.state()["tasks"]["T02"]
         self.assertEqual((ts["status"], ts["round"]), ("needs_fix", 1))
         h.tp("dispatch", "T02")
         brief = (h.run_dir("T02") / "brief-fix-1.md").read_text()
         self.assertIn("F1", brief)
         self.assertIn("Also link the overview.", brief)
-        res = h.tp("resolve", "--task", "T02", "--action", "reopen", "--answer", "And more.", expect=2)
+        res = h.tp("resolve", "--task", "T02", "--action", "reopen", "--answer", "And more.", "--by", "manager", expect=2)
         self.assertIn("in flight", res.text)
 
     def test_report_attributes_rulings_only_as_recorded(self) -> None:
@@ -651,15 +654,15 @@ class BatchReviewTest(unittest.TestCase):
         (h.kb / "stray.md").write_text("# Stray\n")
         self.review(S1, 1, "pass")
         h.tp("record", S1)
-        h.tp("resolve", "--review", S1, "--action", "accept", "--by", "manager", "--answer", "Stray is mine.")
+        h.tp("resolve", "--review", S1, "--action", "accept", "--by", "human", "--answer", "Stray is mine.")
         (h.kb / "stray.md").unlink()
         h.tp("dispatch", "B2/doc-reviewer")
         self.review("B2/doc-reviewer", 1, "pass")
         h.tp("record", "B2/doc-reviewer")
         h.tp("final")
         report = (h.wf / "report.md").read_text()
-        self.assertIn("accepted as is by the manager: Stray is mine.", report)
-        self.assertNotIn("by the human", report)
+        self.assertIn("accepted as is by the human: Stray is mine.", report)
+        self.assertNotIn("accepted as is by the manager", report)
 
     def test_final_runs_after_every_session_is_done_and_reports_them(self) -> None:
         h = self.h
@@ -787,7 +790,7 @@ class ClockTest(unittest.TestCase):
         h.result("T01", "author", status="needs_input", questions=["Which style?"])
         h.tp("record", "T01", "--agent-id", "a1")
         elapse(h, 120)                                   # two hours until the human answers
-        h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "House style.")
+        h.tp("resolve", "--task", "T01", "--action", "answer", "--answer", "House style.", "--by", "human")
         elapse(h, 5)
         h.good_article("architecture/overview.md")
         h.result("T01", "author", changed=["architecture/overview.md"])
@@ -862,8 +865,8 @@ class CompatTest(unittest.TestCase):
             state["reviews"]["B1/doc-reviewer"].update(status="blocked", summary="the reviewer edited a.md", findings=[
                 {"id": "F1", "state": "wrong", "blocking": True, "where": "a.md:1", "issue": "x", "task": "T01"}])
             path.write_text(json.dumps(state))
-            h.tp("resolve", "--review", "B1/doc-reviewer", "--action", "clear", "--answer", "x", expect=2)
-            h.tp("resolve", "--review", "B1/doc-reviewer", "--action", "accept", "--answer", "Ship it.")
+            h.tp("resolve", "--review", "B1/doc-reviewer", "--action", "clear", "--answer", "x", "--by", "human", expect=2)
+            h.tp("resolve", "--review", "B1/doc-reviewer", "--action", "accept", "--answer", "Ship it.", "--by", "human")
             self.assertEqual(h.state()["reviews"]["B1/doc-reviewer"]["status"], "done")
         finally:
             h.close()

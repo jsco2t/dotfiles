@@ -147,7 +147,7 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
     snaps = {}
     for name in sorted({t["workspace"] for t in tasks}):
         snap = rdir / f"snap-{s['reviewer']}-{n}-{name}.json"
-        snapshot.save(snap, snapshot.take(run._ws(scope, name), [wf.root]))
+        snapshot.save(snap, run._take(wf, run._ws(scope, name)))
         snaps[name] = str(snap)
     for other in state["in_flight"].values():
         other.setdefault("concurrent", []).append(sid)
@@ -253,7 +253,7 @@ def record(wf: Workflow, state: Dict[str, Any], sid: str, agent_id: Optional[str
             allowed.setdefault(plan_tasks[other]["workspace"], []).extend(plan_tasks[other]["paths"])
     edits = []
     for name, snap in fl.get("snaps", {}).items():
-        changed = snapshot.diff(snapshot.load(Path(snap)), snapshot.take(run._ws(scope, name), [wf.root]))
+        changed = snapshot.diff(snapshot.load(Path(snap)), run._take(wf, run._ws(scope, name)))
         edits += [f"{name}:{c}" for c in changed if not snapshot.matches(c, allowed.get(name, []))]
     minutes = minutes_since(fl["since"])
     del state["in_flight"][sid]
@@ -283,7 +283,8 @@ def record(wf: Workflow, state: Dict[str, Any], sid: str, agent_id: Optional[str
             out = "\n".join([f"{sid} review {n}: {len(blocking)} blocking — triage each (tp triage {sid} ...):"] + lines)
         else:
             out = "\n".join([f"BLOCKED {sid}: still blocking after verification — the human decides "
-                             f"(`tp resolve --review {sid} --action accept|retry`):"] + lines)
+                             f"(`tp resolve --review {sid} --action accept|retry --by human --answer \"...\"`):"]
+                            + lines)
     wf.save(state)
     wf.event("record", id=sid, step="review" if n == 1 else "verify", status=s["status"], minutes=round(minutes, 1),
              blocking=len(blocking))
@@ -326,6 +327,13 @@ def cmd_triage(wf: Workflow, sid: str, accept_all: bool, dismiss: List[str], rea
         if dismiss:
             wf.decision(f"triage {sid} dismiss {', '.join(dismiss)}", str(reason), who="manager")
         out = list(by_task.values())
+        for tid in sorted(by_task):
+            # A blocked hand-back may have parked its work as a patch: the fix round can verify and
+            # adopt it instead of starting over.
+            patches = sorted(p.name for p in wf.run_dir(tid).glob("*.patch"))
+            if patches:
+                out.append(f"NOTE {tid}: a parked patch exists from an earlier round ({', '.join(patches[:3])}) — "
+                           "say in the fix round's message that it may verify and adopt it.")
         wf.event("triage", id=sid, accepted=len(kept), dismissed=len(dismiss))
         head = (f"{sid}: {len(kept)} accepted → {', '.join(sorted(by_task))}; {len(dismiss)} dismissed."
                 if kept else f"{sid}: every blocking finding dismissed — session done.")
@@ -406,10 +414,14 @@ def resolve(wf: Workflow, state: Dict[str, Any], sid: str, action: str, answer: 
         if action == "clear" and kind == "edits":
             _settle(s, s.get("held") or {"status": "needs_triage" if held else "done"})
         elif action == "accept":
+            if by != "human":
+                raise TPError(f"accepting {sid} as is ships its work without the fixes its review asked for — only the "
+                              "human decides that. Ask them, then resolve with --by human.")
             if kind == "edits" and held and not force:
                 raise TPError(f"{sid} holds {len(held)} blocking findings nobody has triaged ({', '.join(held)}); "
                               "accepting would drop them.",
-                              f"Edits not the reviewer's: `tp resolve --review {sid} --action clear`. To ship without "
+                              f"Edits not the reviewer's: `tp resolve --review {sid} --action clear --by <who>`. To "
+                              "ship without "
                               "these findings, add --force.")
             _settle(s, {"status": "done", "accepted_as_is": answer, "accepted_by": by})
         elif action == "retry" and kind == "rounds":

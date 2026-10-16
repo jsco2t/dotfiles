@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,8 @@ STYLE_PATH = SKILL.parents[1] / "output-styles" / "answer-first-core.md"
 TP_SCRIPT = SKILL / "scripts" / "tp.py"
 
 PHASES = ("SCOPING", "PLANNING", "AWAITING_APPROVAL", "EXECUTING", "DONE")
+# A noticed.md item: `- (<source>[, ×<repeats>]) <text>`.
+_NOTICED_LINE = re.compile(r"- \((.*?)(?:, ×(\d+))?\) (.*)$")
 
 
 class TPError(Exception):
@@ -211,8 +214,19 @@ class Workflow:
         if not path.exists():
             path.write_text("# Noticed, not in plan\n\nObservations outside the plan. Never actioned "
                             "without the human.\n\n")
+        clean = " ".join(str(text).split())
+        lines = path.read_text().splitlines()
+        for i, ln in enumerate(lines):
+            m = _NOTICED_LINE.match(ln)
+            # Merge repeats: later fix rounds and reviews re-notice the same gap, and a pile of
+            # duplicates buries the decisions the closeout must put to the human.
+            if m and " ".join(m.group(3).split()) == clean:
+                count = int(m.group(2) or 1) + 1
+                lines[i] = f"- ({m.group(1)}, ×{count}) {m.group(3)}"
+                path.write_text("\n".join(lines) + "\n")
+                return
         with open(path, "a") as handle:
-            handle.write(f"- ({source}) {text.strip()}\n")
+            handle.write(f"- ({source}) {clean}\n")
 
     def noticed_items(self) -> List[str]:
         path = self.root / "noticed.md"

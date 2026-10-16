@@ -16,8 +16,16 @@ HEADER = ("This dispatch comes from /task-pipeline. This brief is your complete 
 
 RESULT_SCHEMA = ('{{"task": "{tid}", "step": "{step}", "status": "done | blocked | needs_input", '
                  '"summary": "<= 80 words, answer-first", "changed": ["<paths relative to the workspace>"], '
+                 '"acceptance": [{{"criterion": 1, "evidence": "<path:line, command and result, or where it shows>"}}], '
                  '"noticed": ["<one line per thing outside this task; never act on it>"], '
                  '"questions": ["<only with needs_input>"], "disputes": [{{"finding": "F1", "why": "<evidence>"}}]}}')
+EVIDENCE_NOTE = ("With `done` from an authoring or implementation step, `acceptance` gives every numbered Done-when "
+                 "item its evidence; a hand-back that leaves one out is refused.")
+
+
+def _estimate(what: str) -> str:
+    """The minutes a step was planned at: an estimate for forecasting, never a deadline."""
+    return f"Estimate: about {what} — a planning figure, not a deadline."
 
 REVIEW_SCHEMA = ('{{"task": "{tid}", "verdict": "pass | changes", "findings": [{{"id": "F1", '
                  '"state": "wrong | missing | unclear | broken | gap | weak | cosmetic", "blocking": true, '
@@ -49,9 +57,9 @@ PURPOSE_FRAMING = {
 }
 
 
-def _handback(path: Path, schema: str) -> List[str]:
-    return ["## Hand back", "", f"Write `{path}`:", "", "```json", schema, "```", "",
-            f"Then reply with exactly one line: `RESULT {path}`. Nothing else — the file is the report."]
+def _handback(path: Path, schema: str, note: str = "") -> List[str]:
+    return (["## Hand back", "", f"Write `{path}`:", "", "```json", schema, "```", ""] + ([note, ""] if note else [])
+            + [f"Then reply with exactly one line: `RESULT {path}`. Nothing else — the file is the report."])
 
 
 def _style() -> List[str]:
@@ -65,7 +73,8 @@ def _decisions(ctx: Dict[str, Any]) -> List[str]:
     if not ctx.get("decisions"):
         return []
     return (["## Decisions made during the run", "",
-             "Each settles its question; follow it where it differs from anything else in this brief.", ""]
+             "Each settles its question. Answers marked (human) win where they differ from anything else in this "
+             "brief; any other answer clarifies it and never removes or loosens a Done-when item.", ""]
             + [f"- {d}" for d in ctx["decisions"]] + [""])
 
 
@@ -89,14 +98,18 @@ def _task_body(task: Dict[str, Any], ctx: Dict[str, Any]) -> List[str]:
     out += [f"- `{s}`" for s in ctx["sources"]]
     out += ["", "Read anything in the read-only workspaces that an acceptance criterion needs (callers, "
             "tests, docs); the fence is on what you write, not on what you read."]
-    out += ["", "## Done when", ""] + [f"- {a}" for a in task["acceptance"]]
+    out += ["", "## Done when", ""] + [f"{i}. {a}" for i, a in enumerate(task["acceptance"], 1)]
     if ctx["checks"]:
         out += ["", "The pipeline then checks your work and fails the step unless: " + "; ".join(ctx["checks"]) + "."]
+    out += ["", "If the brief is ambiguous in a way that changes what you deliver, hand back `needs_input` with the "
+            "question instead of guessing."]
     return out + [""]
 
 
 def author(task: Dict[str, Any], step: str, rnd: int, ctx: Dict[str, Any], result: Path) -> str:
-    box = f"Time box: about {task['estimate_min']} min. If the task cannot fit, stop and hand back `blocked`."
+    box = (_estimate(f"{task['estimate_min']} min") + " Do the whole task. If it turns out bigger than its brief "
+           "(files, behaviour, or topics the brief does not name), stop and hand back `blocked` saying what — "
+           "never cut it down to fit, and never grow it.")
     title = {"author": "author", "tests": "tests first", "impl": "implementation"}[step]
     out = [f"# /task-pipeline brief — {task['id']} {title}", "", HEADER.format(box=box), ""]
     if step == "tests":
@@ -105,21 +118,23 @@ def author(task: Dict[str, Any], step: str, rnd: int, ctx: Dict[str, Any], resul
                 f"Write the tests for this task first, in {', '.join(f'`{p}`' for p in ctx['tests_paths'])}. "
                 + ("They must fail now, for the reason the task names (red): "
                    if mode == "red" else "They pin today's behaviour and must pass now: ")
-                + f"`{task['test_cmd']}`. Do not write production code.", ""]
+                + f"`{task['test_cmd']}`. Touch no file outside the test paths — no production code, no "
+                "stubs, no 'temporary' implementations: the red check fails the step for tests that already "
+                "pass, and the implementation is the next agent's step.", ""]
     elif step == "impl":
         out += ["## This step: implementation", "",
                 f"Make the tests pass: `{task['test_cmd']}` must succeed. Do not edit the tests "
                 f"({', '.join(f'`{p}`' for p in ctx['tests_paths'])}); if one is wrong, hand back `blocked` "
                 "and say why.", ""]
     out += _task_body(task, ctx) + _style()
-    return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step=step))) + "\n"
+    return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step=step), EVIDENCE_NOTE)) + "\n"
 
 
 def fix(task: Dict[str, Any], rnd: int, ctx: Dict[str, Any], findings: List[str], result: Path,
         same_agent: bool) -> str:
     out = [f"# /task-pipeline brief — {task['id']} fix round {rnd}", ""]
     if not same_agent:
-        out += [HEADER.format(box=f"Time box: about {task['estimate_min']} min."), ""]
+        out += [HEADER.format(box=_estimate(f"{task['estimate_min']} min")), ""]
     out += ["## Fix", "", f"Round {rnd} of {ctx.get('cap', limit('max_fix_rounds'))}. Address every blocking item below: fix it, or "
             "dispute it with evidence in `disputes`. Change nothing else.", ""]
     out += [f"- {f}" for f in findings] + [""]
@@ -127,12 +142,12 @@ def fix(task: Dict[str, Any], rnd: int, ctx: Dict[str, Any], findings: List[str]
         out += _task_body(task, ctx) + _style()
     else:
         out += _decisions(ctx) + ["Your task, paths, and style are unchanged from your first brief.", ""]
-    return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step="fix"))) + "\n"
+    return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step="fix"), EVIDENCE_NOTE)) + "\n"
 
 
 def review(task: Dict[str, Any], n: int, ctx: Dict[str, Any], result: Path) -> str:
     out = [f"# /task-pipeline brief — {task['id']} review {n}", "",
-           HEADER.format(box="Time box: about 10 min."), "", "## Review", "",
+           HEADER.format(box=_estimate("10 min") + " Review fully."), "", "## Review", "",
            f"Task under review: {task['title']}. {task['brief']}", "", "Deliverables:"]
     out += [f"- `{p}`" for p in ctx["write_paths"]]
     out += ["", "Check claims against:"] + [f"- `{s}`" for s in ctx["sources"]]
@@ -153,7 +168,7 @@ def review(task: Dict[str, Any], n: int, ctx: Dict[str, Any], result: Path) -> s
 def research(rid: str, item: Dict[str, Any], scope_md: Path, surveys: List[Path], result: Path) -> str:
     purpose = item.get("purpose", "map")
     minutes = item.get("minutes", limit("research_item_minutes"))
-    box = f"Time box: {minutes} min, hard. Planning research ({purpose}): {PURPOSE_FRAMING[purpose]}"
+    box = _estimate(f"{minutes} min") + f" Planning research ({purpose}): {PURPOSE_FRAMING[purpose]}"
     out = [f"# /task-pipeline research brief — {rid}", "", HEADER.format(box=box), "", "## Questions", ""]
     out += [f"{i}. {q}" for i, q in enumerate(item["questions"], 1)]
     out += ["", f"Done when: {item['done_when']}", "",
@@ -170,7 +185,8 @@ def research(rid: str, item: Dict[str, Any], scope_md: Path, surveys: List[Path]
 
 def batch_review(bid: str, reviewer: str, tasks: List[Dict[str, Any]], ctx: Dict[str, Any], result: Path) -> str:
     out = [f"# /task-pipeline review brief — {bid} · {reviewer}", "",
-           HEADER.format(box="Time box: about 20 min for the batch."), "", "## Review this batch as a whole", "",
+           HEADER.format(box=_estimate("20 min for the batch") + " Review fully."), "",
+           "## Review this batch as a whole", "",
            f"Every task below is finished and accepted. Review them together, through your lens only, in one pass. "
            f"The change, as a structured file: `{ctx['changes']}` (files, and the exact diff command for each "
            "workspace under version control).", "", "Deliverables, by task:"]
@@ -194,7 +210,7 @@ def verify(bid: str, reviewer: str, findings: List[Dict[str, Any]], ctx: Dict[st
            same_agent: bool) -> str:
     out = [f"# /task-pipeline verification brief — {bid} · {reviewer}", ""]
     if not same_agent:
-        out += [HEADER.format(box="Time box: about 8 min."), ""]
+        out += [HEADER.format(box=_estimate("8 min")), ""]
     out += ["## Verify the fixes", "",
            "The authors have addressed the findings below that the manager accepted. For each one, check whether "
            "it is resolved; do not start a new review. Report only findings that are still unresolved, and any new "

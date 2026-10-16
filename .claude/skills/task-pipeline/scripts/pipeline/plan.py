@@ -1,7 +1,9 @@
-"""The plan: one JSON file of small tasks, checked against the confirmed scope, the
-catalog, and the time budget; rendered for the human; frozen once approved."""
+"""The plan: one JSON file of small tasks, checked against the confirmed scope and the catalog;
+its time estimate is reported against the budget, never enforced; rendered for the human; frozen
+once approved."""
 from __future__ import annotations
 
+import json
 import math
 import re
 import shutil
@@ -186,8 +188,22 @@ def critical_path(tasks: Dict[str, Dict[str, Any]], scope: Dict[str, Any]) -> Tu
     return max((longest(t) for t in tasks), default=(0, []))
 
 
-def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any], wf_root: Path,
-             budget_check: bool = True) -> List[str]:
+CATCH_ALLS = (".", "./", "**", "**/*")
+
+
+def path_errors(tid: str, p: Any) -> List[str]:
+    """Why a task path is not one the task can own: it leaves the workspace, or it names all of it
+    (`.` once swept .git objects into a hand-back; `**` once swept ~1000 node_modules files)."""
+    pp = PurePosixPath(str(p))
+    if pp.is_absolute() or ".." in pp.parts or not str(p).strip():
+        return [f"{tid}: path {p} leaves the workspace; paths are relative to it."]
+    if str(p).strip() in CATCH_ALLS:
+        return [f"{tid}: path {p!r} names the whole workspace — list the files the task writes (a directory "
+                "path like `pkg/` is fine when its files exist at plan time)."]
+    return []
+
+
+def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any], wf_root: Path) -> List[str]:
     errs: List[str] = []
     wss = scopemod.workspaces(scope)
     deliverables = {d["id"] for d in scope["deliverables"]}
@@ -202,8 +218,9 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
     if not tasks_list:
         errs.append("the plan has no tasks.")
     if len(tasks_list) > limit("max_tasks"):
-        errs.append(f"{len(tasks_list)} tasks; the limit is {limit('max_tasks')} — merge or cut tasks "
-                    f"(target {limit('target_task_minutes')} min each).")
+        errs.append(f"{len(tasks_list)} tasks; the limit is {limit('max_tasks')} — merge small related tasks "
+                    f"(target {limit('target_task_minutes')} min each), or ask the human to split the work into "
+                    "phases, each its own run. Never drop agreed work to fit.")
     for name, spec in plan.get("checks", {}).items():
         if not isinstance(spec, dict) or not spec.get("cmd"):
             errs.append(f"check {name!r} needs a `cmd`.")
@@ -249,9 +266,7 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
         elif ws["mode"] != "write":
             errs.append(f"{tid}: workspace {ws['name']} is read-only; deliverables go in a write workspace.")
         for p in t.get("paths", []):
-            pp = PurePosixPath(str(p))
-            if pp.is_absolute() or ".." in pp.parts or not str(p).strip():
-                errs.append(f"{tid}: path {p} leaves the workspace; paths are relative to it.")
+            errs += path_errors(tid, p)
         for src in t.get("sources", []):
             prefix, _, ref = str(src).partition(":")
             if prefix == "research":
@@ -316,21 +331,9 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
                                     "or split the paths (parallel tasks must write disjoint files).")
 
     errs += _validate_batches(plan, scope)
-    budget = scope.get("budget_minutes")
-    if budget and budget_check:
-        left = budget - minutes_since(state.get("created"))
-        total = sum(lane_minutes(t, scope) for t in tasks.values())
-        span, chain = critical_path(tasks, scope)
-        lanes = limit("max_in_flight")
-        work = math.ceil(total / lanes)
-        sessions, tail = review_tail(plan, scope)
-        if max(span, work) + tail > left:
-            what = (f"critical path is {span} min ({' -> '.join(chain)})" if span >= work
-                    else f"work totals {total} lane-min = {work} min over {lanes} lanes")
-            if tail:
-                what += f", plus a {tail}-min review tail ({sessions} review sessions and their verification)"
-            errs.append(f"{what}, but the budget leaves {left:.0f} of {budget} min — cut or merge tasks, "
-                        "or fewer review lenses.")
+    # The budget never refuses a plan: a plan that runs past it is shown that way in plan.md and
+    # the human approves it knowingly. Small tasks come from the per-task size limits above, not
+    # from cutting or merging work to fit a number.
     return errs
 
 
@@ -352,9 +355,14 @@ def render(plan: Dict[str, Any], scope: Dict[str, Any], wf: Workflow) -> str:
     span, _ = critical_path(tasks, scope)
     lanes = limit("max_in_flight")
     sessions, tail = review_tail(plan, scope)
+    estimate = max(span, math.ceil(total / lanes)) + tail
+    budget = scope.get("budget_minutes")
     out = [f"# Plan — {plan['title']}", "", plan.get("summary", ""), "",
-           f"**{len(tasks)} tasks** · about {max(span, math.ceil(total / lanes)) + tail} min of execution on "
-           f"{lanes} lanes · budget {scope.get('budget_minutes') or 'none'} · scope: `scope.md`", ""]
+           f"**{len(tasks)} tasks** · about {estimate} min of execution on "
+           f"{lanes} lanes · budget {budget or 'none'} · scope: `scope.md`", ""]
+    if budget and estimate > budget:
+        out += [f"The estimate runs {estimate - budget} min past the budget. That is reported, not a reason to "
+                "cut or merge work: the plan carries the work the scope needs.", ""]
     if plan.get("conventions"):
         out += ["**Conventions every brief starts from** (frozen with the plan): "
                 + ", ".join(f"`{c}`" for c in plan["conventions"]), ""]
@@ -492,7 +500,8 @@ def _amendment(approved: Dict[str, Any], draft: Dict[str, Any], scope: Dict[str,
         ts = state["tasks"].get(tid, {})
         if ts.get("started") or ts.get("status", "pending") != "pending":
             errs.append(f"{tid} has started ({ts.get('status')}); only tasks not yet dispatched can change or go. "
-                        f"Reopen it (`tp resolve --task {tid} --action reopen`), or ask the human about `tp revise`.")
+                        f"Reopen it (`tp resolve --task {tid} --action reopen --by human|manager --answer \"...\"`), "
+                        "or ask the human about `tp revise`.")
     old_b = {b["id"]: sorted(b["tasks"]) for b in review_batches(approved, scope)}
     new_b = {b["id"]: sorted(b["tasks"]) for b in review_batches(draft, scope)}
     for bid in sorted(set(old_b) | set(new_b)):
@@ -557,7 +566,7 @@ def cmd_amend(wf: Workflow, answer: Optional[str]) -> str:
         draft = load_json(draft_path, "the amended plan")
         if not isinstance(draft, dict) or not isinstance(draft.get("tasks"), list):
             raise TPError(f"{draft_path} must be a JSON object with a `tasks` list.")
-        errs = validate(draft, scope, state, wf.root, budget_check=False)
+        errs = validate(draft, scope, state, wf.root)
         changes, refusals = _amendment(approved, draft, scope, state, wf.root)
         if errs or refusals:
             raise TPError(*(errs + refusals))
@@ -586,6 +595,68 @@ def cmd_amend(wf: Workflow, answer: Optional[str]) -> str:
         wf.decision("plan amend", answer)
         wf.event("plan_amend", changes=changes)
         return "\n".join([f"amended — {'; '.join(changes)}."] + remaining + ["`tp next`."])
+
+
+def cmd_widen(wf: Workflow, tid: str, paths: List[str], reason: str, answer: Optional[str] = None) -> str:
+    """Add a file the same deliverable needs to one task's write set while EXECUTING — the one
+    mechanical correction a fix round needs when a finding lands just outside the task's paths,
+    which would otherwise loop on 'changed files outside this task's paths' until the task blocks.
+    Allowed on accepted tasks; the task's deliverable, brief, and acceptance stay frozen. Single
+    files only, and at most max_widen_paths per task on the manager's say-so: past that the work
+    is growing, and that is the human's call (answer)."""
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] != "EXECUTING":
+            raise TPError(f"widen applies while EXECUTING; the workflow is {state['phase']}.")
+        if sha_file(wf.plan_json) != state.get("plan_approved_sha"):
+            raise TPError("plan.json changed after approval — restore it first.")
+        plan, scope = load_plan(wf), scopemod.load_scope(wf)
+        task = next((t for t in plan["tasks"] if t["id"] == tid), None)
+        if task is None or tid not in state["tasks"]:
+            raise TPError(f"{tid} is not a task in the approved plan.")
+        added = [p for p in dict.fromkeys(str(p).strip() for p in paths) if p and p not in task["paths"]]
+        if not added:
+            raise TPError("no new paths: every path is already in the task's write set.")
+        ws = Path(scopemod.workspaces(scope)[task["workspace"]]["path"])
+        errs = [e for p in added for e in path_errors(tid, p)]
+        errs += [f"{p}: widen adds one file at a time — not a folder or a glob (a wider change is a plan "
+                 "amendment for the human)." for p in added
+                 if p.endswith("/") or any(ch in p for ch in "*?[") or (ws / p).is_dir()]
+        widened = state["tasks"][tid].get("widened", [])
+        cap = limit("max_widen_paths")
+        if not answer and len(widened) + len(added) > cap:
+            errs.append(f"{tid} already has {len(widened)} widened file(s); the manager may add {cap} per task. Past "
+                        "that the work is growing — ask the human, then repeat with --answer \"<their words>\". Only "
+                        "files the same deliverable needs; changing what a task delivers is a plan amendment.")
+        # Finished tasks count too: plan checks refuse unordered overlaps whatever their status, so
+        # one here would refuse every later amendment. A finding about another task's file belongs
+        # to that task.
+        ancestors = _ancestors({t["id"]: t for t in plan["tasks"]})
+        unordered = [o for o in plan["tasks"] if o["id"] != tid and o["workspace"] == task["workspace"]
+                     and o["id"] not in ancestors[tid] and tid not in ancestors[o["id"]]]
+        errs += [f"{p} overlaps {o['id']}'s {q}, and the two tasks are not ordered — route the finding to "
+                 f"{o['id']} (reopen it) or amend the plan." for o in unordered for p in added for q in o["paths"]
+                 if paths_overlap(p, q)]
+        if errs:
+            raise TPError(*errs)
+        task["paths"] = task["paths"] + added
+        wf.plan_json.write_text(json.dumps(plan, indent=2) + "\n")
+        draft = wf.root / AMEND_JSON
+        if draft.exists():  # an open amendment draft copied the old paths: keep it in step
+            data = load_json(draft, "the amended plan")
+            for t in data.get("tasks", []):
+                if t.get("id") == tid:
+                    t["paths"] = list(dict.fromkeys(list(t.get("paths", [])) + added))
+            draft.write_text(json.dumps(data, indent=2) + "\n")
+        state["plan_approved_sha"] = state["plan_submitted_sha"] = sha_file(wf.plan_json)
+        state["tasks"][tid]["widened"] = widened + added
+        wf.save(state)
+        (wf.root / "plan.md").write_text(render(plan, scope, wf))
+        wf.decision(f"widen {tid} paths", f"{', '.join(added)} — {reason}" + (f" — {answer}" if answer else ""),
+                    who="human" if answer else "manager")
+        wf.event("widen", id=tid, paths=added, reason=reason)
+        return (f"widen {tid}: + {', '.join(added)}. The write set grew in plan.json and plan.md; the reason is in "
+                "decisions.md. `tp next`.")
 
 
 def cmd_revise(wf: Workflow, feedback: str, to_scope: bool) -> str:

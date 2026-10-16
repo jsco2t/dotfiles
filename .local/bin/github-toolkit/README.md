@@ -20,9 +20,9 @@ that is the "strange TLS error" this tool removes.)
 - **`<ref>`** for `pr` commands is a PR URL, a number, `#number`, or omitted (auto-discovered
   from the current git branch).
 - Exit codes: `0` ok · `1` usage · `2` auth · `3` not found · `4` API error · `5` network/TLS.
-- **Writes are safe to rehearse:** `pr comment`, `pr reply`, `pr resolve`, `pr create`, and
-  `workflow run` all take `--dry-run`, which prints the exact request (method, URL, JSON body)
-  and sends nothing.
+- **Writes are safe to rehearse:** `pr comment`, `pr reply`, `pr resolve`, `pr create`,
+  `pr edit`, and `workflow run` all take `--dry-run`, which prints the exact request (method,
+  URL, JSON body) and sends nothing.
 - **Triggering a workflow needs explicit user approval** — see [Workflows](#workflows-github-actions).
 - If a command ever fails with a **network error only inside a sandbox**, re-run it with the
   sandbox disabled — but this should not happen; TLS/CA is handled automatically.
@@ -58,6 +58,7 @@ A saved token goes to `~/.config/github-toolkit/auth.json` (chmod 600).
 | `ghtk pr reply <thread-id>` | Reply to a review thread (WRITE) | `ghtk pr reply PRRT_xxx --body "thanks" --dry-run` |
 | `ghtk pr resolve <thread-id>` | Resolve a review thread (WRITE) | `ghtk pr resolve PRRT_xxx --dry-run` |
 | `ghtk pr create` | Create a pull request (WRITE) | `ghtk pr create --base main --head feat --title "..." --body-file b.md` |
+| `ghtk pr edit [ref]` | Edit a PR's title, body, or base branch (WRITE) | `ghtk pr edit 123 --body-file b.md --dry-run` · `ghtk pr edit 123 --title "..." --base release` |
 
 **Threads filters:** `--unresolved-only`, `--include-outdated` (outdated threads are dropped by
 default), `--mine-only --marker <M>` (threads whose comments contain the marker), `--author-substr
@@ -70,6 +71,11 @@ default), `--mine-only --marker <M>` (threads whose comments contain the marker)
 doc-only PRs), `--limit N` (default 100; `0` = unbounded). Scan cost scales with the open-PR
 count: each surviving PR costs a reviews call (`--drop-human-reviewed`) and CI calls
 (`--drop-ci-failing`), so a full 100-PR queue is ~2 minutes.
+
+**`pr edit`** sends only the fields you pass (`--title`, `--body`/`--body-file`, `--base`) and
+leaves the rest untouched; passing none is a usage error. `--body ''` clears the body. The body
+replaces the whole description, so to change one line read the current text first with
+`ghtk issue get <n> --json` (its `body` field), edit it, and pass it back with `--body-file`.
 
 **`pr comment` input** is a JSON array of `{path, line, body}` (optional `side`, `start_line`,
 `start_side`). The `--marker` string is prefixed to every comment body so a later

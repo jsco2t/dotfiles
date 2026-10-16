@@ -47,7 +47,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 CONFIG_DIR = Path(os.environ.get("GITHUB_TOOLKIT_CONFIG_DIR", Path.home() / ".config" / "github-toolkit"))
 AUTH_FILE = CONFIG_DIR / "auth.json"
@@ -1003,6 +1003,32 @@ def cmd_pr_create(args):
 
 
 # --------------------------------------------------------------------------- #
+# commands: pr - edit (WRITE)
+# --------------------------------------------------------------------------- #
+def cmd_pr_edit(args):
+    payload = {}
+    if args.title is not None:
+        payload["title"] = args.title
+    # --body '' is an explicit request to clear the body, so test for presence, not truthiness.
+    if args.body is not None or args.body_file is not None:
+        payload["body"] = read_body_arg(args.body, args.body_file)
+    if args.base is not None:
+        payload["base"] = args.base
+    if not payload:
+        die(EX_USAGE, "nothing to change: pass --title, --body/--body-file, or --base")
+    owner, repo, num, _ = resolve_pr(args)
+    path = f"/repos/{owner}/{repo}/pulls/{num}"
+    if args.dry_run:
+        print(f"DRY RUN: PATCH {API_ROOT}{path}")
+        print(json.dumps(payload, indent=2))
+        return
+    res = rest("PATCH", path, body=payload)
+    if args.json:
+        return jdump({"number": res.get("number"), "url": res.get("html_url"), "updated": list(payload)})
+    print(f"updated PR #{res.get('number')} ({', '.join(payload)}): {res.get('html_url')}")
+
+
+# --------------------------------------------------------------------------- #
 # commands: issue - get
 # --------------------------------------------------------------------------- #
 def cmd_issue_get(args):
@@ -1388,6 +1414,16 @@ def add_pr_commands(sp, repo_parent):
     cr.add_argument("--json", action="store_true")
     cr.set_defaults(func=cmd_pr_create)
 
+    ed = sp.add_parser("edit", parents=[repo_parent], help="edit a PR's title, body, or base branch (WRITE)")
+    ed.add_argument("ref", nargs="?", help="PR URL, number, #number, or omit for the current branch")
+    ed.add_argument("--title", help="new title")
+    ed.add_argument("--body", help="new body text ('' clears it), or '-' for stdin")
+    ed.add_argument("--body-file", help="read the new body from a file ('-' = stdin)")
+    ed.add_argument("--base", help="new base branch")
+    ed.add_argument("--dry-run", action="store_true", help="print the request; send nothing")
+    ed.add_argument("--json", action="store_true")
+    ed.set_defaults(func=cmd_pr_edit)
+
 
 _WORKFLOW_APPROVAL = (
     "APPROVAL REQUIRED. Triggering or re-running ANY workflow needs explicit user approval\n"
@@ -1433,7 +1469,7 @@ def build_parser():
     sub = p.add_subparsers(dest="group", metavar="<group>")
     repo_parent = _repo_parent()
 
-    pr = sub.add_parser("pr", help="pull requests: get, diff, files, threads, reviews, checks, scan, comment, reply, resolve, create")
+    pr = sub.add_parser("pr", help="pull requests: get, diff, files, threads, reviews, checks, scan, comment, reply, resolve, create, edit")
     prsub = pr.add_subparsers(metavar="<command>")
     _group_default_help(pr)
     add_pr_commands(prsub, repo_parent)

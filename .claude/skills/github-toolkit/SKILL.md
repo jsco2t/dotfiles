@@ -1,6 +1,6 @@
 ---
 name: github-toolkit
-description: Interact with GitHub — pull requests (diff, files, review threads, inline comments, reviews, CI checks, queue scan), issues, commits→PRs, PR creation, and GitHub Actions workflows (list, inspect runs, and trigger a workflow_dispatch) — via a stdlib-only CLI that works inside the sandbox. Use whenever a task needs GitHub PRs, issues, reviews, CI, or running/inspecting Actions workflows. Triggering a workflow requires explicit user approval.
+description: Interact with GitHub — pull requests (diff, files, review threads, inline comments, reviews, CI checks, queue scan), issues, commits→PRs, PR creation and editing (title, body, base), and GitHub Actions workflows (list, inspect runs, and trigger a workflow_dispatch) — via a stdlib-only CLI that works inside the sandbox. Use whenever a task needs GitHub PRs, issues, reviews, CI, or running/inspecting Actions workflows. Triggering a workflow requires explicit user approval.
 ---
 
 # GitHub toolkit (`ghtk`)
@@ -24,9 +24,12 @@ Common starting points (`<ref>` = PR URL, number, `#number`, or omit for the cur
 - `ghtk workflow list` · `ghtk workflow runs <wf>` — list Actions workflows / a workflow's recent runs
 - `ghtk doctor` — diagnose token / TLS / connectivity
 
-Writes (`pr comment`, `pr reply`, `pr resolve`, `pr create`, `workflow run`) exist too, and each
-takes `--dry-run` to print the exact request without sending it. Add `--json` to any command for
-machine-readable output the toolkit owns.
+Writes (`pr comment`, `pr reply`, `pr resolve`, `pr create`, `pr edit`, `workflow run`) exist
+too, and each takes `--dry-run` to print the exact request without sending it. Add `--json` to
+any command for machine-readable output the toolkit owns.
+
+- `ghtk pr edit <ref> [--title T] [--body-file F] [--base B]` — edit a PR; sends only the fields
+  given. The body replaces the whole description: read it first with `ghtk issue get <ref> --json`.
 
 **Triggering a workflow requires explicit user approval.** `ghtk workflow run <wf> --ref <ref>`
 fires a real `workflow_dispatch` event (a build, release, or deploy) — **never** dispatch one on

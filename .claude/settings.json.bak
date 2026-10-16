@@ -190,6 +190,9 @@
   "extraKnownMarketplaces": {},
   "sandbox": {
     "enabled": true,
+    "network": {
+      "allowLocalBinding": true
+    },
     "filesystem": {
       "allowWrite": [
         "~/.cache/go-build",
@@ -219,5 +222,10 @@
       "*.docs.rs",
       "*.atlassian.net"
     ]
+  },
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "effortLevel": "high"
+    }
   }
 }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Knowledge Base"
+  short_description: "Turn a topic or discussion into KB articles"
+  default_prompt: "Use $kb to create one or more knowledge-base articles from this topic at my specified output location."

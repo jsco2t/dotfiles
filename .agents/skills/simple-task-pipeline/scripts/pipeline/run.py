@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import briefs, docscheck, snapshot
+from . import briefs, docscheck, estimates, snapshot
 from . import plan as planmod
 from . import scope as scopemod
 from .common import (TP_SCRIPT, TPError, Workflow, agent_minutes, dead_minutes, limit, load_json, minutes_since,
@@ -86,6 +86,9 @@ def _readonly_changes(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any]
 
 
 def _loaded(wf: Workflow, state: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    if state.get("scope_sha") and sha_file(wf.scope_json) != state["scope_sha"]:
+        raise TPError("scope.json changed after confirmation — restore it, or obtain confirmation through "
+                      "`tp revise --scope --feedback ...`.")
     if state.get("plan_approved_sha") and sha_file(wf.plan_json) != state["plan_approved_sha"]:
         raise TPError("plan.json changed after approval — restore it, or ask the human and run "
                       "`tp revise --feedback \"<their words>\"`.")
@@ -146,23 +149,28 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
     if phase == "DONE":
         return [{"action": "done"}]
     if state.get("halt") and not ignore_halt:
-        if state["in_flight"]:
-            return [{"action": "halting", "ids": list(state["in_flight"])}]
         return [{"action": "halted"}]
+    if state.get("blocked"):
+        return [{"action": "human", "why": state["blocked"]["summary"]}]
     if phase == "SCOPING":
         if state.get("scope_checked_sha") and state["scope_checked_sha"] == sha_file(wf.scope_json):
-            return [{"action": "human", "why": "confirm the scope in scope.md"}]
+            return [{"action": "human", "why": "confirm the scope in scope.md; record with `tp scope confirm --answer ...`"}]
         return [{"action": "scope"}]
     if phase == "PLANNING":
         free = limit("max_in_flight") - len(state["in_flight"])
-        return _research().actions(state, free) + [{"action": "plan"}]
+        research_actions = _research().actions(state, free)
+        if research_actions:
+            return research_actions
+        return [{"action": "plan", "why": (
+            "Inspect and continue the existing plan.json draft; preserve completed research and decisions. "
+            if wf.plan_json.exists() else "Draft plan.json from the saved request, scope, and research. "
+        ) + "Run `tp plan check`, fix any validation errors in the draft, then `tp plan submit`."}]
     if phase == "AWAITING_APPROVAL":
-        return [{"action": "human", "why": "approve or revise the plan in plan.md"}]
+        return [{"action": "human", "why": "approve or revise the plan in plan.md; record with `tp approve --answer ...` "
+                 "or `tp revise --feedback ...`"}]
 
     plan, scope, tasks = _loaded(wf, state)
     acts = []
-    if state.get("blocked"):
-        acts.append({"action": "human", "why": state["blocked"]["summary"]})
     for tid, ts in state["tasks"].items():
         if ts["status"] == "blocked":
             acts.append({"action": "human", "id": tid, "why": ts["blocked"]["summary"]})
@@ -196,7 +204,7 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
 
 GUIDE = {
     "scope": "Draft scope.json (`tp schema scope`), then `tp scope check`, then confirm it with the human.",
-    "plan": "Write plan.json (`tp schema plan`), `tp plan check`, then `tp plan submit`.",
+    "plan": "{why}",
     "dispatch": "`tp dispatch {id}`, read the brief it writes, do the step yourself in this context, then "
                 "`tp record {id}`.",
     "fix": "`tp dispatch {id}` (fix round): read the brief, make the fixes yourself in this context, then "
@@ -209,10 +217,10 @@ GUIDE = {
               "`tp triage {id} --accept-all`, or `--dismiss F# --reason \"...\"` and/or `--assign F#=T##`.",
     "followup": "Decide {id} ({why}): pursue it (`tp research add ... --from {id}`) or "
                 "`tp research dismiss {id} --reason \"...\"`.",
-    "human": "Stop and ask the human{about}: {why}. Record the answer with `tp resolve`.",
+    "human": "Stop and ask the human{about}: {why}. Use the indicated decision command; execution blockers use `tp resolve`.",
     "wait": "The step in flight ({ids}) is your own local work: finish it, write its result file, and record "
             "it (`tp record <id>`). Do not stop to wait — no hand-back can arrive.",
-    "halting": "Halt requested: finish and record {ids} at a safe boundary; dispatch nothing new.",
+    "halting": "Halt requested: preserve unfinished {ids} and stop; dispatch nothing new.",
     "halted": "Halted. Tell the human where work stopped (`halt.json`), then stop. `tp resume --answer \"...\"` "
               "continues.",
     "final": "`tp final` — package checks and the report.",
@@ -255,17 +263,15 @@ def cmd_next(wf: Workflow, as_json: bool) -> str:
     acts = actions(wf, state)
     spent = net_agent_minutes(wf, state)
     warnings = []
-    if state["phase"] in ("SCOPING", "PLANNING") and spent > limit("planning_warn_minutes"):
-        warnings.append(f"Planning has taken {spent:.0f} agent-min (target {limit('planning_warn_minutes')}): "
-                        "submit what you have, with open questions for the human.")
     if state["phase"] != "DONE":
         idle = _liveness_warning(wf, state, acts)
         if idle:
             warnings.append(idle)
     if as_json:
         return json.dumps({"phase": state["phase"], "actions": acts, "agent_minutes": round(spent, 1),
-                           "budget_minutes": state.get("budget_minutes"), "warnings": warnings})
-    out = [_headline(wf, state)] + [f"WARNING: {w}" for w in warnings]
+                           "budget_minutes": state.get("budget_minutes"), "warnings": warnings,
+                           "estimates": _estimate_data(wf, state)})
+    out = [_headline(wf, state), estimates.render(_estimate_data(wf, state))] + [f"WARNING: {w}" for w in warnings]
     if state["phase"] == "PLANNING":
         line = _research().summary(state, scopemod.load_scope(wf))
         out += [line] if line else []
@@ -294,17 +300,17 @@ def cmd_digest(wf: Workflow) -> str:
     state = wf.load()
     if state["phase"] == "DONE":
         return f"DONE — report: {wf.root / 'report.md'}; present it to the human (answer-first)."
-    scope = scopemod.load_scope(wf)
-    budget = scope.get("budget_minutes")
+    scope = scopemod.load_scope(wf) if wf.scope_json.exists() else {}
+    budget = scope.get("budget_minutes", state.get("budget_minutes"))
     spent = net_agent_minutes(wf, state)
     flight = ", ".join(f"{tid} ({fl['step']} · {fl.get('agent') or 'local step'}, "
                        f"{minutes_since(fl['since']):.0f}m)"
                        for tid, fl in state["in_flight"].items())
-    lines = []
+    lines = [estimates.render(_estimate_data(wf, state))]
     if state["phase"] in ("SCOPING", "PLANNING", "AWAITING_APPROVAL"):
         recon = state.get("recon", {})
         r_done = sum(1 for r in recon.values() if r.get("status") == "done")
-        head = f"{state['phase']} · meter {spent:.0f}" + (f" of {budget} agent-min" if budget else " agent-min")
+        head = f"{state['phase']} · meter {spent:.0f}" + (f" recorded min (legacy total estimate {budget} min)" if budget else " recorded min")
         if state["phase"] == "PLANNING":
             head += f" · research {r_done}/{len(recon)} items done" if recon else " · no research planned"
         lines.append(head)
@@ -344,7 +350,7 @@ def cmd_digest(wf: Workflow) -> str:
         accepted = sum(1 for ts in state["tasks"].values() if ts["status"] in DONE_STATES)
         inflight = sum(minutes_since(fl["since"]) for fl in state["in_flight"].values())
         lines.append(f"{state['phase']} · {accepted}/{len(state['tasks'])} tasks accepted · meter "
-                     f"{spent:.0f}" + (f" of {budget} agent-min" if budget else " agent-min")
+                     f"{spent:.0f}" + (f" recorded min (legacy total estimate {budget} min)" if budget else " recorded min")
                      + (f" (+{inflight:.0f}m in flight)" if inflight else ""))
         prog = " · ".join(f"{lbl} {ok}/{n}" for lbl, (ok, n) in groups.items())
         if prog:
@@ -353,7 +359,7 @@ def cmd_digest(wf: Workflow) -> str:
                            sorted(mins.items(), key=lambda kv: (-kv[1], kv[0])))
         lines.append(f"Time: {tline or '0m'}")
     if flight:
-        lines.append(f"Agents in flight: {flight}")
+        lines.append(f"Local step in flight: {flight}")
     lines.append("Next: `tp next`.")
     return "\n".join(lines)
 
@@ -362,9 +368,9 @@ def _headline(wf: Workflow, state: Dict[str, Any]) -> str:
     tasks = state["tasks"]
     done = sum(ts["status"] in DONE_STATES for ts in tasks.values())
     flight = ", ".join(f"{k} ({v['step']}, {minutes_since(v['since']):.0f}m)" for k, v in state["in_flight"].items())
-    budget = scopemod.load_scope(wf).get("budget_minutes")
+    budget = state.get("budget_minutes")
     dead = dead_minutes(state)
-    used = f"{net_agent_minutes(wf, state):.0f}" + (f" of {budget} agent-min" if budget else " agent-min")
+    used = f"{net_agent_minutes(wf, state):.0f}" + (f" recorded min (legacy total estimate {budget} min)" if budget else " recorded min")
     if dead:
         used += f" (+{dead:.0f}m dead clock)"
     parts = [state["phase"], f"{done}/{len(tasks)} accepted" if tasks else None,
@@ -474,6 +480,8 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
         if state.get("halt"):
             raise TPError("A halt was requested: nothing new starts. Record agents as they hand back; "
                           "`tp resume --answer \"<the human's words>\"` continues.")
+        if state.get("blocked"):
+            raise TPError(f"The workflow needs a decision: {state['blocked']['summary']} — resolve it first.")
         if tid.startswith("R"):
             return _research().dispatch(wf, state, tid, _slots)
         if "/" in tid:
@@ -519,7 +527,7 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
                     findings = [f"Since the failing round, these files outside your paths changed — likely "
                                 f"accepted concurrent work; never revert them on the strength of an older "
                                 f"finding: {', '.join(concurrent[:10])}."] + findings
-            text = briefs.fix(task, rnd, ctx, findings, result, same_agent=bool(act["agent_id"]))
+            text = briefs.fix(task, rnd, ctx, findings, result)
             label = f"fix-{rnd}"
         else:
             brief, result = run / f"brief-{step}-{ts['round']}.md", run / f"result-{step}.json"
@@ -534,7 +542,8 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
             other.setdefault("concurrent", []).append(tid)
         state["in_flight"][tid] = {"step": step, "since": now_iso(), "snap": str(snap), "agent": act["agent"],
                                    "concurrent": list(state["in_flight"]), "from": ts["status"],
-                                   "head": _git_head(_ws(scope, task["workspace"]))}
+                                   "head": _git_head(_ws(scope, task["workspace"])),
+                                   "brief": str(brief), "result": str(result)}
         ts["status"], ts["step"] = "in_flight", step
         ts["started"] = ts["started"] or now_iso()
         wf.save(state)
@@ -753,7 +762,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bo
         if frozen:
             state["dead_minutes"] = round(dead_minutes(state) + frozen, 1)
             wf.event("dead_clock", id=tid, minutes=round(frozen, 1))
-        state["agent_minutes"] = round(agent_minutes(wf, state) + minutes, 1)
+        state["agent_minutes"] = round(agent_minutes(wf, state) + minutes + frozen, 1)
         est = task.get("estimate_min")
         stall_hint = ""
         if est and minutes > limit("stall_multiplier") * est:
@@ -929,13 +938,13 @@ def _record_review(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], t
         ts["status"] = "needs_check"
         minor = len(data["findings"])
         out = f"{tid} review {n} passed ({minor} non-blocking notes in {path.name}).\n" + _sample(wf, task, scope)
-    wf.save(state)
     review_minutes = minutes_since(fl["since"])
     wait = min(max(0.0, credit), review_minutes)
     review_minutes -= wait
     if wait:
         wf.event("credit", id=tid, minutes=round(wait, 1))
     state["agent_minutes"] = round(agent_minutes(wf, state) + review_minutes, 1)
+    wf.save(state)
     wf.event("record", id=tid, step="review", status=ts["status"], minutes=round(review_minutes, 1))
     return out
 
@@ -1012,6 +1021,7 @@ def cmd_lost(wf: Workflow, tid: str, summary: str) -> str:
                           f"`tp exception --task {tid} --summary \"...\"` covers everything else.")
         state["in_flight"].pop(tid)
         elapsed = minutes_since(fl["since"])
+        state["agent_minutes"] = round(agent_minutes(wf, state) + elapsed, 1)
         state["dead_minutes"] = round(dead_minutes(state) + elapsed, 1)
         prior, step = fl.get("from", "pending"), fl.get("step")
         effective = ts["fixing"] if step == "fix" else step
@@ -1053,16 +1063,17 @@ def cmd_clock(wf: Workflow, tid: str, dead: float, note: str) -> str:
             raise TPError("--dead-minutes must be a positive number of minutes.")
         recorded = sum(e.get("minutes", 0.0) for e in wf.events()
                        if e["kind"] == "record" and e.get("id") == tid)
-        frozen = min(dead, recorded)
+        corrected = sum(e.get("dead_minutes", 0.0) for e in wf.events()
+                        if e["kind"] == "clock_correct" and e.get("id") == tid)
+        frozen = min(dead, max(0, recorded - corrected))
         if frozen <= 0:
             raise TPError(f"{tid} has no recorded minutes to freeze.")
-        state["agent_minutes"] = round(agent_minutes(wf, state) - frozen, 1)
+        state["agent_minutes"] = agent_minutes(wf, state)
         state["dead_minutes"] = round(dead_minutes(state) + frozen, 1)
         wf.save(state)
         wf.event("clock_correct", id=tid, dead_minutes=round(frozen, 1), note=note)
         return (f"meter corrected: {frozen:.0f} of {tid}'s recorded minutes are now dead clock "
-                f"({note}). The headline, the budget warnings, and the dispatch gate read the "
-                f"corrected meter immediately.")
+                f"({note}). Status, digest, and report use the corrected elapsed-time meter.")
 
 
 def _keep_decision(holder: Dict[str, Any], question: str, answer: str, by: Optional[str] = None) -> None:
@@ -1370,7 +1381,7 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
             for i, (text, e) in enumerate(chosen, 1):
                 out.append(f"{i}. {text}")
                 out.append(f"   Why it matters: {e.get('note')}")
-            out += ["", "Ask this with `question` (record the answer verbatim):",
+            out += ["", "Ask the human using an available question tool or directly (record the answer verbatim):",
                     "tp closeout --decide --answer \"<the human's words>\""]
             return "\n".join(out)
         if decide:
@@ -1405,7 +1416,7 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
             wf.save(state)
             wf.event("closeout_class", cls=cls)
             pending = _closeout_pending(wf, state)
-            tail = ("`tp closeout --ask` renders the decision brief; ask it with `question`, then "
+            tail = ("`tp closeout --ask` renders the decision brief; ask the human, then "
                     "`tp closeout --decide --answer \"<the human's words>\"`."
                     if pending == "deferred or follow-up work awaits the human's decision"
                     else ("`tp final` writes the report." if pending is None else "`tp closeout` continues."))
@@ -1432,6 +1443,8 @@ def cmd_final(wf: Workflow) -> str:
         state = wf.load()
         if state["phase"] != "EXECUTING":
             raise TPError(f"final runs while EXECUTING; the workflow is {state['phase']}.")
+        if state.get("halt") or state.get("blocked"):
+            raise TPError("The workflow is halted or awaiting a decision; resume or resolve it before final.")
         plan, scope, tasks = _loaded(wf, state)
         open_ = [f"{t} ({ts['status']})" for t, ts in state["tasks"].items() if ts["status"] not in DONE_STATES]
         if open_ or state["in_flight"]:
@@ -1487,13 +1500,12 @@ def _task_rows(wf: Workflow, state: Dict[str, Any], tasks: Dict[str, Dict[str, A
 def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any],
                results: List[str]) -> str:
     tasks = {t["id"]: t for t in plan["tasks"]}
-    spent = agent_minutes(wf, state)
-    budget = scope.get("budget_minutes")
+    spent = net_agent_minutes(wf, state)
     out = [f"# Report — {plan['title']}", "",
            f"All {len(tasks)} tasks finished: {sum(ts['status'] == 'accepted' for ts in state['tasks'].values())} "
            f"accepted, {sum(ts['status'] == 'skipped' for ts in state['tasks'].values())} skipped by the human. "
-           f"Agent-minutes spent: {spent:.0f}"
-           + (f", against a budget of {budget}." if budget else "."), "", "## Deliverables", ""]
+           f"Recorded step minutes (net of excluded time): {spent:.0f}.", "",
+           estimates.render(estimates.calculate(scope, plan, state)), "", "## Deliverables", ""]
     for d in scope["deliverables"]:
         served = [t for t in tasks.values() if d["id"] in t["serves"]]
         out.append(f"- {d['id']} — {d['what']}: " + ", ".join(
@@ -1534,7 +1546,8 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
 def cmd_report(wf: Workflow) -> str:
     state = wf.load()
     planning = minutes_since(state["created"], state.get("approved"))
-    out = [f"planning: {planning:.0f} min (start → approval)" + ("" if state.get("approved") else ", still open")]
+    out = [estimates.render(_estimate_data(wf, state)),
+           f"planning: {planning:.0f} min (start → approval)" + ("" if state.get("approved") else ", still open")]
     if state.get("approved"):
         out.append(f"execution: {minutes_since(state['approved'], state.get('done')):.0f} min")
     plan_tasks: Dict[str, Dict[str, Any]] = {}
@@ -1550,69 +1563,157 @@ def cmd_report(wf: Workflow) -> str:
     return "\n".join(out)
 
 
-def cmd_status(wf: Workflow, as_json: bool) -> str:
-    state = wf.load()
-    if as_json:
-        return json.dumps({"phase": state["phase"], "title": state["title"],
-                           "tasks": {t: v["status"] for t, v in state["tasks"].items()},
-                           "in_flight": state["in_flight"], "blocked": state.get("blocked"),
-                           "elapsed_min": round(minutes_since(state["created"]), 1)})
-    out = [f"{state['title']} — {_headline(wf, state)}", f"dir: {wf.root}"]
-    by: Dict[str, List[str]] = {}
-    for tid, ts in state["tasks"].items():
-        by.setdefault(ts["status"], []).append(tid)
-    for status, ids in by.items():
-        out.append(f"  {status}: {', '.join(ids[:20])}" + (" …" if len(ids) > 20 else ""))
+def _estimate_data(wf: Workflow, state: Dict[str, Any]) -> Dict[str, Any]:
+    # Read drafts independently: an interrupted plan write must not hide saved scope estimates.
+    scope, plan = {}, None
+    if wf.scope_json.exists():
+        try:
+            scope = scopemod.load_scope(wf)
+        except TPError:
+            pass
+    if wf.plan_json.exists():
+        try:
+            plan = planmod.load_plan(wf)
+        except TPError:
+            pass
+    try:
+        return estimates.calculate(scope, plan, state)
+    except (KeyError, TypeError, ValueError):
+        return estimates.calculate({}, state=state)
+
+
+def _checkpoints(wf: Workflow, state: Dict[str, Any]) -> Dict[str, Any]:
+    """Use saved artifact paths, deriving the same names for pre-checkpoint version-1 runs.
+    Reading recovery context must never dispatch, delete results, or replace snapshots."""
+    checkpoints = {}
+    for tid, flight in state["in_flight"].items():
+        step = flight["step"]
+        if tid.startswith("R"):
+            brief = wf.root / "recon" / f"{tid}.brief.md"
+            result = wf.root / "recon" / f"{tid}.json"
+        elif "/" in tid:
+            batch, role = tid.split("/", 1)
+            n = state.get("reviews", {}).get(tid, {}).get("round", 1)
+            brief = wf.run_dir(batch) / f"brief-{role}-{n}.md"
+            result = wf.run_dir(batch) / f"{role}-{n}.json"
+        else:
+            ts = state["tasks"][tid]
+            if step == "review":
+                n = ts["reviews"] + 1
+                brief = wf.run_dir(tid) / f"brief-review-{n}.md"
+                result = wf.run_dir(tid) / f"review-{n}.json"
+            else:
+                brief = wf.run_dir(tid) / f"brief-{step}-{ts['round']}.md"
+                result = wf.run_dir(tid) / f"result-{step}.json"
+        brief = Path(flight.get("brief", brief))
+        result = Path(flight.get("result", result))
+        checkpoints[tid] = {"step": step, "brief": str(brief), "brief_exists": brief.is_file(),
+                            "result": str(result), "result_exists": result.is_file(),
+                            "snapshots": flight.get("snaps") or flight.get("snap"),
+                            "instruction": "Inspect the saved brief, partial result, and workspace edits; "
+                            "continue this step, validate its result, then record it. Do not dispatch again."}
+    return checkpoints
+
+
+def _status_data(wf: Workflow, state: Dict[str, Any]) -> Dict[str, Any]:
+    drift = []
+    for path, expected, label in (
+        (wf.scope_json, state.get("scope_sha"), "confirmed scope"),
+        (wf.plan_json, state.get("plan_approved_sha") or state.get("plan_submitted_sha"), "submitted/approved plan"),
+        *[(Path(path), sha, "approved conventions") for path, sha in state.get("conventions_sha", {}).items()],
+    ):
+        if expected and sha_file(path) != expected:
+            drift.append(f"{path} differs from the {label}; restore it or use the approved revision process.")
+    try:
+        next_actions = actions(wf, state)
+    except TPError as exc:
+        drift.extend(ln for ln in exc.lines if ln not in drift)
+        next_actions = [{"action": "human", "why": "Inspect saved artifacts and resolve the reported contract drift."}]
+    artifacts = {name: str(wf.root / path) for name, path in (
+        ("request", "request.md"), ("scope", "scope.json"), ("scope_rendered", "scope.md"),
+        ("plan", "plan.json"), ("plan_rendered", "plan.md"), ("approved_plan", "plan.approved.json"),
+        ("decisions", "decisions.md"), ("noticed", "noticed.md"), ("halt", "halt.json"),
+        ("report", "report.md")) if (wf.root / path).is_file()}
+    return {"phase": state["phase"], "title": state["title"], "workflow": str(wf.root),
+            "tasks": {t: v["status"] for t, v in state["tasks"].items()},
+            "research": {r: v["status"] for r, v in state.get("recon", {}).items()},
+            "reviews": {r: v["status"] for r, v in state.get("reviews", {}).items()},
+            "in_flight": state["in_flight"], "blocked": state.get("blocked"), "halt": state.get("halt"),
+            "task_blocks": {t: v["blocked"] for t, v in state["tasks"].items() if v.get("blocked")},
+            "artifacts": artifacts, "checkpoints": _checkpoints(wf, state), "drift": drift,
+            "research_results": [str(p) for p in sorted((wf.root / "recon").glob("*.json"))],
+            "actions": next_actions, "estimates": _estimate_data(wf, state),
+            "elapsed_min": round(minutes_since(state["created"]), 1)}
+
+
+def _render_status(wf: Workflow, state: Dict[str, Any], data: Dict[str, Any]) -> str:
+    out = [f"{state['title']} — {_headline(wf, state)}", f"dir: {wf.root}", estimates.render(data["estimates"])]
+    for label in ("tasks", "research", "reviews"):
+        if data[label]:
+            out.append(f"  {label}: " + ", ".join(f"{tid} {status}" for tid, status in data[label].items()))
     if state.get("blocked"):
         out.append(f"BLOCKED: {state['blocked']['summary']}")
+    for tid, block in data["task_blocks"].items():
+        out.append(f"BLOCKED {tid}: {block['summary']}")
     if state.get("halt"):
         out.append(f"HALT {'complete' if state['halt'].get('halted') else 'requested'}: {state['halt']['reason']}")
-    research = state.get("recon", {})
-    if research:
-        out.append("  research: " + ", ".join(f"{rid} {r['status']}" for rid, r in list(research.items())[:12]))
-    reviews = state.get("reviews", {})
-    if reviews:
-        out.append("  reviews: " + ", ".join(f"{sid} {s['status']}" for sid, s in reviews.items()))
-    out.append(cmd_next(wf, False).splitlines()[-1])
-    return "\n".join(out[:24])
+    out += [f"DRIFT: {d}" for d in data["drift"]]
+    for tid, checkpoint in data["checkpoints"].items():
+        out += [f"Continue {tid} ({checkpoint['step']}):", f"  brief: {checkpoint['brief']}",
+                f"  result: {checkpoint['result']} ({'exists; inspect before recording' if checkpoint['result_exists'] else 'not written yet'})",
+                f"  {checkpoint['instruction']}"]
+    for action in data["actions"]:
+        what = action["action"]
+        about = f" about {action['id']}" if action.get("id") else ""
+        out.append(f"→ {what} {action.get('id', '')}: " + GUIDE[what].format(
+            id=action.get("id", ""), why=action.get("why", ""), about=about, ids=", ".join(action.get("ids", []))))
+    return "\n".join(out)
+
+
+def cmd_status(wf: Workflow, as_json: bool) -> str:
+    state = wf.load()
+    data = _status_data(wf, state)
+    return json.dumps(data) if as_json else _render_status(wf, state, data)
 
 
 # --- halt and resume ------------------------------------------------------------------------
 
 def _halt_record(wf: Workflow, state: Dict[str, Any]) -> str:
-    """Once nothing is in flight after a halt request: record where the work stopped."""
+    """Persist the stop point, including unfinished local work and its original checkpoint."""
     halt = state["halt"]
     halt["halted"] = halt.get("halted") or now_iso()
     by_status: Dict[str, List[str]] = {}
     for tid, ts in state["tasks"].items():
         by_status.setdefault(ts["status"], []).append(tid)
+    try:
+        next_actions = actions(wf, state, ignore_halt=True)
+    except TPError as exc:
+        next_actions = [{"action": "human", "why": "Resolve the saved contract problem: " + str(exc)}]
     record = {
         "requested": halt["requested"], "halted": halt["halted"], "reason": halt["reason"], "phase": state["phase"],
         "elapsed_min": round(minutes_since(state["created"]), 1), "agent_minutes": round(agent_minutes(wf, state), 1),
         "budget_minutes": state.get("budget_minutes"),
-        "tasks": by_status,
+        "tasks": by_status, "in_flight": state["in_flight"], "checkpoints": _checkpoints(wf, state),
         "research": {rid: i["status"] for rid, i in state.get("recon", {}).items()},
         "reviews": {sid: s["status"] for sid, s in state.get("reviews", {}).items()},
-        "next_on_resume": [{k: a[k] for k in ("action", "id", "step", "agent") if a.get(k)}
-                           for a in actions(wf, state, ignore_halt=True)],
+        "next_on_resume": [{k: a[k] for k in ("action", "id", "step", "agent", "why") if a.get(k)}
+                           for a in next_actions],
     }
     (wf.root / "halt.json").write_text(json.dumps(record, indent=1))
     wf.save(state)
     wf.event("halted")
     counts = ", ".join(f"{len(v)} {k}" for k, v in by_status.items())
     nxt = "; ".join(f"{a['action']} {a.get('id', '')}".strip() for a in record["next_on_resume"][:6])
-    return (f"HALTED at a clean point — nothing in flight. Recorded in {wf.root / 'halt.json'}.\n"
+    return (f"HALTED — saved progress and unfinished steps in {wf.root / 'halt.json'}.\n"
             f"{state['phase']}{' · ' + counts if counts else ''}. On resume: {nxt or 'nothing pending'}.\n"
             "Tell the human; `tp resume --answer \"<their words>\"` continues.")
 
 
 def after_record(wf: Workflow, out: str) -> str:
-    """Called after every recorded hand-back: completes a pending halt once the last agent is in."""
+    """Refresh a saved stop point when existing evidence is recorded after a halt."""
     state = wf.load()
-    if state.get("halt") and not state["in_flight"] and not state["halt"].get("halted"):
+    if state.get("halt"):
         return out + "\n" + _halt_record(wf, state)
-    if state.get("halt") and state["in_flight"]:
-        return out + f"\nHalting: still waiting for {', '.join(state['in_flight'])}."
     return out
 
 
@@ -1622,29 +1723,39 @@ def cmd_halt(wf: Workflow, reason: str) -> str:
         if state["phase"] == "DONE":
             raise TPError("The workflow is DONE; there is nothing to halt.")
         if state.get("halt"):
-            return f"Already halting (requested {state['halt']['requested']}). `tp next` shows what is left."
+            return f"Already halted (requested {state['halt']['requested']}). `tp next` shows what is left."
         state["halt"] = {"requested": now_iso(), "reason": reason, "halted": None}
         wf.save(state)
         wf.decision("halt", reason)
         wf.event("halt_requested")
-        if not state["in_flight"]:
-            return _halt_record(wf, state)
-        flying = ", ".join(f"{k} ({v['step']})" for k, v in state["in_flight"].items())
-        return (f"Halt requested. Nothing new will start. Let the agents in flight finish their current step — "
-                f"{flying} — and record each one as it hands back; the halt completes when the last is in.")
+        return _halt_record(wf, state)
 
 
-def cmd_resume(wf: Workflow, answer: str) -> str:
+def cmd_resume(wf: Workflow, answer: str, as_json: bool = False) -> str:
+    # An abrupt session loss need not have left a halt marker. Re-entry never resets the
+    # phase, approvals, task states, research, review rounds, baselines, or in-flight work.
     with wf.locked():
         state = wf.load()
         halt = state.pop("halt", None)
-        if halt is None:
-            raise TPError("Nothing is halted.")
-        state.setdefault("halts", []).append(dict(halt, resumed=now_iso()))
-        wf.save(state)
+        if halt is not None:
+            state.setdefault("halts", []).append(dict(halt, resumed=now_iso()))
+            wf.save(state)
+        # Older version-1 workflows may predate approved snapshots. Capture only a plan
+        # whose bytes still match approval; never bless a changed draft during recovery.
+        if (state.get("plan_approved_sha") and sha_file(wf.plan_json) == state["plan_approved_sha"]
+                and not (wf.root / "plan.approved.json").exists()):
+            planmod._write_approved_snapshot(wf, planmod.load_plan(wf))
         wf.decision("resume", answer)
         wf.event("resume")
-        return "resumed. Run `tp next`."
+    data = _status_data(wf, state)
+    if as_json:
+        return json.dumps(data)
+    out = ["resumed from saved progress; existing approvals and unfinished steps are preserved.",
+           _render_status(wf, state, data), "Saved context (read before continuing):"]
+    out += [f"  {name}: {path}" for name, path in data["artifacts"].items()]
+    out += [f"  research result: {path}" for path in data["research_results"]]
+    out.append("Inspect workspace edits and the saved context, then follow `tp next`. Resume approves no pending decision.")
+    return "\n".join(out)
 
 
 def add_fix(wf: Workflow, state: Dict[str, Any], tid: str, findings: List[str], fixing: str,

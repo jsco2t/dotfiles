@@ -70,7 +70,7 @@ class DispatchTest(unittest.TestCase):
         self.assertIn("complete contract", brief)
         self.assertNotIn("orchestrator", brief)
         self.assertIn("Point first", brief)           # answer-first core, inlined
-        self.assertIn("`task` tool", brief)           # no sub-agent fan-out
+        self.assertIn("never call tools that launch other agents", brief)           # no sub-agent fan-out
         self.assertNotIn("--max-agents", brief)       # no fleet budget line: the work is done here
         self.assertIn("no sub-agents", brief)
         self.assertIn(str(self.h.kb / "architecture/overview.md"), brief)
@@ -514,7 +514,7 @@ class BatchReviewTest(unittest.TestCase):
         self.h.tp("dispatch", S1)
         brief = (self.h.wf / "runs" / "B1" / "brief-doc-reviewer-1.md").read_text()
         for needle in ("architecture/overview.md", "build/guide.md", "T01", "T02", "Do not edit",
-                       "changes.json", "doc-reviewer-1.json", "`task` tool"):
+                       "changes.json", "doc-reviewer-1.json", "never call tools that launch other agents"):
             self.assertIn(needle, brief)
         self.assertNotIn("index.md", brief.split("## Hand back")[0].split("Deliverables")[1])   # B2's file
         changes = json.loads((self.h.wf / "runs" / "B1" / "changes.json").read_text())
@@ -617,12 +617,13 @@ class HaltTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.h.close()
 
-    def test_in_flight_work_finishes_then_the_stop_point_is_recorded(self) -> None:
+    def test_halt_preserves_active_work_and_can_record_existing_evidence(self) -> None:
         h = self.h
         h.tp("dispatch", "T01")
         out = h.tp("halt", "--reason", "Stopping for the day.").out
-        self.assertIn("T01", out)
-        self.assertEqual([a["action"] for a in h.next()["actions"]], ["halting"])
+        self.assertIn("HALTED", out)
+        self.assertIn("T01", h.read_json("halt.json")["in_flight"])
+        self.assertEqual([a["action"] for a in h.next()["actions"]], ["halted"])
         self.assertIn("halt", h.tp("dispatch", "T02", expect=2).text)
         h.good_article("architecture/overview.md")
         h.result("T01", "author", changed=["architecture/overview.md"])

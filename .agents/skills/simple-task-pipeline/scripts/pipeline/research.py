@@ -1,5 +1,5 @@
 """Planning research: small, narrowly scoped items, each a few questions answered in a small
-JSON file within its own time box (the stall-detection unit). The research budget is the
+JSON file with an advisory duration estimate. The research budget is the
 manager's own reporting metadata — not a human approval and never a refusal. Anything that
 needs more investigation comes back as a followup, which the manager pursues (a new item) or
 dismisses. State lives under state["recon"] (the name older workflows use)."""
@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from . import briefs
 from . import scope as scopemod
-from .common import TPError, Workflow, limit, load_json, minutes_since, now_iso, words
+from .common import TPError, Workflow, agent_minutes, limit, load_json, minutes_since, now_iso, words
 
 PURPOSES = ("map", "requirements", "investigate")
 # A bounding modifier ("every cited file", "all listed commands") names a set the input
@@ -55,7 +55,7 @@ def summary(state: Dict[str, Any], scope: Dict[str, Any]) -> Optional[str]:
     done = sum(i["status"] == "done" for i in its)
     open_ = sum(f["status"] == "open" for i in its for f in i.get("followups", []))
     spent = sum(i.get("actual_minutes", 0) for i in its)
-    return (f"research budget: {reserved(state)} of {total} agent-min reserved · {done} of "
+    return (f"research estimate: {reserved(state)} min in items (overall estimate {total} min) · {done} of "
             f"{sum(i['status'] != 'dropped' for i in its)} items answered ({spent:.0f} min spent) · "
             f"{open_} followups undecided")
 
@@ -101,9 +101,8 @@ def cmd_add(wf: Workflow, rid: str, agent: str, purpose: Optional[str], question
         if agent not in scopemod.participants(scope, "research"):
             errs.append(f"{agent} is not a confirmed research participant in scope.json — ask the human first.")
         box = limit("research_item_minutes") if minutes is None else minutes
-        if not 1 <= box <= limit("research_item_minutes"):
-            errs.append(f"--minutes {box}: a research item's time box is 1 to {limit('research_item_minutes')} min — "
-                        "split the question instead.")
+        if box < 1:
+            errs.append("--minutes must be a positive duration estimate.")
         questions = [q.strip() for q in Path(questions_file).read_text().splitlines() if q.strip()]
         if not questions:
             errs.append("no questions.")
@@ -124,14 +123,6 @@ def cmd_add(wf: Workflow, rid: str, agent: str, purpose: Optional[str], question
                     errs.append(f"{from_ref} is already decided.")
             except TPError as exc:
                 errs += exc.lines
-        if not errs:
-            total = budget(state, scope)
-            if reserved(state) + box > total:
-                # The budget is reporting metadata: note the overdraw, refuse nothing. The
-                # per-item time box (≤ research_item_minutes) stays the stall-detection unit.
-                wf.noticed("manager", f"research overdraw: {reserved(state) + box} of {total or 0} agent-min "
-                           f"reserved after {rid} — raise the reporting budget with `tp research extend` if the "
-                           "estimate should grow.")
         if errs:
             raise TPError(*errs)
         items(state)[rid] = {"agent": agent, "purpose": purpose, "questions": questions, "done_when": done_when,
@@ -154,7 +145,7 @@ def cmd_extend(wf: Workflow, minutes: int, answer: Optional[str] = None,
         wf.save(state)
         wf.decision(f"research extend +{minutes} min", answer or note or "manager re-estimate",
                     who="human" if answer else "manager")
-        return f"research budget +{minutes} agent-min (reporting metadata). {summary(state, scopemod.load_scope(wf))}."
+        return f"research estimate +{minutes} min (advisory). {summary(state, scopemod.load_scope(wf))}."
 
 
 def cmd_dismiss(wf: Workflow, ref: str, reason: str) -> str:
@@ -196,11 +187,12 @@ def dispatch(wf: Workflow, state: Dict[str, Any], rid: str, slots) -> str:
     surveys = sorted((wf.root / "survey").glob("*.json")) if (wf.root / "survey").exists() else []
     brief.write_text(briefs.research(rid, item, wf.root / "scope.md", surveys, result))
     item["status"] = "in_flight"
-    state["in_flight"][rid] = {"step": "research", "since": now_iso(), "agent": item["agent"], "concurrent": []}
+    state["in_flight"][rid] = {"step": "research", "since": now_iso(), "agent": item["agent"], "concurrent": [],
+                               "brief": str(brief), "result": str(result)}
     wf.save(state)
     wf.event("dispatch", id=rid, step="research", agent=item["agent"])
     return (f"DISPATCH {rid} · research ({item.get('purpose', 'map')}) · {item['agent']} · "
-            f"box {item.get('minutes', limit('research_item_minutes'))} min\nbrief: {brief}\nresult: {result}\n"
+            f"estimate {item.get('minutes', limit('research_item_minutes'))} min\nbrief: {brief}\nresult: {result}\n"
             f"Answer its questions yourself in this context (no sub-agents), write the result file, "
             f"then: tp record {rid}")
 
@@ -241,10 +233,11 @@ def record(wf: Workflow, state: Dict[str, Any], rid: str) -> str:
                           "agent": f.get("agent"), "status": "open"}
                          for i, f in enumerate(data.get("followups", []), 1)]
     item.update(status="done", actual_minutes=round(minutes, 1))
+    state["agent_minutes"] = round(agent_minutes(wf, state) + minutes, 1)
     wf.save(state)
     wf.event("record", id=rid, step="research", minutes=round(minutes, 1))
-    box = item.get("minutes", limit("research_item_minutes"))
-    out = [f"{rid} done in {minutes:.0f} min{f' — over its {box}-min box' if minutes > box else ''}: "
+    estimate = item.get("minutes", limit("research_item_minutes"))
+    out = [f"{rid} done in {minutes:.0f} min (estimated {estimate} min, advisory): "
            f"{len(data['answers'])} answers, {len(data.get('unknowns', []))} unknowns. Fact-check one answer "
            f"(`tp show {rid} --part answers`) before you rely on it."]
     if item["followups"]:

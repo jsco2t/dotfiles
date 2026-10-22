@@ -43,9 +43,10 @@ class PlanCheckTest(unittest.TestCase):
         self.assertIn("T09", text)
         self.assertIn("D7", text)
 
-    def test_oversized_task_is_refused(self) -> None:
+    def test_long_task_estimate_is_reported_without_forcing_a_split(self) -> None:
         plan = self.h.plan([self.h.task("T01", "a.md", estimate_min=45)])
-        self.assertIn("estimate_min", self.check(plan, expect=2).text)
+        self.check(plan)
+        self.assertIn("45m", (self.h.wf / "plan.md").read_text())
 
     def test_long_brief_and_many_criteria_are_refused(self) -> None:
         plan = self.h.plan([self.h.task("T01", "a.md", brief="word " * 200,
@@ -76,9 +77,9 @@ class PlanCheckTest(unittest.TestCase):
         self.check(self.h.plan(tasks))
         self.assertIn("min", (self.h.wf / "plan.md").read_text())
 
-    def test_overlapping_paths_need_an_ordering(self) -> None:
+    def test_sequential_tasks_can_share_paths_with_or_without_dependencies(self) -> None:
         plan = self.h.plan([self.h.task("T01", "arch/**"), self.h.task("T02", "arch/overview.md")])
-        self.assertIn("overlap", self.check(plan, expect=2).text)
+        self.check(plan)
         plan = self.h.plan([self.h.task("T01", "arch/**"),
                             self.h.task("T02", "arch/overview.md", depends_on=["T01"])])
         self.check(plan)
@@ -144,12 +145,10 @@ class ReviewPlanTest(unittest.TestCase):
         self.assertIn("review_batches", self.check(self.h.plan(tasks), expect=2, **FINAL_REVIEW).text)
 
     def test_a_review_session_is_sized_by_what_it_reviews(self) -> None:
-        # Measured live: one ~75-line document took a doc reviewer about 10 minutes, so four
-        # articles in one session exceed the 30-minute cap.
+        # Review time grows with the work, without limiting the duration of a pass.
         tasks = [self.h.task(f"T0{i}", f"a{i}.md", estimate_min=5) for i in range(1, 5)]
-        text = self.check(self.h.plan(tasks), expect=2, **FINAL_REVIEW).text
-        self.assertIn("40 min of review", text)
-        self.assertIn("review_batches", text)
+        self.check(self.h.plan(tasks), **FINAL_REVIEW)
+        self.assertIn("about 48 min", (self.h.wf / "plan.md").read_text())
 
     def test_a_small_code_batch_fits_one_session(self) -> None:
         h = Harness()

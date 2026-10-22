@@ -225,7 +225,7 @@ class DigestTest(unittest.TestCase):
         self.assertIn("EXECUTING", out)
         self.assertIn("T02", out)                              # agents in flight
         self.assertIn("writing 1/3", out)                      # kb tasks: 1 accepted of 3
-        self.assertIn("of 180 agent-min", out)                 # budget
+        self.assertIn("total 180 min", out)                 # budget
         self.assertIn("writing", out.split("Time:")[1])        # time by group
 
     def test_planning_digest_reports_research(self) -> None:

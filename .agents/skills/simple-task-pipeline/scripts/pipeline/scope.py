@@ -1,13 +1,13 @@
-"""Scope: what will be delivered, who works on it, the time budget, and the research budget —
+"""Scope: deliverables, work roles, and advisory duration estimates —
 checked, rendered, and frozen when the human confirms it."""
 from __future__ import annotations
 
 import json
-import math
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
+from . import estimates
 from .common import TPError, Workflow, catalog, limit, load_json, now_iso, sha_file
 
 REVIEW_MODES = ("none", "final", "per-task", "both")
@@ -139,26 +139,20 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     elif mode != "none" and not reviewers:
         errs.append(f"review '{mode}' needs a reviewer participant.")
 
-    budget = scope.get("budget_minutes")
-    if budget is not None and (not isinstance(budget, int) or not 15 <= budget <= 2880):
-        errs.append("budget_minutes must be a whole number of minutes between 15 and 2880 (or null).")
-    # A null budget is fine and needs nothing from the human: the manager sizes budgets
-    # itself, as reporting metadata and stall-detection context — never an approval.
+    budget = scope.get("budget_minutes")  # legacy spelling: an estimate, never a limit
+    if budget is not None and (type(budget) is not int or budget < 0):
+        errs.append("budget_minutes must be nonnegative whole estimated minutes (or null).")
+    errs += estimates.validate(scope)
     research = scope.get("research")
-    rb = research_budget(scope)
-    researchers = participants(scope, "research")
-    if research is not None and (not isinstance(research, dict) or not isinstance(research.get("budget_minutes", 0), int)
-                                 or research.get("budget_minutes", 0) < 0):
-        errs.append("research must be {\"budget_minutes\": <agent-minutes>, \"why\": \"...\"}.")
-    elif rb and not researchers:
-        errs.append("a research budget needs at least one research participant.")
-    elif rb:
+    if research is not None and (not isinstance(research, dict)
+                                or type(research.get("budget_minutes", 0)) is not int
+                                or research.get("budget_minutes", 0) < 0):
+        errs.append('research must be {"budget_minutes": <estimated minutes>, "why": "..."}.')
+    elif research and research.get("budget_minutes"):
+        if not participants(scope, "research"):
+            errs.append("a research estimate needs at least one research participant.")
         if len(str(research.get("why", "")).strip()) < 12:
             errs.append("research.why must say what is unknown enough to need research.")
-        lanes = limit("max_in_flight")
-        if isinstance(budget, int) and math.ceil(rb / lanes) >= budget:
-            errs.append(f"a research budget of {rb} agent-min takes {math.ceil(rb / lanes)} of the {budget}-min "
-                        "budget on its own — shrink it or raise the budget.")
     for t in scope.get("terms", []):
         if not t.get("term") or not t.get("means"):
             errs.append("each term needs `term` and `means` (and ideally `not`).")
@@ -167,10 +161,9 @@ def validate(scope: Dict[str, Any]) -> List[str]:
 
 def render(scope: Dict[str, Any]) -> str:
     out = [f"# Scope — {scope['title']}", "", f"**Output:** {scope['output']}", ""]
-    budget = scope.get("budget_minutes")
     rb = research_budget(scope)
-    out += [f"**Budget:** {budget} min, planning included." if budget else "**Budget:** none set.",
-            f"**Research budget:** {rb} agent-min — {scope['research'].get('why', '')}" if rb
+    out += [estimates.render(estimates.calculate(scope)),
+            f"**Research estimate:** {rb} min — {scope['research'].get('why', '')}" if rb
             else "**Research:** none — the work is specified well enough to plan directly.",
             f"**Review:** {scope['review']}.", "", "## Deliverables"]
     out += [f"- {d['id']} ({d['kind']}): {d['what']}" + (f" — in `{d['where']}`" if d.get("where") else "")
@@ -205,8 +198,8 @@ def cmd_check(wf: Workflow) -> str:
     wf.save(state)
     wf.event("scope_check")
     return (f"scope ok — rendered {wf.root / 'scope.md'}.\n"
-            "Present it to the human (including the research budget, or that there is none) and ask them to "
-            "confirm (AskUserQuestion). On yes: `tp scope confirm --answer \"<their words>\"`.")
+            "Present it to the human (including advisory stage and total estimates) and ask them to "
+            "confirm (use an available question tool or ask directly). On yes: `tp scope confirm --answer \"<their words>\"`.")
 
 
 def cmd_confirm(wf: Workflow, answer: str) -> str:
@@ -227,7 +220,7 @@ def cmd_confirm(wf: Workflow, answer: str) -> str:
 def cmd_budget_extend(wf: Workflow, minutes: int, answer: Optional[str] = None,
                       note: Optional[str] = None) -> str:
     """Set the whole-job budget while PLANNING or EXECUTING. Budgets are the manager's own
-    reporting/stall-detection metadata — sizing or raising one is bookkeeping, never a human
+    advisory reporting metadata — sizing or raising one is bookkeeping, never a human
     approval; when the human volunteers words, they are recorded verbatim."""
     if minutes < 1:
         raise TPError("budget extend needs a positive number of minutes.")
@@ -235,14 +228,16 @@ def cmd_budget_extend(wf: Workflow, minutes: int, answer: Optional[str] = None,
         state = wf.load()
         if state["phase"] not in ("PLANNING", "EXECUTING"):
             raise TPError(f"budget extend applies while PLANNING or EXECUTING; the workflow is {state['phase']}.")
+        if state.get("scope_sha") != sha_file(wf.scope_json):
+            raise TPError("scope.json changed after confirmation — restore it or use `tp revise --scope`; "
+                          "extending an estimate cannot approve other scope changes.")
         scope = load_scope(wf)
         old = scope.get("budget_minutes")
         new = int(old or 0) + minutes
-        if new > 2880:
-            raise TPError(f"budget_minutes would reach {new}; the cap is 2880.")
         scope["budget_minutes"] = new
         scope.pop("budget_declined", None)
         wf.scope_json.write_text(json.dumps(scope, indent=1) + "\n")
+        (wf.root / "scope.md").write_text(render(scope))
         state["budget_minutes"] = new
         state["scope_sha"] = state["scope_checked_sha"] = sha_file(wf.scope_json)
         wf.save(state)
@@ -250,7 +245,7 @@ def cmd_budget_extend(wf: Workflow, minutes: int, answer: Optional[str] = None,
         wf.decision(f"budget extend +{minutes} min", f"{old or 'none'} → {new}: {why}",
                     who="human" if answer else "manager")
         wf.event("budget_extend", minutes=minutes, budget=new)
-        return (f"budget metadata is now {new} agent-min (was {old or 'none'}) — it reports in the "
+        return (f"total estimate is now {new} min (was {old or 'none'}) — it reports in the "
                 "meter, the digest, and the report, and gates nothing.")
 
 

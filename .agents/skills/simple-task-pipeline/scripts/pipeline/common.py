@@ -45,8 +45,8 @@ def minutes_since(ts: Optional[str], until: Optional[str] = None) -> float:
 
 
 def agent_minutes(wf: "Workflow", state: Dict[str, Any]) -> float:
-    """Agent-minutes actually spent: the sum of per-hand-back minutes the record gate logged.
-    Wall-clock since creation reads a conversation's idle time as work; this does not."""
+    """Stored gross step minutes (including excluded dead time), or legacy recorded minutes.
+    Use net_agent_minutes for reporting. This is elapsed time, not measured model billing."""
     if "agent_minutes" in state:
         return float(state["agent_minutes"])
     # Older workflows without the tally: derive it from the event log.
@@ -56,12 +56,12 @@ def agent_minutes(wf: "Workflow", state: Dict[str, Any]) -> float:
 def dead_minutes(state: Dict[str, Any]) -> float:
     """Clock frozen out of the meter: lost dispatches (session/harness died mid-flight) and
     stall time the manager flagged with `--dead-minutes`. Backend stalls used to bill ~400
-    dead minutes to a run as if agents had worked; this keeps them out of the budget meter."""
+    dead minutes to a run as if agents had worked; this keeps them out of the elapsed-time report."""
     return float(state.get("dead_minutes", 0.0))
 
 
 def net_agent_minutes(wf: "Workflow", state: Dict[str, Any]) -> float:
-    """The meter the budget is held against: gross hand-back minutes minus dead clock."""
+    """Recorded elapsed minutes, excluding dead clock. Reporting only, never a task limit."""
     return max(0.0, agent_minutes(wf, state) - dead_minutes(state))
 
 
@@ -222,7 +222,7 @@ class Workflow:
         if not path.exists():
             return None
         lines = path.read_text().splitlines()
-        idx = [i for i, ln in enumerate(lines) if ln.startswith("- ")]
+        idx = [i for i, ln in enumerate(lines) if ln.startswith("- ") and "RESOLVED:" not in ln]
         if not 1 <= n <= len(idx):
             return None
         i = idx[n - 1]

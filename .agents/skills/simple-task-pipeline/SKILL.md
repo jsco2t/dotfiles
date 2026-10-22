@@ -8,277 +8,197 @@ description: >-
 
 # Simple Task Pipeline
 
-You perform the entire pipeline in the **main agent's context**: scope with the human, research,
-write the plan, implement each task, review the work, fix findings, and report the outcome.
-**Never launch or resume subagents, call the `task` tool, or delegate any part of this workflow.**
-Work sequentially, including research and review. When using another skill, apply its relevant
-instructions and review lenses yourself; disable delegation with `--max-agents=0` where supported.
-If a skill requires delegation, perform the equivalent work directly instead.
+Perform the entire workflow in the **main agent's context**: scope, research, planning,
+tests, implementation, review, fixes, and delivery. **Never launch or resume subagents or
+delegate work.** Apply other skills' relevant instructions and review lenses yourself;
+if they require delegation, perform the equivalent work directly.
 
-Use the `tp.py` bundled with this skill for persistent state, validation, approvals, briefs,
-checks, and reports. Resolve `<actual-skill-dir>` from the directory containing this `SKILL.md`,
-whether installed or in a repository. Never substitute another task-pipeline skill's helper;
-each skill owns its tool copy.
+This skill works across agent hosts, including OpenCode. It requires a shell and Python 3;
+Git supports repository inspection. Optional issue surveys need the corresponding CLI.
+Use whatever file, shell, and question tools the host provides. If there is no question
+tool, ask directly and wait for required decisions. No host-specific agent API, session
+identifier, scheduler, or Codex facility is needed.
+
+Use the helper bundled with this actual skill directory, whether installed or in a repo:
 
 ```bash
-python3 "<actual-skill-dir>/scripts/tp.py" -w "<workflow dir>" <command>
+python3 "<actual-skill-dir>/scripts/tp.py" -w "<workflow-dir>" <command>
 ```
 
-`tp <command>` below means exactly that line; spell out the resolved absolute script path in
-every shell call (zsh does not word-split a variable). **Run `tp next` after every step** and
-do what it says, under the rules below.
+`tp` below abbreviates that invocation; resolve the script path from this `SKILL.md` and
+spell out the absolute path in shell calls. Read [references/helper.md](references/helper.md)
+for command syntax, result files, recovery, and correction paths. `tp --help` and command
+`--help` describe the installed CLI. `init`, `schema`, `roster`, and `check-docs` can run
+without `-w`. Run `tp next` after transitions and finish the complete approved work.
 
-## The tool is solo-native
+## Invocation
 
-`tp.py` speaks to exactly one worker: you. Everything it prints assumes the work happens in
-this context; never delegate any of it.
+The host may expose this skill using `/`, `$`, `@`, or another invocation syntax. Interpret
+the arguments after `simple-task-pipeline` as follows; quote paths containing spaces:
 
-- **Role labels** (`code-author`, `doc-reviewer`, …) name work roles and review lenses that
-  **you** perform. Keep catalog-supported labels in `scope.json`, task `agent` fields, and
-  research items because validation requires them. They do not represent separate agents or
-  sessions. Use `tp roster suggest --kinds <kinds>` to pick valid labels.
-- **Dispatch** prepares one local step: run `tp dispatch <id>` for **one id only** — the tool
-  refuses a second while one is in flight — read the brief at the printed path, and perform
-  the step yourself.
-- **Result / hand-back** means write the result JSON yourself at the exact path and with the
-  schema in the brief (the file is the report), then run **`tp record <id>` without
-  `--agent-id`**. The flag exists only for workflows once run by a fleet helper; never
-  fabricate an agent or session id. Fix malformed or oversized result files yourself before
-  recording again.
-- **Fix / resume / verify** means read the new brief, prior results, findings, and recorded
-  decisions and do the next pass yourself. After `tp resolve`, check whether the script has
-  already put the step back in flight; if so, continue its existing brief and result path
-  without dispatching it again.
-- **Wait / in flight** means a local step is unfinished. Inspect `tp status --json`, finish
-  or recover that step, record it, and continue. Never end your turn to wait for a hand-back
-  that cannot arrive.
-- **Timing** is reporting metadata. The tool's estimates assume one task at a time; report your
-  own estimate at scope and approval. Do not compress or omit work to fit an estimate.
-  Keep genuine validation, write fences, approval gates, and retry limits intact.
+| Arguments | Action |
+| --- | --- |
+| `<planning-location> <request>` | Create a new workflow beneath the supplied location. |
+| `resume <workflow-dir>` | Recover saved progress and continue unfinished work. |
+| `halt` or `hault` | Preserve and halt the active workflow. |
+| `status <workflow-dir>` | Report saved status without advancing work, then stop. |
 
-Briefs are complete contracts for one step in this same context: apply their task contract,
-sources, write paths, checks, and result schema here. Where a brief or error message still
-speaks of agents or sessions, this skill's prohibition on delegation overrides it.
+Ask for a missing planning location, request, or workflow directory. For halt, use the
+active workflow; ask which one only if the target is unknown or ambiguous. A new workflow
+uses `tp init`; resuming **never** calls `init`, repeats completed stages, or replaces a draft.
+A mid-run “status?” asks for a progress update: report `tp digest`, then continue working.
 
-## Invocation and arguments
+## Persistent contract and estimates
 
-Invoke `$simple-task-pipeline` followed by one of these forms:
+Keep the workflow folder at the supplied planning location, independent of the workspaces
+where deliverables live. It stores the verbatim request, scope, plan, decisions, research,
+briefs, results, snapshots, check logs, review findings, and halt records. These saved
+artifacts, rather than conversation memory or an agent session id, allow recovery.
 
-- `<planning-location> <request>` — start a new pipeline.
-- `resume <workflow-dir>` — continue saved work.
-- `halt` or `hault` — halt the active pipeline.
-- `status <workflow-dir>` — report saved status without advancing work.
+Only the helper writes `.tp/`, `decisions.md`, and `noticed.md`. Write scope, plan,
+step results, and deliverables as directed. Do not edit internal state to bypass a refusal.
+The helper reads version-1 state with an `in_flight` object, including older workflows.
+Incompatible formats, including `co-task-pipeline` state, must remain untouched; explain
+the mismatch and ask about migration instead of reinitializing or switching helpers.
 
-Quote paths containing spaces. Use an available question tool for the human decisions below;
-if none is available, ask directly and wait for the answer.
+Scope confirmation and concrete plan approval are human decisions. Record the actual
+words in `--answer` or `--feedback`; never infer approval from silence or from a resume
+instruction. Reuse answers already given. Explain the needed decision and link the rendered
+contract. Pending required decisions prevent dependent work.
 
-The first word selects the mode; the rest are positional arguments.
+Provide **estimated minutes for each major stage and the total pipeline**, first at scope
+and updated when the plan makes the work clearer. Use `estimates` in scope/plan with the
+stage keys `scope`, `research`, `planning`, `execution`, `review`, and `closeout`. Task
+`estimate_min` and research `--minutes` are estimates too. The helper derives execution
+and review estimates from the concrete plan. Include tests in the execution estimate and
+final checks in closeout. The helper preserves unknown stages in older workflows as
+“not estimated”; fill them when useful without restarting or reopening approved scope
+solely for missing timing metadata.
 
-- **`resume`** — the workflow directory ($1). Skip to _Halt, resume, status_.
-- **`halt`** (or `hault`) — no arguments. Use the active workflow directory from this session;
-  ask if it cannot be determined. Skip to _Halt, resume, status_.
-- **`status`** — the workflow directory ($1). Run `tp status`, present it answer-first, and stop:
-  for looking at a workflow from outside without driving it (mid-run "status?" is not this mode).
-- **Anything else** — a new pipeline: **$1 is the location** for the planning documents (ask if
-  missing); **everything after it is the request**, verbatim including quoting (ask if missing).
+**Estimates never constrain the work.** No time boxes, maximum task durations, planning
+deadlines, or required early submission. Continue until criteria are satisfied or a real
+blocker needs a decision. Split work for coherent scope, dependencies, or manageable context,
+never to fit an arbitrary duration. Legacy `budget_minutes`, `--budget`, and `budget extend`
+are compatibility spellings for advisory estimates. Any older brief that calls timing a
+hard box or says to stop when time runs out is superseded by this rule. Recorded minutes
+are elapsed step time, subject to idle/stall corrections, not measured model billing.
 
-Ask for a missing workflow directory in resume or status mode. For a new pipeline, start at Stage 1.
+## Scope, research, and planning
 
-## State ownership and compatibility
+1. Preserve the complete request verbatim in a file. Run `tp init <planning-location>
+   --title <title> --request-file <file>`, and use the printed workflow directory thereafter.
+   Inspect applicable repository instructions, relevant sources, and existing edits.
+2. Survey only what helps establish scope: `tp survey <repo> --name <workspace>`, optionally
+   `tp survey-issue jira:KEY-123` or `gh:owner/repo#123`. A clear request may need no research.
+3. Draft `scope.json` from `tp schema scope`: deliverables, destinations, read/write workspaces,
+   constraints, non-goals, estimates, conventions, and review method. Select work roles using
+   `tp roster suggest --kinds <kinds>`. Catalog labels in `participants` and `agent` fields name
+   **roles you perform**, never separate workers. Retain appropriate author, tests, research,
+   and review roles. Choose `review: none|final|per-task|both`; code always needs review before
+   acceptance even when there is no separate review step. Run `tp scope check`, present/link
+   `scope.md`, obtain confirmation, then `tp scope confirm --answer <response>`.
+4. Research what is needed for an accurate plan, sequentially. Add an item with `tp research
+   add R1 --agent <research-role> --purpose map|requirements|investigate --questions-file <file>
+   --done-when <criterion> --minutes <estimate>`. Each has at most three questions of at most
+   40 words. Map/requirements items establish planning facts rather than author deliverables;
+   use investigate to trace a named behavior. There is no duration cap. Dispatch one item,
+   read its brief, investigate, write its result JSON, fact-check the evidence, then `tp record R1`.
+   Decide every reported follow-up: pursue with another item using `--from R1.F1`, or dismiss
+   it with a reason. Reuse saved results rather than surveying or researching them again.
+5. Write `plan.json` using `tp schema plan`: coherent tasks, actual dependencies, deliverable
+   coverage, objective acceptance criteria, precise relative write paths, sources, estimates,
+   and named checks. List shared instruction files in plan `conventions` as `wf:<file>` or
+   `<workspace>:<file>`; they freeze with the plan and reach every brief. `research:R1` cites a recorded research result. Paths must stay inside
+   write workspaces; avoid whole-workspace catch-alls and generated trees. Sequential tasks
+   may share files; add dependencies when one task actually requires another's output.
+   `docs` is a built-in task check; `docs-all` is a built-in final check. Define repository
+   commands in `checks`; there is no implicit `code` check.
+6. Code is test-forward: set `test_cmd`, `tests_paths`, and `test_mode: red|pin`. Red proves
+   missing behavior before production changes; pin characterizes existing behavior first.
+   Tests-only deliverables use pin. Research and planning specify work without implementing it.
+   With final review, split large task sets into `review_batches` for manageable review context;
+   every task belongs to one batch. Perform all review lenses yourself, sequentially.
+7. Run `tp plan check`, repair validation errors in the existing draft, and `tp plan submit`.
+   Present a concise outline, stage and total estimates, review method, and open decisions
+   with a link to `plan.md`. Obtain approval, then `tp approve --answer <response>`, or record
+   requested revisions using `tp revise --feedback <response>`. Never discard existing research,
+   answers, or accepted work because a draft needs correction.
 
-Only this skill's helper writes `.tp/`, `decisions.md`, and `noticed.md`. Write scope, plan,
-brief result files, and deliverables as directed; never create or repair helper state by hand.
+## Execute and verify
 
-The helper enforces its own compatibility: `tp` refuses any workflow whose state is not integer
-`version: 1` with an `in_flight` object, refuses unreadable state, and names the owner when it
-sees `version: "codex-task-pipeline-v1"` — that format belongs to `co-task-pipeline` and is
-incompatible. On any refusal, stop and explain the mismatch. Use the original skill for that
-workflow or obtain an explicit migration request; do not insert empty fields, reinitialize the
-workflow, or silently switch helpers.
+Loop on `tp next`, completing each local step before starting another:
 
-## Execution rules
+- **Dispatch/fix/review:** `tp dispatch <id>` writes one brief and marks it in flight. Read it
+  and perform the step yourself. The helper refuses a second active step. For code, tests-only
+  comes first: observe the intended red or pinned green, write and record that result, then
+  implement in the separate implementation step. A broken fixture or missing tool is not a
+  meaningful red result. Preserve pinned tests; a defective strategy needs a recorded decision.
+- **In flight:** inspect the existing brief, partial result, and workspace edits. Continue the
+  current step; do not dispatch it again. There is no background worker to wait for.
+- **Record:** write the JSON at the brief's exact result path, inspect the source/diff and check
+  output, then `tp record <id>` without `--agent-id`. Existing fleet-era ids are bookkeeping;
+  never fabricate them or reconnect an agent session. Malformed results need correction, not
+  redispatch. The helper checks paths, tests, and configured checks.
+- **Check:** fact-check the printed sample or `tp sample <id>`, review code and tests, then
+  `tp accept <id> --note <evidence>` or `tp reject <id> --reason <finding>`. Rejections route
+  into fix rounds. Time alone cannot reject or complete work.
+- **Triage:** inspect `tp show <review-id> --part blocking`, verify findings against source,
+  then `tp triage <review-id> --accept-all` or dismiss/assign specific findings. Fixes go to
+  owning tasks, followed by verification of the fixes. Reviews do not edit deliverables.
+- **Human decision:** preserve partial work and ask the specific unresolved question. Use
+  `tp exception --summary <question>` for a workflow blocker, adding `--task <id>` for a task
+  blocker. Record the response with the appropriate `tp resolve` action. Consult saved scope,
+  plan, and decisions first; do not repeat settled questions. Use `tp revise --scope` when
+  confirmed scope changes, and present the changed contract for approval.
+- **Mechanical correction:** `tp widen` grows a task's write set and `tp amend` records allowed
+  plan corrections; see the helper reference. These cannot silently change deliverables or
+  acceptance criteria. Respect filesystem and service permissions independently of plan gates.
+- **Unrelated discovery:** `tp note <finding-and-consequence>`. If a criterion depends on it,
+  resolve that dependency now rather than claiming completion with required work deferred.
+- **Progress:** share concise findings and `tp digest` after meaningful completed work. Keep
+  working until a required human decision, explicit halt, or verified completion.
 
-1. **Only the human decides** scope, work roles/review lenses, plan approval, and anything off
-   the plan. Ask with the `question` tool; record their words verbatim (`--answer` / `--feedback`).
-2. **One local step at a time.** You perform all research, tests, implementation, reviews,
-   fixes, and verification. No background workers or separate agent contexts.
-3. **Structured files preserve progress.** Read briefs and write their result JSON yourself.
-   Read only the part you need: `tp show <id> --part …`, `tp schema <name>`.
-4. **The approved plan is the contract.** Outside it: `tp note "<one line>"`; blocking:
-   `tp exception --summary "..."` and a question. Honor write paths and read-only workspaces.
-5. **Script before judgment.** If a command can decide it, a command decides it.
-6. **Answer-first** (`references/answer-first-core.md`, inlined into every
-   brief) for everything you write.
-7. **Separate doing from checking.** After writing a result, inspect the actual source, diff,
-   and check output before accepting it. During a review step, do not edit deliverables; write
-   findings and route fixes through the pipeline. Describe reviews honestly as self-review.
+If known environment breakage affects final checks, `tp baseline` records it before work
+starts. Inspect failures: a baseline is evidence of pre-existing breakage, not permission
+to hide a regression. Use `record --credit`, `record --dead-minutes`, or `tp clock` when
+correcting elapsed-time reports; none changes acceptance gates.
 
-## When tp.py rejects research questions
+## Closeout and delivery
 
-`tp research add` enforces hard caps: at most **3 questions per item**, each **under 40 words**
-(whitespace-split — every absolute path eats the count), and `map`/`requirements` questions may not
-ask for content (`all/every files|lines|…`, `exhaustive`, `end-to-end`). It fails with all problems
-at once, so fix every question before re-running. When the questions will not fit:
+After all tasks, perform the approved review method on the combined changes, including
+untracked files and pre-existing edits. Identify this honestly as self-review. Check
+correctness, test quality, and documentation claims. Route blocking findings through triage,
+fixes, verification, and acceptance before completion.
 
-- **Split into more items, never into compound questions** — more `R<n>` items, each with its
-  own purpose and time box, performed sequentially by you.
-- **Move detail into a referenced file.** Stay under 40 words by pointing at a file you wrote in
-  the workflow dir, e.g. `Group the notes per the rules in <wf>/research/R1-q1.md; output each
-  batch's name and dominant repo paths.` Read those referenced files when executing the item.
-- **Cut words honestly.** Drop articles and hedging, prefer repo-relative paths, and split
-  two-clause questions in two.
+When `tp next` says closeout, `tp closeout` lists noticed items. Classify each using
+`--item N --class deferred|followup|observation --note <issue-and-consequence>`. Render the
+batched decision with `tp closeout --ask`, ask the human, and record it with `tp closeout
+--decide --answer <response>`. Required criteria cannot be deferred without an approved
+contract change. If no noticed items require a decision, follow the helper directly to final.
 
-## Stage 1 — Scope and budget metadata (one round with the human)
+Run `tp final` for final checks and `report.md`. Report delivered work, verification,
+self-review, and approved deferrals with a link to that report. Commit, push, deployment,
+and external writes need authorization for those actions.
 
-1. Save the request verbatim to a file, then run `tp init <location> --title "<title>"
-   --request-file <file> [--budget <minutes>]`. It creates the workflow's own
-   `<location>/<date>-<slug>/` folder and prints it: that is `-w` from then on.
-2. **Size it yourself first**, in ten minutes or less: `tp survey <repo> --name <ws>` per
-   repository; `tp survey-issue jira:KEY` or `gh:owner/repo#N` for a named issue. It prints
-   children, thin issues, links, and a starting-point research estimate.
-3. **Judge the research.** A clear, bounded ask needs none — plan directly. Research earns its
-   cost when details are missing or the work is large; if unsure how much, ask.
-4. **Choose work roles and review lenses critically.** `tp roster suggest --kinds <kinds>`.
-   Keep only roles with a direct bearing on the output; prefer specific review lenses
-   (correctness, security, api-compat, test) over broad ones. Explain that all are performed by
-   the main agent. Retain required author, tests, and research roles for schema validation.
-5. **One `question` call** (at most 4 questions) covering the output (kind, format, where),
-   work roles/review lenses (multiple choice, several allowed), review (`none` or `final`), and
-   any conventions/policies the work must honor (a workflow-dir file listed in `conventions`:
-   they freeze with the plan and reach every brief). **Never ask the human to approve or pick
-   a time budget** — size sequential budgets yourself as reporting metadata; never cut work
-   to fit one.
-6. Write `scope.json` (`tp schema scope`), `tp scope check`, show the human the key lines of
-   `scope.md`, and confirm (`question`: Confirm / Change): `tp scope confirm --answer "..."`.
+## Halt, resume, and status
 
-## Stage 2 — Research (sequential, within the agreed scope)
+- **Halt/hault:** stop starting work, interrupt active shell commands where supported, and
+  preserve partial files. Run `tp halt --reason <human-words>`. It writes `halt.json` immediately,
+  including unfinished steps and their artifact paths. No step needs to finish or pretend
+  success before halt. Report the saved workflow location and stop.
+- **Resume:** run `tp status`, then **always** `tp resume --answer <resume-instruction>`, whether
+  the prior session halted cleanly or vanished. `--json` supplies structured recovery context.
+  Read the saved request, scope, plan/draft, decisions, completed research, pending questions,
+  current briefs and results; inspect workspace edits. Use the returned checkpoints to continue
+  in-flight research, tests, implementation, fixes, or review **without redispatching** or
+  deleting existing results. A result already on disk may only need validation and recording.
+  If planning stopped with a draft, repair/validate that draft and submit it. If approval is
+  pending, ask for it; resume supplies no approval. Preserve accepted tasks and review rounds.
+  Run `tp next` and finish remaining work. If a task truly cannot continue safely, `tp lost`
+  records the loss for a deliberate retry; ordinary context loss does not require this.
+- **Status:** run only `tp status` or `tp status --json`, report phase, progress, pending decisions,
+  checkpoints, and drift, then stop. It does not write state or advance the workflow.
 
-- Each item is one local research step, at most 3 narrow questions, a box of 15 minutes or
-  less, and a purpose: `map`, `requirements`, or `investigate`:
-  `tp research add R1 --agent <approved role label> --purpose <p> --questions-file <f>
-  --done-when "..." [--minutes N]` (rejected questions: see above).
-- `tp dispatch R1`, read the brief, investigate its questions yourself, write its research
-  result JSON, fact-check one answer against its evidence, then `tp record R1`. Complete this
-  item before dispatching another. Research does not write the final deliverables.
-- **Followups** go in the result; decide each: `tp research add … --from R1.F2`, or
-  `tp research dismiss R1.F2 --reason "..."`. Submit refuses while any is undecided.
-- Out of budget is not a stop: add items freely within scope; each keeps its ≤15-min box.
-  `tp research extend --minutes N --note "..."` grows the reporting budget.
-
-## Stage 3 — Plan (you write it)
-
-- **Planning maps the work; it never does the work.** One task per area, article, or unit, about
-  15 minutes (30 at most), 1–6 objective acceptance criteria, a brief of 150 words or less.
-  Tasks cite findings as sources: `research:R3`. Use approved catalog role labels for `agent`.
-- **Paths name the repo files the task writes.** Never `.` or a bare `**` — plan check refuses
-  catch-alls and >200-file expansions. Name each file, optional ones too; a directory path only
-  when its files exist at plan time.
-- All tasks run sequentially. Use `depends_on` for actual dependencies; shared files such as
-  `index.md` can belong to one integration task. Keep paths precise even without parallel work.
-- Code is test-forward: `test_cmd` (the task's package, not the whole suite) and `tests_paths`.
-  Preserve the separate tests and implementation steps enforced by the script.
-- `docs` is a built-in task check; `docs-all` a built-in final check. Define repo commands in `checks`.
-- With `review: final`, split packages over 10 tasks into `review_batches`; perform all batches
-  and lenses yourself in sequence.
-- `tp plan check` until clean, then `tp plan submit`. `tp next` warns once planning passes 45 min.
-
-## Stage 4 — Approval
-
-Give the human ten lines or fewer: tasks, sequential time against the budget, self-review
-passes, questions, and noticed items, with the path to `plan.md`. `question`: Approve / Revise.
-Then `tp approve --answer "..."` or `tp revise --feedback "..."` — never approve without their answer.
-
-## Stage 5 — Execute (autonomous, in the main context)
-
-If this machine or repo has known breakage the plan did not cause, run `tp baseline` once right
-after approval: `tp final` reports those failures as pre-existing instead of blocking on them.
-
-Loop on `tp next`, finishing any in-flight local step before starting another:
-
-- **dispatch / fix / review** → choose one ready id, `tp dispatch <id>`, read its brief, and do
-  the work yourself. For code: tests-only first (observe the expected red or pinned green),
-  record that step, then implement in the separate implementation step without editing tests.
-- **Local step finished** → write the result JSON at the brief's exact path, inspect what you
-  wrote, then `tp record <id>` with no agent id. For backend stalls, add `--dead-minutes N`
-  (`tp clock <id> --dead-minutes N --note "..."` corrects one already recorded).
-- **Time reports, never gates.** The meter (net of dead clock) shows in `tp next`, `tp digest`,
-  and the report; nothing is refused for being over budget and no work is compressed to fit one.
-- **Present a digest at a reasonable interval** — after a completed task or review pass:
-  `tp digest`, shown answer-first. Narrate decisions and results; let the digest carry status.
-- **Mechanical corrections batch.** Widen a write set (`tp widen <id> --path <file> --reason
-  "..."` — allowed even after acceptance; refuses paths a live task owns) and fix checks
-  (`tp amend --reason "..."`) in one call per round; ask the human **once per round** if at all.
-- **check** → fact-check the printed sample (does each cited line say what the sentence claims?
-  for code, read the diff and review it), then `tp accept <id> --note "..."` or
-  `tp reject <id> --reason "..."`. A rejected task is a local fix round: dispatch it, read the
-  fix brief, make the corrections yourself, write its new result, and record again.
-- **A noticed item the task's own acceptance depends on routes, it does not rest** — at the
-  next `tp next`, widen the task, amend the plan, or record a follow-up. Do not leave acceptance
-  gaps as noticed lines while claiming the task is complete.
-- **triage** (after end-of-pipeline self-review) → `tp show <id> --part blocking`, verify each
-  against the source, then `tp triage <id> --accept-all`, or `--dismiss F# --reason "..."` and
-  `--assign F#=T##`. When triage points at a parked patch (`runs/<id>/*.patch`), verify and adopt
-  it in the owning task's fix round. Verify fixes yourself in the later verification step.
-- **human** → stop, ask with `question`, then
-  `tp resolve [--task <id> | --review <id>] --action … --answer "..."`. A needs_input question
-  that scope, plan, or decisions already settle, answer yourself. Apply any printed continuation
-  locally, in this context.
-- **wait** → inspect the unfinished local step and complete or recover it using the rules
-  below. There is no background worker to wait for.
-- **A status question mid-run** ("status?", "how's it going?") → `tp digest`, present it
-  answer-first, then `tp next` and **keep working in the same turn**. Work stops for a human
-  decision, an explicit halt, or completion.
-- **An interruption or restart** → read the saved scope, plan, decisions, current brief and
-  results, and inspect workspace edits before continuing. Do not repeat a dispatch for a step
-  already in flight. Finish its existing contract and record it. If a task step cannot safely
-  continue, `tp lost <task id> --summary "..."`, resolve, and dispatch it locally again; honor
-  retry limits. `tp lost` handles task ids, not research ids or batch review ids. For interrupted
-  research or review, continue the existing brief and result file; if genuinely blocked, report
-  the problem to the human instead of altering internal state or pretending it succeeded.
-- **A step far past its estimate** → inspect progress, keep commands short-returning so the
-  session's supervisor never sees silence, and raise `tp exception --task <id> --summary "..."`
-  for a blocking task issue. Use the task's package tests, not the whole suite.
-
-## Stage 6 — Closeout, then final
-
-When `tp next` says **closeout** (all tasks and reviews done): `tp closeout` lists every noticed
-item; classify each — `tp closeout --item N --class deferred|followup|observation --note "..."`.
-A deferred or follow-up note is required and is what the human reads: plain language naming the
-issue and its consequence ("admission-webhook.yaml keeps a non-atomic write path; a crash mid-write
-tears the file the apiserver reads") — never a bare file path. Then `tp closeout --ask` renders the
-decision brief; put it in one `question` (accept the deferral / file follow-up tasks / extend the
-run) and `tp closeout --decide --answer "<their words>"`. `tp final` then runs the checks (baseline
-failures report as pre-existing) and writes `report.md` with honest Deferred / Follow-ups /
-Observations lists; present it answer-first and identify reviews as self-review. If `tp next`
-goes directly to **final**, run `tp final`. Committing and pushing are the human's call.
-
-## Halt, resume, status
-
-- **Halt mode** (`$simple-task-pipeline halt`, or `hault`) → `tp halt --reason "<their words>"`.
-  Nothing new starts. If a local step is in flight, save its progress and record it at a safe
-  boundary before stopping. For a task that is unfinished, use its brief's `blocked` result
-  with an honest summary rather than claiming `done`; for research/review, finish the bounded
-  current pass and record its actual findings. If that cannot be done safely, stop immediately
-  and report that halt is pending with the saved brief/result paths. Do not start another step
-  to finish halting. Once no step is in flight, the tool writes `halt.json` recording where work
-  stopped and what runs next. Tell the human, stop.
-- **Resume mode** (`$simple-task-pipeline resume <dir>`) → `tp status`; if halted or halting,
-  `tp resume --answer "<their words>"`; then read saved scope, plan, decisions, and active
-  brief/results, inspect workspace edits, and run `tp next`. Recover unfinished local work as
-  described in Stage 5. Continue every remaining step yourself, under their role labels;
-  any agent ids in saved state are fleet-era bookkeeping. Never resume a separate agent session.
-- **Status mode** (`$simple-task-pipeline status <dir>`) → report `tp status` answer-first and
-  stop without advancing the workflow.
-- **Unattended runs** need writable workflow and write workspaces and permission to run this
-  skill's resolved `scripts/tp.py` path. Human scope, plan, exception, and closeout decisions
-  still apply.
-
-## Special Instructions
-
-### Coding Related Tasks
-
-- **Always** be test forward with code changes.
-- **Always** review code before considering a unit of work done, even if smaller reviews
-  happened during coding. Apply relevant review lenses yourself in this main context; do not
-  invoke a review workflow that launches subagents. A final review, when agreed, checks the
-  combined change after all tasks are accepted.
+Never initialize over a saved workflow, manually reconstruct `.tp/`, or restart from scope
+because the conversation was lost. If artifacts are missing or incompatible, report the
+specific evidence and resolve that issue while preserving everything that remains.

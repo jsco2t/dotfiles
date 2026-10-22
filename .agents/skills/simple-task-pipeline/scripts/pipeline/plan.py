@@ -1,5 +1,5 @@
 """The plan: one JSON file of small tasks, checked against the confirmed scope, the
-catalog, and the time budget; rendered for the human; frozen once approved."""
+catalog; rendered for the human; frozen once approved."""
 from __future__ import annotations
 
 import json
@@ -9,6 +9,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from . import estimates
 from . import scope as scopemod
 from .common import (TPError, Workflow, agent_minutes, catalog, limit, load_json, minutes_since, now_iso,
                      sha_file, words)
@@ -67,11 +68,9 @@ def _validate_batches(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
             elif tid in seen:
                 errs.append(f"{tid} is in two review batches ({seen[tid]}, {bid}).")
             seen[tid] = bid
-        minutes, cap = session_minutes(b, plan, scope), limit("max_review_session_minutes")
-        if len(b.get("tasks", [])) > limit("max_batch_tasks") or minutes > cap:
-            errs.append(f"{bid} needs about {minutes} min of review per reviewer ({len(b.get('tasks', []))} tasks); "
-                        f"one session is at most {cap} min and {limit('max_batch_tasks')} tasks — split the work "
-                        "into smaller review_batches.")
+        if len(b.get("tasks", [])) > limit("max_batch_tasks"):
+            errs.append(f"{bid} has {len(b['tasks'])} tasks; at most {limit('max_batch_tasks')} tasks "
+                        "per review batch — use smaller review_batches for manageable review context.")
     for tid in ids:
         if tid not in seen:
             errs.append(f"{tid} is in no review batch.")
@@ -186,7 +185,9 @@ def lane_minutes(task: Dict[str, Any], scope: Dict[str, Any]) -> int:
 def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any], wf: Optional[Workflow] = None,
              wf_root: Optional[Path] = None) -> List[str]:
     cat = catalog()
+    wf_root = wf_root or (wf.root if wf else None)
     errs: List[str] = []
+    errs += estimates.validate(plan)
     wss = scopemod.workspaces(scope)
     deliverables = {d["id"] for d in scope["deliverables"]}
     authors = set(scopemod.participants(scope, "author"))
@@ -200,8 +201,7 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
     if not tasks_list:
         errs.append("the plan has no tasks.")
     if len(tasks_list) > limit("max_tasks"):
-        errs.append(f"{len(tasks_list)} tasks; the limit is {limit('max_tasks')} — merge or cut tasks "
-                    f"(target {limit('target_task_minutes')} min each).")
+        errs.append(f"{len(tasks_list)} tasks; the limit is {limit('max_tasks')} — group related work into coherent tasks.")
     for name, spec in plan.get("checks", {}).items():
         if not isinstance(spec, dict) or not spec.get("cmd"):
             errs.append(f"check {name!r} needs a `cmd`.")
@@ -276,11 +276,9 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
                 errs.append(f"{tid}: unknown check {c!r} (built in: {', '.join(BUILTIN_TASK_CHECKS)}; "
                             "or define it in plan `checks`).")
         est = t.get("estimate_min")
-        if not isinstance(est, int) or est < 1:
+        if type(est) is not int or est < 1:
             errs.append(f"{tid}: estimate_min must be a whole number of minutes.")
             computable = False
-        elif est > limit("max_task_minutes"):
-            errs.append(f"{tid}: estimate_min {est} exceeds {limit('max_task_minutes')} — split the task.")
         for dep in t.get("depends_on", []):
             if dep not in all_ids:
                 errs.append(f"{tid}: depends on unknown {dep}.")
@@ -307,20 +305,11 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
         return errs
 
     try:
-        ancestors = _ancestors(tasks)
+        _ancestors(tasks)
     except TPError as exc:
         return errs + exc.lines
-    ids = list(tasks)
-    for i, a in enumerate(ids):
-        for b in ids[i + 1:]:
-            ta, tb = tasks[a], tasks[b]
-            if ta.get("workspace") != tb.get("workspace") or a in ancestors[b] or b in ancestors[a]:
-                continue
-            for pa in ta.get("paths", []):
-                for pb in tb.get("paths", []):
-                    if paths_overlap(pa, pb):
-                        errs.append(f"{a} and {b} overlap on {pa} / {pb} — order them with depends_on "
-                                    "or split the paths (parallel tasks must write disjoint files).")
+    # All work is sequential. Shared paths need no artificial dependency edges;
+    # dispatch still permits only one active step and snapshots protect each write set.
 
     for ref in plan.get("conventions", []):
         path = resolve_ref(ref, scope, wf_root or Path(".")) if wf_root else None
@@ -339,8 +328,9 @@ def render(plan: Dict[str, Any], scope: Dict[str, Any], wf: Workflow) -> str:
     total = sum(lane_minutes(t, scope) for t in tasks.values())
     sessions, tail = review_tail(plan, scope)
     out = [f"# Plan — {plan['title']}", "", plan.get("summary", ""), "",
-           f"**{len(tasks)} tasks** · about {total + tail} min of execution, one task at a "
-           f"time · budget {scope.get('budget_minutes') or 'none'} · scope: `scope.md`", ""]
+           f"**{len(tasks)} tasks** · about {total + tail} min of execution and review, one task at a "
+           f"time · scope: `scope.md`", "",
+           estimates.render(estimates.calculate(scope, plan, wf.load())), ""]
     if sessions:
         nb, nr = len(review_batches(plan, scope)), len(scopemod.final_reviewers(scope))
         out += [f"**Review:** {nb} batch{'es' if nb > 1 else ''} × {nr} reviewer{'s' if nr > 1 else ''} = "
@@ -430,7 +420,7 @@ def cmd_submit(wf: Workflow) -> str:
     noticed = wf.noticed_items()
     if noticed:
         out += ["Noticed, not in plan (tell the human):"] + [f"  - {n}" for n in noticed]
-    out.append("Ask the human to approve or revise (AskUserQuestion). Then `tp approve --answer \"<their words>\"` "
+    out.append("Ask the human to approve or revise (use an available question tool or ask directly). Then `tp approve --answer \"<their words>\"` "
                "or `tp revise --feedback \"<their words>\"`.")
     return "\n".join(out)
 
@@ -445,6 +435,7 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
         raise TPError("plan.json changed since it was submitted — run `tp plan check` and `tp plan submit` again.")
     plan = load_plan(wf)
     scope = scopemod.load_scope(wf)
+    _write_approved_snapshot(wf, plan)
     state["plan_approved_sha"] = state["plan_submitted_sha"]
     state["conventions_sha"] = conventions_shas(plan, scope, wf.root)
     state["phase"] = "EXECUTING"
@@ -542,17 +533,23 @@ def cmd_amend(wf: Workflow, reason: str) -> str:
     scope = scopemod.load_scope(wf)
     errs: List[str] = []
     tasks = {t["id"]: t for t in plan["tasks"]}
-    approved = tasks
     snap = wf.root / "plan.approved.json"
-    if snap.exists():
-        approved = {t["id"]: t for t in json.loads(snap.read_text())["tasks"]}
+    if not snap.exists():
+        raise TPError("The saved approved task contracts are missing. Restore the approved plan.json, then "
+                      "run `tp resume --answer ...` to preserve its snapshot before making amendments.")
+    approved = {t["id"]: t for t in load_json(snap, "approved task contracts")["tasks"]}
     for tid, t in tasks.items():
         if tid not in state["tasks"]:
             errs.append(f"{tid} is not in the approved plan; adding tasks needs `tp revise`.")
             continue
+        base = approved.get(tid, {})
+        structural = [key for key in set(base) | set(t) if key not in AMENDABLE_KEYS
+                      and t.get(key) != base.get(key)
+                      and not (key == "test_mode" and not is_tested(t, scope))]
+        if structural:
+            errs.append(f"{tid}: changing {', '.join(sorted(structural))} needs human-approved `tp revise`.")
         if state["tasks"][tid]["status"] not in _DONE:
             continue
-        base = approved.get(tid, {})
         changed = [k for k in AMENDABLE_KEYS if base and t.get(k) != base.get(k)]
         if changed:
             errs.append(f"{tid} is accepted; its {', '.join(changed)} cannot be amended — use `tp revise`.")
@@ -562,8 +559,7 @@ def cmd_amend(wf: Workflow, reason: str) -> str:
     errs += validate(plan, scope, state, wf)
     if errs:
         raise TPError(*errs)
-    if not snap.exists():
-        _write_approved_snapshot(wf, plan)
+    _write_approved_snapshot(wf, plan)
     state["plan_approved_sha"] = state["plan_submitted_sha"] = sha_file(wf.plan_json)
     state["conventions_sha"] = conventions_shas(plan, scope, wf.root)
     # An amendment may remove a review batch: prune its sessions so `tp next`

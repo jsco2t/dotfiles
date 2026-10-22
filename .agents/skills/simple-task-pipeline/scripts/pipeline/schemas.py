@@ -14,8 +14,10 @@ SCHEMAS = {
             {"agent": "kb-author", "role": "author", "why": "Writes every article for D1."},
             {"agent": "doc-reviewer", "role": "reviewer", "why": "Reviews the finished KB for accuracy."},
             {"agent": "codebase-researcher", "role": "research", "why": "Maps dash/, which the survey cannot see."}],
-        "review": "final  (none | final | per-task, rarely)",
-        "budget_minutes": 180,
+        "review": "final",
+        "estimates": {"scope": 10, "research": 30, "planning": 20,
+                      "execution": 90, "review": 30, "closeout": 10},
+        "budget_minutes": None,  # legacy total estimate; optional
         "research": {"budget_minutes": 30, "why": "dash/ is 9k lines the survey only sizes; omit research when none"},
         "workspaces": [{"name": "kb", "path": "/abs/kb", "mode": "write"},
                        {"name": "src", "path": "/abs/repo", "mode": "read"}],
@@ -23,6 +25,7 @@ SCHEMAS = {
     },
     "plan": {
         "title": "...", "summary": "<= 80 words", "questions": ["<non-blocking, shown at approval>"],
+        "conventions": [],
         "tasks": [{"id": "T01", "title": "Architecture overview", "serves": ["D1"], "agent": "kb-author",
                    "workspace": "kb", "paths": ["architecture/overview.md"],
                    "sources": ["src:internal/cluster/**", "research:R1"],
@@ -31,7 +34,7 @@ SCHEMAS = {
                    "test_cmd": "<code and tests tasks: go test ./pkg/x -run TestY>",
                    "tests_paths": ["<code tasks: files the tests live in>"],
                    "test_mode": "red | pin (code tasks; tests tasks always pin)"}],
-        "review_batches": [{"id": "B1", "tasks": ["T01", "T02"]}],
+        "review_batches": [{"id": "B1", "tasks": ["T01"]}],
         "checks": {"vet": {"cmd": "go vet ./...", "cwd": "src"}}, "final_checks": ["docs-all"],
     },
     "research": {

@@ -82,20 +82,21 @@ class ResearchTest(unittest.TestCase):
                       self.add("R1", ["Which k8s distros?"], expect=2, agent="domain-researcher").text)
 
     def test_items_report_against_the_declared_budget_and_the_manager_extends_it(self) -> None:
-        # The budget is reporting metadata: drawing past it is noted, not refused, and
-        # extending it is a manager bookkeeping act, not a human approval.
+        # Estimates are advisory; exceeding one does not create noticed work or decisions.
         for rid in ("R1", "R2", "R3", "R4"):
             self.add(rid, [f"Which areas does {rid} cover?"])      # 60 reserved of 45 declared
         out = self.h.tp("next").out
-        self.assertIn("60 of 45", out)
+        self.assertIn("60 min in items (overall estimate 45 min)", out)
+        self.assertEqual(self.h.tp("noticed").out.strip(), "no open noticed items.")
         self.h.tp("research", "extend", "--minutes", "15", "--note", "manager: R4 was missed in the estimate.")
         self.add("R5", ["Which areas does R5 cover?"])
         self.assertIn("manager: R4 was missed", (self.h.wf / "decisions.md").read_text())
-        self.assertIn("75 of 60", self.h.tp("next").out)
+        self.assertIn("75 min in items (overall estimate 60 min)", self.h.tp("next").out)
 
-    def test_a_time_box_is_at_most_15_minutes(self) -> None:
-        self.assertIn("15", self.add("R1", ["Which areas?"], 2, "codebase-researcher", "map", "--minutes", "25").text)
-        self.add("R1", ["Which areas?"], 0, "codebase-researcher", "map", "--minutes", "10")
+    def test_research_estimates_have_no_duration_cap(self) -> None:
+        self.add("R1", ["Which areas?"], 0, "codebase-researcher", "map", "--minutes", "25")
+        self.assertEqual(self.h.state()["recon"]["R1"]["minutes"], 25)
+        self.add("R2", ["Which areas?"], 0, "codebase-researcher", "map", "--minutes", "10")
 
     def test_brief_frames_the_purpose_and_hands_back_followups(self) -> None:
         self.add("R1", ["What do KUB-9's open children require?"], 0, "atlassian-liaison", "requirements",

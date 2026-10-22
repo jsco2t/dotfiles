@@ -16,7 +16,7 @@ from . import briefs, snapshot
 from . import plan as planmod
 from . import run
 from . import scope as scopemod
-from .common import TPError, Workflow, limit, load_json, minutes_since, now_iso
+from .common import TPError, Workflow, agent_minutes, limit, load_json, minutes_since, now_iso
 
 CITE_TAIL = re.compile(r":\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 
@@ -145,12 +145,11 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
     brief, result = rdir / f"brief-{s['reviewer']}-{n}.md", rdir / f"{s['reviewer']}-{n}.json"
     if result.exists():
         result.unlink()
-    agent_id = s["agent_id"] if n > 1 else None
     if n == 1:
         brief.write_text(briefs.batch_review(s["batch"], s["reviewer"], tasks, ctx, result))
     else:
         accepted = [f for f in s["findings"] if f["id"] in s["accepted"]]
-        brief.write_text(briefs.verify(s["batch"], s["reviewer"], accepted, ctx, result, same_agent=bool(agent_id)))
+        brief.write_text(briefs.verify(s["batch"], s["reviewer"], accepted, ctx, result))
     snaps = {}
     for name in sorted({t["workspace"] for t in tasks}):
         snap = rdir / f"snap-{s['reviewer']}-{n}-{name}.json"
@@ -159,7 +158,8 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
     for other in state["in_flight"].values():
         other.setdefault("concurrent", []).append(sid)
     state["in_flight"][sid] = {"step": "review", "since": now_iso(), "agent": s["reviewer"], "snaps": snaps,
-                               "concurrent": list(state["in_flight"]), "from": s["status"]}
+                               "concurrent": list(state["in_flight"]), "from": s["status"],
+                               "brief": str(brief), "result": str(result)}
     s.update(status="in_flight", round=n)
     wf.save(state)
     wf.event("dispatch", id=sid, step="review" if n == 1 else "verify", agent=s["reviewer"], round=n)
@@ -277,6 +277,7 @@ def record(wf: Workflow, state: Dict[str, Any], sid: str, agent_id: Optional[str
         s.update(status="blocked", summary=f"{sid} still has {len(blocking)} blocking findings after verification")
         out = "\n".join([f"BLOCKED {sid}: still blocking after verification — the human decides "
                          f"(`tp resolve --review {sid} --action accept|retry`):"] + lines)
+    state["agent_minutes"] = round(agent_minutes(wf, state) + minutes, 1)
     wf.save(state)
     wf.event("record", id=sid, step="review" if n == 1 else "verify", status=s["status"], minutes=round(minutes, 1),
              blocking=len(blocking))

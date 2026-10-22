@@ -176,14 +176,13 @@ class ScopeCheckTest(unittest.TestCase):
         self.assertIn("research participant", self.check(
             expect=2, participants=[kb], research={"budget_minutes": 45, "why": "Epic children are thin."}).text)
         self.check(participants=[kb, liaison], research={"budget_minutes": 45, "why": "Epic children are thin."})
-        self.assertIn("Research budget:** 45 agent-min", (self.h.wf / "scope.md").read_text())
+        self.assertIn("Research estimate:** 45 min", (self.h.wf / "scope.md").read_text())
 
-    def test_research_budget_must_fit_the_whole_budget(self) -> None:
+    def test_research_estimate_does_not_have_to_fit_the_total_estimate(self) -> None:
         kb = {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."}
         liaison = {"agent": "atlassian-liaison", "role": "research", "why": "Reads the epic's child issues for D1."}
-        res = self.check(expect=2, participants=[kb, liaison], budget_minutes=60,
-                         research={"budget_minutes": 400, "why": "Everything."})
-        self.assertIn("research budget", res.text)
+        self.check(participants=[kb, liaison], budget_minutes=60,
+                   research={"budget_minutes": 400, "why": "Several areas need investigation."})
 
     def test_legacy_recon_role_still_reads_as_research(self) -> None:
         self.check(participants=[{"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},

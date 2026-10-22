@@ -327,7 +327,6 @@
  },
  "limits": {
   "brief_bytes": 4000,
-  "budget_warn_pct": 80,
   "max_acceptance": 6,
   "max_batch_tasks": 10,
   "max_fix_rounds": 2,
@@ -337,19 +336,16 @@
   "max_path_expand": 200,
   "max_research_questions": 3,
   "max_review_rounds": 2,
-  "max_review_session_minutes": 30,
   "max_reviewers": 5,
-  "max_task_minutes": 30,
   "max_tasks": 30,
-  "planning_warn_minutes": 45,
   "research_item_minutes": 15,
   "research_output_bytes": 8000,
   "review_minutes_per_code_task": 4,
   "review_minutes_per_doc_task": 10,
   "stall_multiplier": 3,
-  "target_task_minutes": 15,
   "task_brief_words": 150,
   "verify_session_minutes": 8,
-  "_review_minutes": "seeded from live runs (a ~75-line doc: ~10 min; a small code diff: ~2-4 min); recalibrate from `tp report`"
+  "_review_minutes": "seeded from live runs (a ~75-line doc: ~10 min; a small code diff: ~2-4 min); recalibrate from `tp report`",
+  "_research_item_minutes": "Default advisory estimate, not a duration limit."
  }
 }

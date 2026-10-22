@@ -92,13 +92,13 @@ def parser() -> argparse.ArgumentParser:
                    "its own sub-folder here (-w is accepted as the location too)")
     s.add_argument("--title", required=True)
     s.add_argument("--request-file", required=True, help="the human's request, verbatim")
-    s.add_argument("--budget", type=int, help="minutes for the whole job, planning included")
+    s.add_argument("--budget", type=int, help="legacy name for an advisory whole-job estimate in minutes")
 
     s = sub.add_parser("status", help="compact status")
     s.add_argument("--json", action="store_true")
     s = sub.add_parser("next", help="what to do next")
     s.add_argument("--json", action="store_true")
-    sub.add_parser("digest", help="human-digestable status report: agents in flight, progress by "
+    sub.add_parser("digest", help="human-readable status report: local step, progress by "
                                   "group, minutes by phase — present it at a reasonable interval")
     s = sub.add_parser("closeout", help="the gate before the report: classify every noticed item and record "
                                         "the human's deferral decision; `tp final` refuses while this is open")
@@ -127,7 +127,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("ref")
 
     for name in ("research", "recon"):  # recon: the name older workflows use
-        s = sub.add_parser(name, help="planning research: small items, each with a stall-detection time box")
+        s = sub.add_parser(name, help="planning research: focused items with advisory duration estimates")
         rs = s.add_subparsers(dest="what", required=True)
         a = rs.add_parser("add", help="add one small research item")
         a.add_argument("id")
@@ -136,9 +136,9 @@ def parser() -> argparse.ArgumentParser:
                        help="map | requirements | investigate")
         a.add_argument("--questions-file", required=True, help="one question per line, at most 3")
         a.add_argument("--done-when", required=True)
-        a.add_argument("--minutes", type=int, help="time box, at most 15 (default 15)")
+        a.add_argument("--minutes", type=int, help="estimated minutes (default 15); no duration cap")
         a.add_argument("--from", dest="from_ref", help="the followup this item pursues, e.g. R1.F2")
-        e = rs.add_parser("extend", help="raise the research budget (reporting metadata, never a refusal)")
+        e = rs.add_parser("extend", help="increase the legacy research estimate (advisory)")
         e.add_argument("--minutes", type=int, required=True)
         e.add_argument("--answer", help="the human's words, when they volunteer a budget")
         e.add_argument("--note", help="the manager's reason (the default)")
@@ -160,10 +160,11 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--reason", help="why the dismissed findings are not real problems")
     s.add_argument("--assign", action="append", default=[], help="F#=T## for a finding no task path matched")
 
-    s = sub.add_parser("halt", aliases=["hault"], help="stop at the next clean point and record where")
+    s = sub.add_parser("halt", aliases=["hault"], help="preserve unfinished work and halt immediately")
     s.add_argument("--reason", default="halt requested by the human")
-    s = sub.add_parser("resume", help="continue after a halt")
+    s = sub.add_parser("resume", help="recover a saved pipeline after a halt or session loss")
     s.add_argument("--answer", required=True)
+    s.add_argument("--json", action="store_true", help="structured recovery context")
 
     s = sub.add_parser("schema", help="print an example of a workflow file")
     s.add_argument("name", choices=["scope", "plan", "research", "result", "review"])
@@ -178,9 +179,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s.add_argument("--path", action="append", required=True, help="a file or folder to add to the write set")
     s.add_argument("--reason", required=True, help="why: the finding or correction that demands it")
-    s = sub.add_parser("budget", help="time-budget metadata (reports; gates nothing)")
+    s = sub.add_parser("budget", help="legacy duration-estimate metadata (advisory)")
     bs = s.add_subparsers(dest="what", required=True)
-    be = bs.add_parser("extend", help="raise the whole-job budget — manager bookkeeping, never a human approval")
+    be = bs.add_parser("extend", help="increase the legacy whole-job estimate (advisory)")
     be.add_argument("--minutes", type=int, required=True)
     be.add_argument("--answer", help="the human's words, when they volunteer a budget")
     be.add_argument("--note", help="the manager's reason (the default)")
@@ -207,17 +208,17 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("record", help="record a finished local step and run the gates")
     s.add_argument("id")
     s.add_argument("--agent-id", help="optional: an agent-session id from a fleet run; solo runs omit it "
-                                      "(fix briefs then carry full context)")
+                                      "(briefs always carry full context)")
     s.add_argument("--credit", type=float, default=0.0, metavar="MIN",
                    help="minutes the step sat waiting on the human (a permission prompt or a "
-                        "question) while in flight: deduct them from the budget tally instead of "
+                        "question) while in flight: deduct them from recorded elapsed time instead of "
                         "billing the human's response time as work")
     s.add_argument("--trim-summary", action="store_true",
                    help="the summary is over the word limit: cut it to the limit instead of failing "
                         "(a mechanical rejection; nothing else in the result changes)")
     s.add_argument("--dead-minutes", type=float, default=0.0, dest="dead_minutes", metavar="MIN",
                    help="minutes of this step that were backend stall (no output, no tool "
-                        "calls): freeze them out of the budget meter as dead clock")
+                        "calls): exclude them from elapsed time as dead clock")
     s = sub.add_parser("accept", help="accept a task after your fact check")
     s.add_argument("id")
     s.add_argument("--note", required=True)
@@ -250,6 +251,7 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("noticed", help="list the noticed, not-in-plan items")
     s = sub.add_parser("note", help="log something noticed outside the plan")
     s.add_argument("text")
+    sub.add_parser("baseline", help="record pre-existing final-check failures")
     sub.add_parser("final", help="package checks and the report")
     sub.add_parser("report", help="timings")
 
@@ -338,7 +340,7 @@ def dispatch(args: argparse.Namespace) -> str:
     if c in ("halt", "hault"):
         return run.cmd_halt(wf, args.reason)
     if c == "resume":
-        return run.cmd_resume(wf, args.answer)
+        return run.cmd_resume(wf, args.answer, args.json)
     if c == "plan":
         return planmod.cmd_check(wf) if args.what == "check" else planmod.cmd_submit(wf)
     if c == "amend":

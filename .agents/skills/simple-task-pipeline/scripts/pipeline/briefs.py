@@ -9,9 +9,9 @@ from .common import limit, style_core
 
 HEADER = ("This brief comes from the simple task pipeline and is your complete contract: it replaces any "
           "result format or report path your definition names. You are the main agent: do the work yourself "
-          "in this context, with no sub-agents — never launch them and never call the `task` tool. When you "
+          "in this context, with no sub-agents — never call tools that launch other agents. When you "
           "load a skill that can start sub-agents, do not start them; apply its review lenses yourself, one "
-          "after another. {box}")
+          "after another. Estimates are advisory, never deadlines or reasons to stop early. {box}")
 
 RESULT_SCHEMA = ('{{"task": "{tid}", "step": "{step}", "status": "done | blocked | needs_input", '
                  '"summary": "<= 80 words, answer-first", "changed": ["<paths relative to the workspace>"], '
@@ -95,7 +95,7 @@ def _task_body(task: Dict[str, Any], ctx: Dict[str, Any]) -> List[str]:
 
 
 def author(task: Dict[str, Any], step: str, rnd: int, ctx: Dict[str, Any], result: Path) -> str:
-    box = f"Time box: about {task['estimate_min']} min. If the task cannot fit, stop and hand back `blocked`."
+    box = f"Estimated duration: about {task['estimate_min']} min. This is advisory; complete the acceptance criteria even if it takes longer."
     title = {"author": "author", "tests": "tests first", "impl": "implementation"}[step]
     out = [f"# simple-task-pipeline brief — {task['id']} {title}", "", HEADER.format(box=box), ""]
     if step == "tests":
@@ -116,24 +116,20 @@ def author(task: Dict[str, Any], step: str, rnd: int, ctx: Dict[str, Any], resul
     return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step=step))) + "\n"
 
 
-def fix(task: Dict[str, Any], rnd: int, ctx: Dict[str, Any], findings: List[str], result: Path,
-        same_agent: bool) -> str:
-    out = [f"# simple-task-pipeline brief — {task['id']} fix round {rnd}", ""]
-    if not same_agent:
-        out += [HEADER.format(box=f"Time box: about {task['estimate_min']} min."), ""]
+def fix(task: Dict[str, Any], rnd: int, ctx: Dict[str, Any], findings: List[str], result: Path) -> str:
+    out = [f"# simple-task-pipeline brief — {task['id']} fix round {rnd}", "",
+           HEADER.format(box=f"Estimated duration: about {task['estimate_min']} min."), ""]
     out += ["## Fix", "", f"Round {rnd} of {ctx.get('cap', limit('max_fix_rounds'))}. Address every blocking item below: fix it, or "
             "dispute it with evidence in `disputes`. Change nothing else.", ""]
     out += [f"- {f}" for f in findings] + [""]
-    if not same_agent:
-        out += _task_body(task, ctx) + _style()
-    else:
-        out += _decisions(ctx) + ["Your task, paths, and style are unchanged from your first brief.", ""]
+    # Saved session ids are bookkeeping, never a substitute for a complete local contract.
+    out += _task_body(task, ctx) + _style()
     return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step="fix"))) + "\n"
 
 
 def review(task: Dict[str, Any], n: int, ctx: Dict[str, Any], result: Path) -> str:
     out = [f"# simple-task-pipeline brief — {task['id']} review {n}", "",
-           HEADER.format(box="Time box: about 10 min."), "", "## Review", "",
+           HEADER.format(box="Estimated duration: about 10 min."), "", "## Review", "",
            f"Task under review: {task['title']}. {task['brief']}", "", "Deliverables:"]
     out += [f"- `{p}`" for p in ctx["write_paths"]]
     out += ["", "Check claims against:"] + [f"- `{s}`" for s in ctx["sources"]]
@@ -154,7 +150,7 @@ def review(task: Dict[str, Any], n: int, ctx: Dict[str, Any], result: Path) -> s
 def research(rid: str, item: Dict[str, Any], scope_md: Path, surveys: List[Path], result: Path) -> str:
     purpose = item.get("purpose", "map")
     minutes = item.get("minutes", limit("research_item_minutes"))
-    box = f"Time box: {minutes} min, hard. Planning research ({purpose}): {PURPOSE_FRAMING[purpose]}"
+    box = f"Estimated duration: {minutes} min (advisory). Planning research ({purpose}): {PURPOSE_FRAMING[purpose]}"
     out = [f"# simple-task-pipeline research brief — {rid}", "", HEADER.format(box=box), "", "## Questions", ""]
     out += [f"{i}. {q}" for i, q in enumerate(item["questions"], 1)]
     out += ["", f"Done when: {item['done_when']}", "",
@@ -171,7 +167,7 @@ def research(rid: str, item: Dict[str, Any], scope_md: Path, surveys: List[Path]
 
 def batch_review(bid: str, reviewer: str, tasks: List[Dict[str, Any]], ctx: Dict[str, Any], result: Path) -> str:
     out = [f"# simple-task-pipeline review brief — {bid} · {reviewer}", "",
-           HEADER.format(box="Time box: about 20 min for the batch."), "", "## Review this batch as a whole", "",
+           HEADER.format(box="Estimated duration: about 20 min for the batch."), "", "## Review this batch as a whole", "",
            f"Every task below is finished and accepted. Review them together, through your lens only, in one pass. "
            f"The change, as a structured file: `{ctx['changes']}` (files, and the exact diff command for each "
            "workspace under version control).", "", "Deliverables, by task:"]
@@ -191,11 +187,9 @@ def batch_review(bid: str, reviewer: str, tasks: List[Dict[str, Any]], ctx: Dict
     return "\n".join(out + _handback(result, BATCH_REVIEW_SCHEMA.format(bid=bid))) + "\n"
 
 
-def verify(bid: str, reviewer: str, findings: List[Dict[str, Any]], ctx: Dict[str, Any], result: Path,
-           same_agent: bool) -> str:
-    out = [f"# simple-task-pipeline verification brief — {bid} · {reviewer}", ""]
-    if not same_agent:
-        out += [HEADER.format(box="Time box: about 8 min."), ""]
+def verify(bid: str, reviewer: str, findings: List[Dict[str, Any]], ctx: Dict[str, Any], result: Path) -> str:
+    out = [f"# simple-task-pipeline verification brief — {bid} · {reviewer}", "",
+           HEADER.format(box="Estimated duration: about 8 min."), ""]
     out += ["## Verify the fixes", "",
            "The findings below were accepted at triage, and their owning tasks have addressed them. For each one, "
            "check whether "

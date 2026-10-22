@@ -302,7 +302,7 @@ class ScopeBudgetTest(unittest.TestCase):
         self.h.init()
         self.h.write_json("scope.json", self.h.scope(budget_minutes=None))
         self.h.tp("scope", "check")     # no budget_declined, no question: budgets are metadata
-        self.assertIn("none set", (self.h.wf / "scope.md").read_text())
+        self.assertIn("total not estimated", (self.h.wf / "scope.md").read_text())
 
 
 class TriageHintTest(unittest.TestCase):

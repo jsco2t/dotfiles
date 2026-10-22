@@ -1,13 +1,12 @@
 ---
+name: simple-task-pipeline
 description: >-
-  Task pipeline — plan, get human approval, then autonomously execute a substantial piece of work
-  (code, docs, KB articles, tutorials, research, Jira/GitHub epics) entirely in the main session,
-  without subagents. Usage: /simple-task-pipeline <location for planning docs> <request> |
-  /simple-task-pipeline resume <workflow dir> | /simple-task-pipeline halt |
-  /simple-task-pipeline status <workflow dir>
+  Plan, obtain human approval, and execute substantial work through a persistent task pipeline
+  for code, docs, knowledge bases, tutorials, research, or project work. Use to start, resume,
+  halt, or inspect a pipeline entirely in the main agent's context, without subagents.
 ---
 
-# Simple Task Pipeline (OpenCode)
+# Simple Task Pipeline
 
 You perform the entire pipeline in the **main agent's context**: scope with the human, research,
 write the plan, implement each task, review the work, fix findings, and report the outcome.
@@ -16,50 +15,62 @@ Work sequentially, including research and review. When using another skill, appl
 instructions and review lenses yourself; disable delegation with `--max-agents=0` where supported.
 If a skill requires delegation, perform the equivalent work directly instead.
 
-Use the existing `tp.py` for persistent state, validation, approvals, briefs, checks, and reports:
+Use the `tp.py` bundled with this skill for persistent state, validation, approvals, briefs,
+checks, and reports. Resolve `<actual-skill-dir>` from the directory containing this `SKILL.md`,
+whether installed or in a repository. Never substitute another task-pipeline skill's helper;
+each skill owns its tool copy.
 
 ```bash
-python3 ~/.config/opencode/tools/task-pipeline/scripts/tp.py -w <workflow dir> <command>
+python3 "<actual-skill-dir>/scripts/tp.py" -w "<workflow dir>" <command>
 ```
 
-`tp <command>` below means exactly that line; spell it out in every Bash call (zsh does not
-word-split a variable). **Run `tp next` after every step** and interpret its actions using the
-local execution rules below.
+`tp <command>` below means exactly that line; spell out the resolved absolute script path in
+every shell call (zsh does not word-split a variable). **Run `tp next` after every step** and
+do what it says, under the rules below.
 
-## Script compatibility: every dispatch is local work
+## The tool is solo-native
 
-The shared tool uses agent terminology and prints instructions intended for `/task-pipeline`.
-For this command, apply these translations everywhere, including briefs and error messages:
+`tp.py` speaks to exactly one worker: you. Everything it prints assumes the work happens in
+this context; never delegate any of it.
 
-- **Roster and participants** identify work roles and review lenses that **you** perform.
-  Keep catalog-supported names in `scope.json`, task `agent` fields, and research items because
-  validation requires them. They do not represent separate agents or sessions. Do not invent a
-  `main` agent name; use `tp roster suggest --kinds <kinds>` to select valid role labels.
-- **Dispatch** means prepare one local step: run `tp dispatch <id>` for **one id only**, read
-  the brief at the printed path, and perform it yourself. Ignore the printed `send: task(...)`
-  line, agent/model selection, and requests to send or resume an agent. Do not dispatch another
-  id while any step is in flight.
-- **Result / hand-back** means write the JSON result yourself at the exact path and with the
-  schema in the brief. Then run **`tp record <id>` without `--agent-id`**. The flag is optional;
-  never fabricate an agent or session id. Fix malformed or oversized result files yourself
-  before recording again. The brief's `RESULT <path>` reply is an internal convention, not a
-  reason to end your turn or omit a useful update to the human.
+- **Role labels** (`code-author`, `doc-reviewer`, …) name work roles and review lenses that
+  **you** perform. Keep catalog-supported labels in `scope.json`, task `agent` fields, and
+  research items because validation requires them. They do not represent separate agents or
+  sessions. Use `tp roster suggest --kinds <kinds>` to pick valid labels.
+- **Dispatch** prepares one local step: run `tp dispatch <id>` for **one id only** — the tool
+  refuses a second while one is in flight — read the brief at the printed path, and perform
+  the step yourself.
+- **Result / hand-back** means write the result JSON yourself at the exact path and with the
+  schema in the brief (the file is the report), then run **`tp record <id>` without
+  `--agent-id`**. The flag exists only for workflows once run by a fleet helper; never
+  fabricate an agent or session id. Fix malformed or oversized result files yourself before
+  recording again.
 - **Fix / resume / verify** means read the new brief, prior results, findings, and recorded
   decisions and do the next pass yourself. After `tp resolve`, check whether the script has
   already put the step back in flight; if so, continue its existing brief and result path
   without dispatching it again.
-- **Wait / in flight** means a local step is unfinished, not that a background agent exists.
-  Inspect `tp status --json`, finish or recover that step, record it, and continue. Never end
-  your turn to wait for an agent hand-back that cannot arrive.
-- **Timing** is reporting metadata. The shared tool can estimate parallel execution; report
-  your own sequential estimate at scope and approval. Do not compress or omit work to fit an
-  estimate. Keep genuine validation, write fences, approval gates, and retry limits intact.
+- **Wait / in flight** means a local step is unfinished. Inspect `tp status --json`, finish
+  or recover that step, record it, and continue. Never end your turn to wait for a hand-back
+  that cannot arrive.
+- **Timing** is reporting metadata. The tool's estimates assume one task at a time; report your
+  own estimate at scope and approval. Do not compress or omit work to fit an estimate.
+  Keep genuine validation, write fences, approval gates, and retry limits intact.
 
-Briefs may still name `/task-pipeline`, call you an agent, or address a manager. Apply their
-task contract, sources, write paths, checks, and result schema in this same context. This
-command's prohibition on delegation overrides their execution and messaging instructions.
+Briefs are complete contracts for one step in this same context: apply their task contract,
+sources, write paths, checks, and result schema here. Where a brief or error message still
+speaks of agents or sessions, this skill's prohibition on delegation overrides it.
 
-## Parse the arguments: `$ARGUMENTS`
+## Invocation and arguments
+
+Invoke `$simple-task-pipeline` followed by one of these forms:
+
+- `<planning-location> <request>` — start a new pipeline.
+- `resume <workflow-dir>` — continue saved work.
+- `halt` or `hault` — halt the active pipeline.
+- `status <workflow-dir>` — report saved status without advancing work.
+
+Quote paths containing spaces. Use an available question tool for the human decisions below;
+if none is available, ask directly and wait for the answer.
 
 The first word selects the mode; the rest are positional arguments.
 
@@ -73,6 +84,18 @@ The first word selects the mode; the rest are positional arguments.
 
 Ask for a missing workflow directory in resume or status mode. For a new pipeline, start at Stage 1.
 
+## State ownership and compatibility
+
+Only this skill's helper writes `.tp/`, `decisions.md`, and `noticed.md`. Write scope, plan,
+brief result files, and deliverables as directed; never create or repair helper state by hand.
+
+The helper enforces its own compatibility: `tp` refuses any workflow whose state is not integer
+`version: 1` with an `in_flight` object, refuses unreadable state, and names the owner when it
+sees `version: "codex-task-pipeline-v1"` — that format belongs to `co-task-pipeline` and is
+incompatible. On any refusal, stop and explain the mismatch. Use the original skill for that
+workflow or obtain an explicit migration request; do not insert empty fields, reinitialize the
+workflow, or silently switch helpers.
+
 ## Execution rules
 
 1. **Only the human decides** scope, work roles/review lenses, plan approval, and anything off
@@ -84,7 +107,7 @@ Ask for a missing workflow directory in resume or status mode. For a new pipelin
 4. **The approved plan is the contract.** Outside it: `tp note "<one line>"`; blocking:
    `tp exception --summary "..."` and a question. Honor write paths and read-only workspaces.
 5. **Script before judgment.** If a command can decide it, a command decides it.
-6. **Answer-first** (`~/.config/opencode/output-styles/answer-first-core.md`, inlined into every
+6. **Answer-first** (`references/answer-first-core.md`, inlined into every
    brief) for everything you write.
 7. **Separate doing from checking.** After writing a result, inspect the actual source, diff,
    and check output before accepting it. During a review step, do not edit deliverables; write
@@ -199,7 +222,7 @@ Loop on `tp next`, finishing any in-flight local step before starting another:
 - **human** → stop, ask with `question`, then
   `tp resolve [--task <id> | --review <id>] --action … --answer "..."`. A needs_input question
   that scope, plan, or decisions already settle, answer yourself. Apply any printed continuation
-  locally; do not send its agent message.
+  locally, in this context.
 - **wait** → inspect the unfinished local step and complete or recover it using the rules
   below. There is no background worker to wait for.
 - **A status question mid-run** ("status?", "how's it going?") → `tp digest`, present it
@@ -212,8 +235,8 @@ Loop on `tp next`, finishing any in-flight local step before starting another:
   retry limits. `tp lost` handles task ids, not research ids or batch review ids. For interrupted
   research or review, continue the existing brief and result file; if genuinely blocked, report
   the problem to the human instead of altering internal state or pretending it succeeded.
-- **A step far past its estimate** → inspect progress, keep commands short-returning (the
-  supervisor kills ~35 min of silence), and raise `tp exception --task <id> --summary "..."`
+- **A step far past its estimate** → inspect progress, keep commands short-returning so the
+  session's supervisor never sees silence, and raise `tp exception --task <id> --summary "..."`
   for a blocking task issue. Use the task's package tests, not the whole suite.
 
 ## Stage 6 — Closeout, then final
@@ -231,7 +254,7 @@ goes directly to **final**, run `tp final`. Committing and pushing are the human
 
 ## Halt, resume, status
 
-- **Halt mode** (`/simple-task-pipeline halt`, or `hault`) → `tp halt --reason "<their words>"`.
+- **Halt mode** (`$simple-task-pipeline halt`, or `hault`) → `tp halt --reason "<their words>"`.
   Nothing new starts. If a local step is in flight, save its progress and record it at a safe
   boundary before stopping. For a task that is unfinished, use its brief's `blocked` result
   with an honest summary rather than claiming `done`; for research/review, finish the bounded
@@ -239,16 +262,16 @@ goes directly to **final**, run `tp final`. Committing and pushing are the human
   and report that halt is pending with the saved brief/result paths. Do not start another step
   to finish halting. Once no step is in flight, the tool writes `halt.json` recording where work
   stopped and what runs next. Tell the human, stop.
-- **Resume mode** (`/simple-task-pipeline resume <dir>`) → `tp status`; if halted or halting,
+- **Resume mode** (`$simple-task-pipeline resume <dir>`) → `tp status`; if halted or halting,
   `tp resume --answer "<their words>"`; then read saved scope, plan, decisions, and active
   brief/results, inspect workspace edits, and run `tp next`. Recover unfinished local work as
-  described in Stage 5. Continue every remaining step yourself, regardless of role labels or
-  old agent ids printed by the tool. Never resume a separate agent session.
-- **Status mode** (`/simple-task-pipeline status <dir>`) → report `tp status` answer-first and
+  described in Stage 5. Continue every remaining step yourself, under their role labels;
+  any agent ids in saved state are fleet-era bookkeeping. Never resume a separate agent session.
+- **Status mode** (`$simple-task-pipeline status <dir>`) → report `tp status` answer-first and
   stop without advancing the workflow.
-- **Unattended runs** need sandbox-writable workflow and write workspaces, and
-  `Bash(python3 ~/.config/opencode/tools/task-pipeline/scripts/tp.py:*)` allowed in `permission`.
-  Human scope, plan, exception, and closeout decisions still apply.
+- **Unattended runs** need writable workflow and write workspaces and permission to run this
+  skill's resolved `scripts/tp.py` path. Human scope, plan, exception, and closeout decisions
+  still apply.
 
 ## Special Instructions
 

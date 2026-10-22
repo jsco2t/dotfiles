@@ -1,0 +1,1678 @@
+"""Execution: what runs next, dispatching a step, recording its hand-back, and every gate
+between steps — decided by this script, never by reading prose. Planning research lives in
+research.py and end-of-pipeline review in review.py; this module routes to them."""
+from __future__ import annotations
+
+import json
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from . import briefs, docscheck, snapshot
+from . import plan as planmod
+from . import scope as scopemod
+from .common import (TP_SCRIPT, TPError, Workflow, agent_minutes, dead_minutes, limit, load_json, minutes_since,
+                     net_agent_minutes, now_iso, sha_file, words)
+
+DONE_STATES = ("accepted", "skipped")
+CHECK_TIMEOUT = 540
+
+# Workflow-root paths the record and review gates never blame on an agent: tp.py itself
+# writes them during a round — dispatch briefs, snapshots, findings and the result files
+# every agent is mandated to produce under runs/, noticed.md appends made from a result's
+# own `noticed` list during record, and plan.json, plan.approved.json and decisions.md
+# rewritten by the manager's `tp amend` mid-flight. A workflow root that is also a task
+# workspace (e.g. a Jira-filing pipeline whose only local deliverables are small record
+# files) puts all of these inside the gate's diff. Plan tampering stays caught — harder —
+# by the approved-sha check in `_loaded` on every command; noticed.md and decisions.md are
+# tp-only by contract (see Workflow's docstring); report.md and halt.json are tp's edge
+# outputs, written only with nothing in flight.
+PIPELINE_OWNED = ("runs/**", "noticed.md", "decisions.md", "plan.json", "plan.approved.json",
+                  "report.md", "halt.json")
+
+
+def _research():
+    from . import research
+    return research
+
+
+def _review():
+    from . import review
+    return review
+
+
+# --- state helpers ---------------------------------------------------------------------
+
+def new_task_state() -> Dict[str, Any]:
+    return {"status": "pending", "step": None, "round": 0, "extra_rounds": 0, "reviews": 0, "agents": {},
+            "fixing": None, "findings": [], "blocked": None, "started": None, "accepted": None,
+            "tests_hash": None, "note": None}
+
+
+def readonly_baseline(wf: Workflow, scope: Dict[str, Any]) -> Dict[str, Any]:
+    base: Dict[str, Any] = {}
+    for name, ws in scopemod.workspaces(scope).items():
+        if ws["mode"] != "read":
+            continue
+        root = Path(ws["path"])
+        porcelain = snapshot.git_porcelain(root)
+        if porcelain is not None:
+            base[name] = {"git": porcelain}
+        else:
+            snap_path = wf.meta / f"readonly-{name}.json"
+            snapshot.save(snap_path, snapshot.take(root, [wf.root]))
+            base[name] = {"snap": str(snap_path)}
+    return base
+
+
+def _readonly_changes(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
+    out = []
+    for name, base in state.get("readonly_baseline", {}).items():
+        root = Path(scopemod.workspaces(scope)[name]["path"])
+        if "git" in base:
+            now = snapshot.git_porcelain(root) or ""
+            before = set(base["git"].splitlines())
+            changed = [ln[3:] for ln in now.splitlines() if ln not in before]
+        else:
+            changed = snapshot.diff(snapshot.load(Path(base["snap"])), snapshot.take(root, [wf.root]))
+        if changed:
+            out.append(f"The read-only workspace {name} changed: {', '.join(changed[:8])} — restore it "
+                       "(read-only means no edits, builds, or generated files there).")
+    return out
+
+
+def _loaded(wf: Workflow, state: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    if state.get("plan_approved_sha") and sha_file(wf.plan_json) != state["plan_approved_sha"]:
+        raise TPError("plan.json changed after approval — restore it, or ask the human and run "
+                      "`tp revise --feedback \"<their words>\"`.")
+    plan = planmod.load_plan(wf)
+    scope = scopemod.load_scope(wf)
+    for path, sha in state.get("conventions_sha", {}).items():
+        if sha_file(Path(path)) != sha:
+            raise TPError(f"{Path(path).name} changed after approval: conventions are part of every brief's "
+                          "contract. Restore it. To change conventions, edit the plan and use `tp amend`.")
+    return plan, scope, {t["id"]: t for t in plan["tasks"]}
+
+
+def _ws(scope: Dict[str, Any], name: str) -> Path:
+    return Path(scopemod.workspaces(scope)[name]["path"])
+
+
+def _deps_open(task: Dict[str, Any], state: Dict[str, Any]) -> List[str]:
+    return [d for d in task.get("depends_on", []) if state["tasks"][d]["status"] not in DONE_STATES]
+
+
+def _authoring_step(task: Dict[str, Any], scope: Dict[str, Any]) -> str:
+    return "impl" if planmod.is_code(task, scope) else "author"
+
+
+def _cap(ts: Dict[str, Any]) -> int:
+    return limit("max_fix_rounds") + ts.get("extra_rounds", 0)
+
+
+# --- next --------------------------------------------------------------------------------
+
+def _action_for(tid: str, ts: Dict[str, Any], task: Dict[str, Any], scope: Dict[str, Any],
+                state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    status = ts["status"]
+    act: Dict[str, Any] = {"id": tid, "agent_id": None}
+    if status == "pending":
+        if _deps_open(task, state):
+            return None
+        code = planmod.is_code(task, scope)
+        step = "tests" if code else "author"
+        act.update(action="dispatch", step=step,
+                   agent=planmod.tests_agent(task, scope) if code else task["agent"])
+    elif status == "needs_impl":
+        act.update(action="dispatch", step="impl", agent=task["agent"])
+    elif status == "needs_fix":
+        fixing = ts["fixing"] or _authoring_step(task, scope)
+        agent = planmod.tests_agent(task, scope) if fixing == "tests" else task["agent"]
+        act.update(action="fix", step="fix", agent=agent, agent_id=ts["agents"].get(fixing))
+    elif status == "needs_review":
+        act.update(action="review", step="review", agent=planmod.reviewer_for(task, scope),
+                   agent_id=ts["agents"].get("review"))
+    else:
+        return None
+    return act
+
+
+def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> List[Dict[str, Any]]:
+    phase = state["phase"]
+    if phase == "DONE":
+        return [{"action": "done"}]
+    if state.get("halt") and not ignore_halt:
+        if state["in_flight"]:
+            return [{"action": "halting", "ids": list(state["in_flight"])}]
+        return [{"action": "halted"}]
+    if phase == "SCOPING":
+        if state.get("scope_checked_sha") and state["scope_checked_sha"] == sha_file(wf.scope_json):
+            return [{"action": "human", "why": "confirm the scope in scope.md"}]
+        return [{"action": "scope"}]
+    if phase == "PLANNING":
+        free = limit("max_in_flight") - len(state["in_flight"])
+        return _research().actions(state, free) + [{"action": "plan"}]
+    if phase == "AWAITING_APPROVAL":
+        return [{"action": "human", "why": "approve or revise the plan in plan.md"}]
+
+    plan, scope, tasks = _loaded(wf, state)
+    acts = []
+    if state.get("blocked"):
+        acts.append({"action": "human", "why": state["blocked"]["summary"]})
+    for tid, ts in state["tasks"].items():
+        if ts["status"] == "blocked":
+            acts.append({"action": "human", "id": tid, "why": ts["blocked"]["summary"]})
+    for tid, ts in state["tasks"].items():
+        if ts["status"] == "needs_check":
+            acts.append({"action": "check", "id": tid})
+    free = limit("max_in_flight") - len(state["in_flight"])
+    order = {"needs_fix": 0, "needs_review": 1, "needs_impl": 2, "pending": 3}
+    ranked = sorted((order[ts["status"]], tid) for tid, ts in state["tasks"].items() if ts["status"] in order)
+    for _, tid in ranked:
+        if free <= 0:
+            break
+        act = _action_for(tid, state["tasks"][tid], tasks[tid], scope, state)
+        if act:
+            acts.append(act)
+            free -= 1
+    review_acts = _review().actions(state, free)
+    acts += review_acts
+    everything_done = all(ts["status"] in DONE_STATES for ts in state["tasks"].values())
+    if (everything_done and not state["in_flight"] and not state.get("blocked")
+            and not _review().open_sessions(state)):
+        pending = _closeout_pending(wf, state)
+        if pending:
+            acts.append({"action": "closeout", "why": pending})
+        else:
+            acts.append({"action": "final"})
+    if not any(a["action"] in ("dispatch", "fix", "review", "final") for a in acts) and state["in_flight"]:
+        acts.append({"action": "wait", "ids": list(state["in_flight"])})
+    return acts
+
+
+GUIDE = {
+    "scope": "Draft scope.json (`tp schema scope`), then `tp scope check`, then confirm it with the human.",
+    "plan": "Write plan.json (`tp schema plan`), `tp plan check`, then `tp plan submit`.",
+    "dispatch": "`tp dispatch {id}`, read the brief it writes, do the step yourself in this context, then "
+                "`tp record {id}`.",
+    "fix": "`tp dispatch {id}` (fix round): read the brief, make the fixes yourself in this context, then "
+           "`tp record {id}`.",
+    "review": "`tp dispatch {id}`: read the brief, review it yourself in this context (no edits), then "
+              "`tp record {id}`.",
+    "check": "Fact-check {id}: read the sample `tp record` printed (or `tp sample {id}`); then "
+             "`tp accept {id} --note \"...\"` or `tp reject {id} --reason \"...\"`.",
+    "triage": "Triage {id}: `tp show {id} --part blocking`, check each against the source, then "
+              "`tp triage {id} --accept-all`, or `--dismiss F# --reason \"...\"` and/or `--assign F#=T##`.",
+    "followup": "Decide {id} ({why}): pursue it (`tp research add ... --from {id}`) or "
+                "`tp research dismiss {id} --reason \"...\"`.",
+    "human": "Stop and ask the human{about}: {why}. Record the answer with `tp resolve`.",
+    "wait": "The step in flight ({ids}) is your own local work: finish it, write its result file, and record "
+            "it (`tp record <id>`). Do not stop to wait — no hand-back can arrive.",
+    "halting": "Halt requested: finish and record {ids} at a safe boundary; dispatch nothing new.",
+    "halted": "Halted. Tell the human where work stopped (`halt.json`), then stop. `tp resume --answer \"...\"` "
+              "continues.",
+    "final": "`tp final` — package checks and the report.",
+    "closeout": "Classify the noticed items (`tp closeout --item N --class ... --note \"...\"` — the note "
+                "names the issue and its consequence in plain language), render the decision with "
+                "`tp closeout --ask`, ask it once, record the answer (`tp closeout --decide --answer \"...\"`), "
+                "then `tp final`.",
+    "done": "Report to the human from report.md.",
+}
+
+
+def _liveness_warning(wf: Workflow, state: Dict[str, Any], acts: List[Dict[str, Any]]) -> Optional[str]:
+    """The workflow-level analog of the supervisor's tool-call recency: if `tp next` runs
+    twice in a row with no event in between (no dispatch, record, accept, resolve, …) and
+    the same action set, the pipeline has stopped changing — say for how long and why."""
+    fp = "|".join([state["phase"], str(len(state["in_flight"])),
+                   str(sum(ts["status"] in DONE_STATES for ts in state["tasks"].values())),
+                   ",".join(f"{a['action']}:{a.get('id', '')}" for a in acts)])
+    events = len(wf.events())
+    now = now_iso()
+    mark = state.get("next_check")
+    with wf.locked():
+        state = wf.load()
+        state["next_check"] = {"fp": fp, "events": events, "since": mark["since"] if mark and
+                               mark.get("fp") == fp and mark.get("events") == events else now}
+        wf.save(state)
+    if mark and mark.get("fp") == fp and mark.get("events") == events:
+        idle = minutes_since(mark["since"])
+        if state["in_flight"]:
+            return (f"no state change for {idle:.0f} min while {', '.join(state['in_flight'])} "
+                    f"is/are in flight — the step is your own local work: continue it now, or check the "
+                    f"workspace and checks if it is far past its estimate.")
+        return (f"no state change for {idle:.0f} min and nothing is in flight — run the action "
+                f"above, or resolve what blocks it with the human.")
+    return None
+
+
+def cmd_next(wf: Workflow, as_json: bool) -> str:
+    state = wf.load()
+    acts = actions(wf, state)
+    spent = net_agent_minutes(wf, state)
+    warnings = []
+    if state["phase"] in ("SCOPING", "PLANNING") and spent > limit("planning_warn_minutes"):
+        warnings.append(f"Planning has taken {spent:.0f} agent-min (target {limit('planning_warn_minutes')}): "
+                        "submit what you have, with open questions for the human.")
+    if state["phase"] != "DONE":
+        idle = _liveness_warning(wf, state, acts)
+        if idle:
+            warnings.append(idle)
+    if as_json:
+        return json.dumps({"phase": state["phase"], "actions": acts, "agent_minutes": round(spent, 1),
+                           "budget_minutes": state.get("budget_minutes"), "warnings": warnings})
+    out = [_headline(wf, state)] + [f"WARNING: {w}" for w in warnings]
+    if state["phase"] == "PLANNING":
+        line = _research().summary(state, scopemod.load_scope(wf))
+        out += [line] if line else []
+    for a in acts:
+        what = a["action"]
+        label = f"{what} {a.get('id', '')}".strip()
+        if a.get("agent"):
+            label += f" ({a['step']} · {a['agent']})"
+        about = f" about {a['id']}" if a.get("id") else ""
+        out.append(f"→ {label}: " + GUIDE[what].format(id=a.get("id", ""), why=a.get("why", ""), about=about,
+                                                      ids=", ".join(a.get("ids", []))))
+    ready = [a["id"] for a in acts if a["action"] in ("dispatch", "fix", "review")]
+    if len(ready) > 1:
+        out.append(f"→ one step at a time: `tp dispatch {ready[0]}` first.")
+    return "\n".join(out)
+
+
+_GROUP_LABEL = {"code": "coding", "tests": "coding", "kb": "writing", "docs": "writing",
+                "tutorial": "writing"}
+
+
+def cmd_digest(wf: Workflow) -> str:
+    """The human-digestable status report: who is running, what is done by group, where the
+    minutes went. The manager presents it at a reasonable interval — after each dispatch wave
+    settles, or whenever the human asks — instead of narrating every start."""
+    state = wf.load()
+    if state["phase"] == "DONE":
+        return f"DONE — report: {wf.root / 'report.md'}; present it to the human (answer-first)."
+    scope = scopemod.load_scope(wf)
+    budget = scope.get("budget_minutes")
+    spent = net_agent_minutes(wf, state)
+    flight = ", ".join(f"{tid} ({fl['step']} · {fl.get('agent') or 'local step'}, "
+                       f"{minutes_since(fl['since']):.0f}m)"
+                       for tid, fl in state["in_flight"].items())
+    lines = []
+    if state["phase"] in ("SCOPING", "PLANNING", "AWAITING_APPROVAL"):
+        recon = state.get("recon", {})
+        r_done = sum(1 for r in recon.values() if r.get("status") == "done")
+        head = f"{state['phase']} · meter {spent:.0f}" + (f" of {budget} agent-min" if budget else " agent-min")
+        if state["phase"] == "PLANNING":
+            head += f" · research {r_done}/{len(recon)} items done" if recon else " · no research planned"
+        lines.append(head)
+        minutes = sum(e.get("minutes", 0.0) for e in wf.events()
+                      if e["kind"] == "record" and str(e.get("id", "")).startswith("R"))
+        if minutes:
+            lines.append(f"Time: research {minutes:.0f}m")
+    else:
+        plan, scope2, tasks = _loaded(wf, state)
+        groups: Dict[str, List[int]] = {}
+        mins: Dict[str, float] = {}
+        per_task: Dict[str, float] = {}
+        for e in wf.events():
+            if e["kind"] == "record" and "minutes" in e:
+                per_task[e.get("id", "?")] = per_task.get(e.get("id", "?"), 0.0) + e["minutes"]
+        for tid, t in tasks.items():
+            kind = planmod.task_kind(t, scope2)
+            label = _GROUP_LABEL.get(kind or "", kind or "other")
+            ok = state["tasks"].get(tid, {}).get("status") in DONE_STATES
+            g = groups.setdefault(label, [0, 0])
+            g[1] += 1
+            g[0] += 1 if ok else 0
+            mins[label] = mins.get(label, 0.0) + per_task.get(tid, 0.0)
+        recon = state.get("recon", {})
+        if recon:
+            g = groups.setdefault("research", [0, 0])
+            g[0] += sum(1 for r in recon.values() if r.get("status") == "done")
+            g[1] += len(recon)
+            mins["research"] = mins.get("research", 0.0) + sum(m for k, m in per_task.items()
+                                                               if str(k).startswith("R"))
+        reviews = state.get("reviews", {})
+        if reviews:
+            g = groups.setdefault("review", [0, 0])
+            g[0] += sum(1 for s in reviews.values() if s.get("status") == "done")
+            g[1] += len(reviews)
+            mins["review"] = mins.get("review", 0.0) + sum(m for k, m in per_task.items() if "/" in str(k))
+        accepted = sum(1 for ts in state["tasks"].values() if ts["status"] in DONE_STATES)
+        inflight = sum(minutes_since(fl["since"]) for fl in state["in_flight"].values())
+        lines.append(f"{state['phase']} · {accepted}/{len(state['tasks'])} tasks accepted · meter "
+                     f"{spent:.0f}" + (f" of {budget} agent-min" if budget else " agent-min")
+                     + (f" (+{inflight:.0f}m in flight)" if inflight else ""))
+        prog = " · ".join(f"{lbl} {ok}/{n}" for lbl, (ok, n) in groups.items())
+        if prog:
+            lines.append(f"Progress: {prog}")
+        tline = " · ".join(f"{lbl} {m:.0f}m" for lbl, m in
+                           sorted(mins.items(), key=lambda kv: (-kv[1], kv[0])))
+        lines.append(f"Time: {tline or '0m'}")
+    if flight:
+        lines.append(f"Agents in flight: {flight}")
+    lines.append("Next: `tp next`.")
+    return "\n".join(lines)
+
+
+def _headline(wf: Workflow, state: Dict[str, Any]) -> str:
+    tasks = state["tasks"]
+    done = sum(ts["status"] in DONE_STATES for ts in tasks.values())
+    flight = ", ".join(f"{k} ({v['step']}, {minutes_since(v['since']):.0f}m)" for k, v in state["in_flight"].items())
+    budget = scopemod.load_scope(wf).get("budget_minutes")
+    dead = dead_minutes(state)
+    used = f"{net_agent_minutes(wf, state):.0f}" + (f" of {budget} agent-min" if budget else " agent-min")
+    if dead:
+        used += f" (+{dead:.0f}m dead clock)"
+    parts = [state["phase"], f"{done}/{len(tasks)} accepted" if tasks else None,
+             f"in flight: {flight}" if flight else None, used]
+    return " · ".join(p for p in parts if p)
+
+
+# --- dispatch ---------------------------------------------------------------------------------
+
+def _slots(state: Dict[str, Any]) -> None:
+    if state["in_flight"]:
+        raise TPError(f"one step is already in flight ({', '.join(state['in_flight'])}) — finish and record "
+                      "it before dispatching another.")
+
+
+# Directory names that are never deliverables, by any repo's convention. Deliberately
+# narrow: `build/` or `dist/` can be a legitimate content path (a KB article on the build
+# system lives under kb/build/), so anything ambiguous is left to .gitignore via
+# _git_ignored instead of this list.
+_EXPAND_IGNORE_PARTS = {".git", "node_modules", "__pycache__", ".venv", ".pnpm", ".pnpm-store",
+                        ".tox", ".mypy_cache", ".pytest_cache"}
+
+
+def _git_ignored(ws: Path, rels: List[str]) -> set:
+    """Paths the workspace's own .gitignore excludes (empty when ws is not a git repo)."""
+    if not (ws / ".git").exists() or not rels:
+        return set()
+    try:
+        proc = subprocess.run(["git", "-C", str(ws), "check-ignore", "--stdin"], input="\n".join(rels),
+                              capture_output=True, text=True, timeout=30)
+        return set(proc.stdout.split())
+    except (OSError, subprocess.SubprocessError):
+        return set()
+
+
+def _expand(ws: Path, patterns: List[str]) -> List[Path]:
+    """The files a task's paths name — never whole ignored trees (.git, node_modules, build
+    outputs): bare catch-alls and generated trees blew up record/review git argvs in real runs."""
+    out: List[Path] = []
+    for p in patterns:
+        if any(ch in p for ch in "*?["):
+            matches = sorted(x for x in ws.glob(p) if x.is_file())
+        elif (ws / p).is_file():
+            matches = [ws / p]
+        elif (ws / p).is_dir():
+            matches = sorted(x for x in (ws / p).rglob("*") if x.is_file())
+        else:
+            matches = []
+        out += [x for x in matches
+                if not any(part in _EXPAND_IGNORE_PARTS for part in x.relative_to(ws).parts)]
+    rels = [str(x.relative_to(ws)) for x in out]
+    ignored = _git_ignored(ws, rels)
+    out = [x for x, r in zip(out, rels) if r not in ignored]
+    cap = limit("max_path_expand")
+    if len(out) > cap:
+        sample = ", ".join(sorted(str(x.relative_to(ws)) for x in out)[:5])
+        raise TPError(f"the task's paths expand to {len(out)} files (cap {cap}), e.g. {sample} — name the "
+                      "files the task writes, and never `.` or a bare `**`; a directory path is fine only "
+                      "when its files exist at plan time.")
+    return out
+
+
+def _context(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Dict[str, Any],
+             state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    wss = scopemod.workspaces(scope)
+    ws = _ws(scope, task["workspace"])
+    deliverables = {d["id"]: d for d in scope["deliverables"]}
+    checks = []
+    for c in task.get("checks", []):
+        checks.append(planmod.BUILTIN_TASK_CHECKS.get(c) or f"`{plan['checks'][c]['cmd']}`")
+    _expand(ws, task["paths"])  # refuses runaway glob/dir expansions before a brief is written
+    sources = []
+    for s in task.get("sources", []):
+        name, _, rel = str(s).partition(":")
+        if name == "research":
+            sources.append(f"{wf.root / 'recon' / (rel + '.json')} (research findings: read `answers`)")
+        elif name == "wf":
+            sources.append(str(wf.root / rel))
+        else:
+            sources.append(str(Path(wss[name]["path"]) / rel) if name in wss else s)
+    return {
+        "serves": "; ".join(f"{d} — {deliverables[d]['what']}" for d in task["serves"] if d in deliverables),
+        "scope_md": wf.root / "scope.md",
+        "write_paths": [str(ws / p) for p in task["paths"]],
+        "readonly": [w["path"] for w in wss.values() if w["mode"] == "read"],
+        "sources": sources or [str(ws)],
+        "checks": checks,
+        "tests_paths": [str(ws / p) for p in task.get("tests_paths", task["paths"])],
+        "decisions": decision_lines(state or wf.load(), [task["id"]]),
+        "conventions": [str(p) for p in planmod.conventions(plan, scope, wf.root)],
+    }
+
+
+def _git_head(ws: Path) -> Optional[str]:
+    """The workspace's git HEAD, or None when it is not a git work tree."""
+    try:
+        proc = subprocess.run(["git", "-C", str(ws), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              timeout=15)
+        return proc.stdout.strip() if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def cmd_dispatch(wf: Workflow, tid: str) -> str:
+    with wf.locked():
+        state = wf.load()
+        if state.get("halt"):
+            raise TPError("A halt was requested: nothing new starts. Record agents as they hand back; "
+                          "`tp resume --answer \"<the human's words>\"` continues.")
+        if tid.startswith("R"):
+            return _research().dispatch(wf, state, tid, _slots)
+        if "/" in tid:
+            return _review().dispatch(wf, state, tid)
+        if state["phase"] != "EXECUTING":
+            raise TPError(f"Tasks are dispatched while EXECUTING; the workflow is {state['phase']}.")
+        plan, scope, tasks = _loaded(wf, state)
+        if tid not in tasks:
+            raise TPError(f"{tid} is not a task in the approved plan.")
+        ts, task = state["tasks"][tid], tasks[tid]
+        if ts["status"] == "pending" and _deps_open(task, state):
+            raise TPError(f"{tid} waits on {', '.join(_deps_open(task, state))} (not accepted yet).")
+        act = _action_for(tid, ts, task, scope, state)
+        if act is None:
+            raise TPError(f"{tid} is {ts['status']}; there is nothing to dispatch.")
+        _slots(state)
+        step, run = act["step"], wf.run_dir(tid)
+        run.mkdir(parents=True, exist_ok=True)
+        ctx = _context(wf, task, scope, plan, state)
+        if step == "review":
+            n = ts["reviews"] + 1
+            brief, result = run / f"brief-review-{n}.md", run / f"review-{n}.json"
+            fix_result = run / "result-fix.json"
+            if fix_result.exists() and load_json(fix_result, "fix result").get("disputes"):
+                ctx["disputes"] = str(fix_result)
+            text = briefs.review(task, n, ctx, result)
+            label = f"review-{n}"
+        elif step == "fix":
+            rnd = ts["round"]
+            brief, result = run / f"brief-fix-{rnd}.md", run / "result-fix.json"
+            ctx["cap"] = _cap(ts)
+            findings = list(ts["findings"])
+            prev = run / (f"snap-{ts['fixing']}-0.json" if rnd == 1 else f"snap-fix-{rnd - 1}.json")
+            if prev.exists():
+                # Staleness guard: findings were computed against the failing round's
+                # snapshot; accepted concurrent work may have landed since (one real run's
+                # fix agent reverted accepted sibling work off a stale 'revert them').
+                ws0 = _ws(scope, task["workspace"])
+                since = snapshot.diff(snapshot.load(prev), snapshot.take(ws0, [wf.root]))
+                allowed = list(task["paths"]) + list(PIPELINE_OWNED)
+                concurrent = [c for c in since if not snapshot.matches(c, allowed)]
+                if concurrent:
+                    findings = [f"Since the failing round, these files outside your paths changed — likely "
+                                f"accepted concurrent work; never revert them on the strength of an older "
+                                f"finding: {', '.join(concurrent[:10])}."] + findings
+            text = briefs.fix(task, rnd, ctx, findings, result, same_agent=bool(act["agent_id"]))
+            label = f"fix-{rnd}"
+        else:
+            brief, result = run / f"brief-{step}-{ts['round']}.md", run / f"result-{step}.json"
+            text = briefs.author(task, step, ts["round"], ctx, result)
+            label = f"{step}-{ts['round']}"
+        if result.exists():
+            result.unlink()
+        brief.write_text(text)
+        snap = run / f"snap-{label}.json"
+        snapshot.save(snap, snapshot.take(_ws(scope, task["workspace"]), [wf.root]))
+        for other in state["in_flight"].values():
+            other.setdefault("concurrent", []).append(tid)
+        state["in_flight"][tid] = {"step": step, "since": now_iso(), "snap": str(snap), "agent": act["agent"],
+                                   "concurrent": list(state["in_flight"]), "from": ts["status"],
+                                   "head": _git_head(_ws(scope, task["workspace"]))}
+        ts["status"], ts["step"] = "in_flight", step
+        ts["started"] = ts["started"] or now_iso()
+        wf.save(state)
+        wf.event("dispatch", id=tid, step=step, agent=act["agent"], round=ts["round"])
+        doing = "Do the fixes yourself" if step == "fix" else "Do the step yourself"
+        return (f"DISPATCH {tid} · {step} · {act['agent']}\nbrief: {brief}\nresult: {result}\n"
+                f"{doing} in this context (no sub-agents), write the result file, then: tp record {tid}")
+
+
+# --- record ---------------------------------------------------------------------------------
+
+def _validate_result(data: Any, tid: str, step: str) -> List[str]:
+    if not isinstance(data, dict):
+        return ["the result must be a JSON object."]
+    errs = []
+    if data.get("task") != tid or data.get("step") != step:
+        errs.append(f"result must say task {tid!r} and step {step!r}.")
+    if data.get("status") not in ("done", "blocked", "needs_input"):
+        errs.append("status must be done, blocked, or needs_input.")
+    if not str(data.get("summary", "")).strip():
+        errs.append("summary is empty.")
+    elif words(data["summary"]) > 80:
+        errs.append(f"summary is {words(data['summary'])} words; the limit is 80.")
+    for key in ("changed", "noticed", "questions"):
+        if not isinstance(data.get(key, []), list):
+            errs.append(f"`{key}` must be a list.")
+    if data.get("status") == "needs_input" and not data.get("questions"):
+        errs.append("needs_input needs `questions`.")
+    return errs
+
+
+def _run_cmd(cmd: str, cwd: Path, log: Path) -> Tuple[bool, str]:
+    try:
+        proc = subprocess.run(["bash", "-c", cmd], cwd=str(cwd), capture_output=True, text=True,
+                              timeout=CHECK_TIMEOUT)
+        output, ok = proc.stdout + proc.stderr, proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        output, ok = f"timed out after {CHECK_TIMEOUT}s", False
+    log.write_text(f"$ {cmd}\n(cwd {cwd})\n\n{output}")
+    tail = "\n".join(output.strip().splitlines()[-12:])
+    return ok, tail
+
+
+def _repos(scope: Dict[str, Any]) -> Dict[str, Path]:
+    return {n: Path(w["path"]) for n, w in scopemod.workspaces(scope).items() if w["mode"] == "read"}
+
+
+def _expand_cmd(cmd: str, task: Optional[Dict[str, Any]], scope: Dict[str, Any]) -> str:
+    wss = scopemod.workspaces(scope)
+    out = cmd.replace("{tp}", f"{shlex.quote(sys.executable)} {shlex.quote(str(TP_SCRIPT))}")
+    for name, w in wss.items():
+        out = out.replace("{ws:" + name + "}", shlex.quote(w["path"]))
+    if task is not None:
+        files = _expand(_ws(scope, task["workspace"]), task["paths"])
+        out = out.replace("{paths}", " ".join(shlex.quote(str(f)) for f in files))
+    return out
+
+
+def _task_checks(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Dict[str, Any],
+                 label: str) -> List[str]:
+    failures = []
+    ws = _ws(scope, task["workspace"])
+    for name in task.get("checks", []):
+        log = wf.run_dir(task["id"]) / f"check-{name}-{label}.log"
+        if name == "docs":
+            files = [f for f in _expand(ws, task["paths"]) if f.suffix == ".md"]
+            errors, warnings, stats = docscheck.check(files, _repos(scope))
+            log.write_text("\n".join(errors + [f"WARN {w}" for w in warnings]) or f"ok: {stats}")
+            if errors:
+                failures.append(f"Check `docs` failed ({len(errors)} problems; log {log}): " + "; ".join(errors[:6]))
+        else:
+            spec = plan["checks"][name]
+            raw = spec.get("cwd")
+            if raw and Path(raw).is_absolute():
+                cwd = Path(raw)
+            else:
+                cwd = _ws(scope, raw) if raw else ws
+            ok, tail = _run_cmd(_expand_cmd(spec["cmd"], task, scope), cwd, log)
+            if not ok:
+                failures.append(f"Check `{name}` failed (log {log}): {tail}")
+    return failures
+
+
+def _tests_hash(task: Dict[str, Any], scope: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    ws = _ws(scope, task["workspace"])
+    rels = task.get("tests_paths") or []
+    return snapshot.hash_files(ws, [str(p.relative_to(ws)) for p in _expand(ws, rels)] or rels)
+
+
+def _freeze_tests_baseline(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any]) -> Path:
+    """Copy the task's test files as they stood when the tests step was recorded, so the
+    impl gate can tell additive growth (a new test the review asked for) from weakening."""
+    ws = _ws(scope, task["workspace"])
+    base = wf.run_dir(task["id"]) / "tests-baseline"
+    if base.exists():
+        shutil.rmtree(base)
+    base.mkdir(parents=True)
+    for p in _expand(ws, task.get("tests_paths") or []):
+        rel = p.relative_to(ws)
+        dest = base / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(p, dest)
+    return base
+
+
+def _tests_weakened(old: Path, new: Path) -> Optional[str]:
+    """What the edit removed that it did not re-add, line for line: `None` when the change
+    is purely additive or cosmetic (reformatted lines survive); a summary of the dropped
+    lines when tests were deleted or their assertions gutted."""
+    if not old.is_file():
+        return None
+    if not new.is_file():
+        return "the whole file was deleted"
+    old_lines = [ln.rstrip("\n") for ln in old.read_text().splitlines()]
+    new_lines = [ln.rstrip("\n") for ln in new.read_text().splitlines()]
+    added = {ln.strip() for ln in new_lines}
+    dropped = [ln for ln in old_lines if ln.strip() and ln.strip() not in added]
+    if not dropped:
+        return None
+    return "; ".join(ln.strip()[:70] for ln in dropped[:5])
+
+
+def _fail(wf: Workflow, ts: Dict[str, Any], tid: str, findings: List[str], fixing: str) -> str:
+    ts["round"] += 1
+    ts["fixing"] = fixing
+    ts["findings"] = findings
+    (wf.run_dir(tid) / f"findings-{ts['round']}.json").write_text(json.dumps(findings, indent=1))
+    lines = [f"  - {f}" for f in findings]
+    if ts["round"] > _cap(ts):
+        ts["status"] = "blocked"
+        wf.event("blocked", id=tid, reason="rounds")
+        prior = wf.run_dir(tid) / f"findings-{ts['round'] - 1}.json"
+        if ts["round"] > 1 and prior.is_file() and json.loads(prior.read_text()) == findings:
+            # The last two rounds reproduced the exact same findings: the loop was not
+            # converging, so burning the cap was the stall — say so instead of a bare count.
+            ts["blocked"] = {"kind": "rounds", "summary": f"{tid} failed rounds "
+                             f"{ts['round'] - 1} and {ts['round']} with identical findings — the fix loop "
+                             "is not converging"}
+            return "\n".join([f"BLOCKED {tid}: same findings as the previous round ({ts['round'] - 1} → "
+                              f"{ts['round']}) — the fix loop is not converging; the human decides "
+                              "(retry with a new approach, skip, or revise the plan)."] + lines)
+        ts["blocked"] = {"kind": "rounds", "summary": f"{tid} still fails after {_cap(ts)} fix rounds"}
+        return "\n".join([f"BLOCKED {tid}: still failing after {_cap(ts)} fix rounds — the human decides "
+                          "(retry, skip, or revise the plan)."] + lines)
+    ts["status"] = "needs_fix"
+    return "\n".join([f"FAIL {tid} → fix round {ts['round']} of {_cap(ts)}:"] + lines)
+
+
+def _sample(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any]) -> str:
+    ws = _ws(scope, task["workspace"])
+    files = _expand(ws, task["paths"])
+    md = [f for f in files if f.suffix == ".md"]
+    out = []
+    if md:
+        cites = docscheck.sample(md, _repos(scope), n=3, seed=task["id"])
+        out += (["sample for your fact check (does each source line say what the sentence claims?):"] + cites
+                if cites else ["sample: no path:line citations in the deliverable — read one section against its source."])
+    code = [f for f in files if f.suffix != ".md"]
+    if code:
+        stat = subprocess.run(["git", "-C", str(ws), "diff", "--stat", "--", *[str(f) for f in code]],
+                              capture_output=True, text=True).stdout.strip()
+        out += ["diff:", stat or "(untracked files: " + ", ".join(str(f.relative_to(ws)) for f in code[:8]) + ")"]
+    return "\n".join(out)
+
+
+def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], trim_summary: bool = False,
+               credit: float = 0.0, dead: float = 0.0) -> str:
+    with wf.locked():
+        state = wf.load()
+        if tid.startswith("R"):
+            return _research().record(wf, state, tid)
+        if "/" in tid:
+            return _review().record(wf, state, tid, agent_id)
+        plan, scope, tasks = _loaded(wf, state)
+        fl = state["in_flight"].get(tid)
+        if tid not in tasks or fl is None:
+            raise TPError(f"{tid} is not in flight (status {state['tasks'].get(tid, {}).get('status')}).")
+        ts, task, step = state["tasks"][tid], tasks[tid], fl["step"]
+        if step == "review":
+            return _record_review(wf, state, scope, tasks, tid, fl, agent_id, credit=credit)
+        effective = ts["fixing"] if step == "fix" else step
+        if agent_id:
+            ts["agents"][effective] = agent_id
+        res_path = wf.run_dir(tid) / f"result-{step}.json"
+        if not res_path.exists():
+            raise TPError(f"{res_path} is missing — the agent must write it before you record.")
+        data = load_json(res_path, "the agent's result")
+        if trim_summary and isinstance(data, dict) and words(data.get("summary", "")) > 80:
+            # A mechanical rejection (e.g. an 82-word summary) should not cost an agent
+            # round-trip: cut the summary to the limit and record what remains.
+            kept: List[str] = []
+            n = 0
+            for w in str(data["summary"]).split():
+                if n + len(w) + 1 > 78 and n >= 40:
+                    break
+                kept.append(w)
+                n += len(w) + 1
+            data["summary"] = " ".join(kept).rstrip(" .,;:") + "."
+            res_path.write_text(json.dumps(data, indent=1) + "\n")
+        errs = _validate_result(data, tid, step)
+        if errs:
+            raise TPError(*[f"{res_path}: {e}" for e in errs],
+                          "Fix the result file yourself to satisfy the schema, then record again.")
+        for item in data.get("noticed", []):
+            wf.noticed(tid, str(item))
+        minutes = minutes_since(fl["since"])
+        wait = max(0.0, credit) if minutes > 0 else 0.0
+        wait = min(wait, minutes)  # a credit can never push the tally negative
+        minutes -= wait
+        if wait:
+            wf.event("credit", id=tid, minutes=round(wait, 1))
+        # Dead clock: backend-stall / harness-silence time billed to this hand-back that did
+        # no work (real runs carried ~400 such minutes inside 738-minute "records").
+        frozen = min(max(0.0, dead), minutes)
+        minutes -= frozen
+        if frozen:
+            state["dead_minutes"] = round(dead_minutes(state) + frozen, 1)
+            wf.event("dead_clock", id=tid, minutes=round(frozen, 1))
+        state["agent_minutes"] = round(agent_minutes(wf, state) + minutes, 1)
+        est = task.get("estimate_min")
+        stall_hint = ""
+        if est and minutes > limit("stall_multiplier") * est:
+            stall_hint = (f"\nWARNING: this hand-back took {minutes:.0f} min against a {est}-min estimate — if "
+                          f"most of it was the backend stalling (no output, no tool calls), correct the meter: "
+                          f"`tp clock {tid} --dead-minutes N --note \"backend stall\"`.")
+        if data["status"] != "done":
+            del state["in_flight"][tid]
+            ts["status"] = "blocked"
+            asks = data.get("questions") or [data["summary"]]
+            ts["blocked"] = {"kind": "input", "summary": f"{tid} {data['status']}: " + " | ".join(asks), "step": step,
+                             "snap": fl["snap"]}
+            wf.save(state)
+            wf.event("record", id=tid, step=step, status=data["status"], minutes=round(minutes, 1))
+            return "\n".join([f"{tid} {data['status']}{' (credited ' + format(wait, '.0f') + ' min of human-wait)' if wait else ''} — answer from scope.md / plan.json / decisions.md if they "
+                              "settle it; otherwise ask the human. Then `tp resolve --task "
+                              f"{tid} --action answer --answer \"...\"`:"] + [f"  - {q}" for q in asks])
+
+        findings: List[str] = []
+        msgs: List[str] = []
+        if wait:
+            msgs.append(f"credited {wait:.0f} min of human-wait.")
+        ws = _ws(scope, task["workspace"])
+        changed = snapshot.diff(snapshot.load(Path(fl["snap"])), snapshot.take(ws, [wf.root]))
+        if step != "fix" and effective in ("tests", "impl", "author") and not changed:
+            if fl.get("head") and _git_head(ws) != fl["head"]:
+                # A commit-only task: git history moved, the tree did not (snapshot skips
+                # .git). The agent did work — a real run flagged this by hand against git.
+                msgs.append("workspace tree unchanged, but git history advanced (a commit) — "
+                            "counted as work.")
+            else:
+                # A first authoring hand-back that left the workspace untouched is a stall
+                # or a lie: no time threshold involved, and it cannot false-positive on
+                # slow-but-working agents. Authoring dispatches only — a fix round (step
+                # fix, even at round 0 after a reopen) may legitimately land byte-identical
+                # content, and looping fix rounds are the findings-cycle detector's job.
+                # Review steps are exempt — reviewers change nothing.
+                findings.append("The agent reports done but wrote nothing: the workspace is unchanged since "
+                                "dispatch. Verify (did it work in the wrong place?), then reject it as a fix "
+                                "round or mark the dispatch lost.")
+        allowed = list(task["paths"]) + list(PIPELINE_OWNED)
+        for other in fl.get("concurrent", []):
+            if other in tasks and tasks[other]["workspace"] == task["workspace"]:
+                allowed += tasks[other]["paths"]
+        off = [c for c in changed if not snapshot.matches(c, allowed)]
+        if off:
+            findings.append(f"Changed files outside this task's paths: {', '.join(off[:10])} — revert them; if the "
+                            "task cannot be done without them, hand back `blocked` and say why.")
+        findings += _readonly_changes(wf, state, scope)
+        label = f"{step}-{ts['round']}"
+        if effective == "tests":
+            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
+            if task.get("test_mode", "red") == "red":
+                if ok:
+                    findings.append(f"The tests pass before any implementation, so they are not red: they do not "
+                                    f"prove the new behaviour. `{task['test_cmd']}` passed.")
+                else:
+                    msgs.append(f"red: `{task['test_cmd']}` fails as expected.")
+            elif not ok:
+                findings.append(f"The characterization tests must pass against current code: {tail}")
+            else:
+                msgs.append("pinned: characterization tests pass.")
+            if not findings:
+                ts["tests_hash"] = _tests_hash(task, scope)
+                _freeze_tests_baseline(wf, task, scope)
+        elif effective == "impl":
+            if ts.get("tests_hash") and _tests_hash(task, scope) != ts["tests_hash"]:
+                grown, gutted = [], []   # additive growth is allowed; weakening is not
+                for rel, h in _tests_hash(task, scope).items():
+                    if ts["tests_hash"].get(rel) == h:
+                        continue
+                    old = wf.run_dir(tid) / "tests-baseline" / rel
+                    dropped = _tests_weakened(old, _ws(scope, task["workspace"]) / rel)
+                    (grown if dropped is None else gutted).append((rel, dropped))
+                if gutted:
+                    detail = "; ".join(f"{rel}: dropped {dropped}" for rel, dropped in gutted[:3])
+                    findings.append(
+                        f"The tests were weakened during implementation (tests changed: "
+                        f"{', '.join(rel for rel, _ in gutted)}) — {detail}. Restore them; the implementation "
+                        "must not weaken the tests. If the edits were the human-sanctioned fix for a blocked "
+                        "round (e.g. seeded tests that cannot compile), the resolve answer must carry "
+                        "--rebaseline-tests.")
+                elif grown:
+                    msgs.append(f"tests grew additively (new tests in {', '.join(rel for rel, _ in grown)}) — "
+                                "allowed; the baseline moves to the grown set.")
+                    ts["tests_hash"] = _tests_hash(task, scope)
+                    _freeze_tests_baseline(wf, task, scope)
+            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
+            if ok:
+                msgs.append(f"green: `{task['test_cmd']}` passes.")
+            else:
+                findings.append(f"The tests are not green: `{task['test_cmd']}` failed: {tail}")
+        elif effective == "author" and planmod.is_tested(task, scope):
+            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
+            if ok:
+                msgs.append(f"pinned: `{task['test_cmd']}` passes.")
+            else:
+                findings.append(f"The delivered tests must pass against current code: "
+                                f"`{task['test_cmd']}` failed: {tail}")
+        if effective in ("author", "impl"):
+            findings += _task_checks(wf, task, scope, plan, label)
+        del state["in_flight"][tid]
+        state.setdefault("lost_counts", {}).pop(tid, None)  # a real hand-back resets the loss streak
+        if findings:
+            out = _fail(wf, ts, tid, findings, fixing=effective)
+        elif effective == "tests":
+            ts["status"] = "needs_impl"
+            out = f"{tid} tests recorded; " + " ".join(msgs) + " Next: implementation."
+        elif planmod.reviewer_for(task, scope):
+            ts["status"] = "needs_review"
+            out = f"{tid} passed its checks. " + " ".join(msgs) + " Next: review."
+        else:
+            ts["status"] = "needs_check"
+            out = f"{tid} passed its checks. " + " ".join(msgs) + "\n" + _sample(wf, task, scope)
+        wf.save(state)
+        wf.event("record", id=tid, step=step, status=ts["status"], minutes=round(minutes, 1), round=ts["round"])
+        return out + stall_hint
+
+
+def _validate_review(data: Any, tid: str) -> List[str]:
+    if not isinstance(data, dict) or data.get("task") != tid:
+        return [f"the review must be a JSON object for task {tid!r}."]
+    errs = []
+    if data.get("verdict") not in ("pass", "changes"):
+        errs.append("verdict must be pass or changes.")
+    findings = data.get("findings", [])
+    if not isinstance(findings, list):
+        return errs + ["findings must be a list."]
+    for f in findings:
+        for key in ("id", "state", "where", "issue"):
+            if not f.get(key):
+                errs.append(f"finding {f.get('id', '?')} needs `{key}`.")
+        if not isinstance(f.get("blocking"), bool):
+            errs.append(f"finding {f.get('id', '?')} needs `blocking`: true or false.")
+    blocking = [f.get("id") for f in findings if f.get("blocking") is True]
+    if blocking and data.get("verdict") == "pass":
+        errs.append(f"verdict 'pass' contradicts blocking finding {', '.join(map(str, blocking))}.")
+    if not blocking and data.get("verdict") == "changes":
+        errs.append("verdict 'changes' needs at least one blocking finding.")
+    return errs
+
+
+def _record_review(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], tasks: Dict[str, Dict[str, Any]],
+                   tid: str, fl: Dict[str, Any], agent_id: Optional[str], credit: float = 0.0) -> str:
+    ts, task = state["tasks"][tid], tasks[tid]
+    n = ts["reviews"] + 1
+    path = wf.run_dir(tid) / f"review-{n}.json"
+    data = load_json(path, "the review")
+    errs = _validate_review(data, tid)
+    if errs:
+        raise TPError(*[f"{path}: {e}" for e in errs], "Ask the reviewer to fix the file, then record again.")
+    if agent_id:
+        ts["agents"]["review"] = agent_id
+    ts["reviews"] = n
+    for item in data.get("noticed", []):
+        wf.noticed(f"{tid} review", str(item))
+    ws = _ws(scope, task["workspace"])
+    changed = snapshot.diff(snapshot.load(Path(fl["snap"])), snapshot.take(ws, [wf.root]))
+    allowed: List[str] = list(PIPELINE_OWNED)   # tp's own writes; a reviewer edits nothing
+    for other in fl.get("concurrent", []):
+        if other in tasks and tasks[other]["workspace"] == task["workspace"]:
+            allowed += tasks[other]["paths"]
+    edits = [c for c in changed if not snapshot.matches(c, allowed)]
+    del state["in_flight"][tid]
+    findings = [f"{path.name} {f['id']} ({f['state']}) at {f['where']}: {f['issue']}"
+                + (f" Fix: {f['fix']}" if f.get("fix") else "") for f in data["findings"] if f["blocking"]]
+    if edits:
+        findings.append(f"The reviewer changed {', '.join(edits[:8])}; reviews must not edit — check that content "
+                        "against the task and its sources.")
+    if findings:
+        out = _fail(wf, ts, tid, findings, fixing=_authoring_step(task, scope))
+    else:
+        ts["status"] = "needs_check"
+        minor = len(data["findings"])
+        out = f"{tid} review {n} passed ({minor} non-blocking notes in {path.name}).\n" + _sample(wf, task, scope)
+    wf.save(state)
+    review_minutes = minutes_since(fl["since"])
+    wait = min(max(0.0, credit), review_minutes)
+    review_minutes -= wait
+    if wait:
+        wf.event("credit", id=tid, minutes=round(wait, 1))
+    state["agent_minutes"] = round(agent_minutes(wf, state) + review_minutes, 1)
+    wf.event("record", id=tid, step="review", status=ts["status"], minutes=round(review_minutes, 1))
+    return out
+
+
+# --- manager verdicts and exceptions --------------------------------------------------------
+
+def cmd_accept(wf: Workflow, tid: str, note: str) -> str:
+    with wf.locked():
+        state = wf.load()
+        _loaded(wf, state)
+        ts = state["tasks"].get(tid)
+        if ts is None or ts["status"] != "needs_check":
+            raise TPError(f"{tid} is not awaiting your fact check (status {ts and ts['status']}).")
+        ts.update(status="accepted", accepted=now_iso(), note=note)
+        wf.save(state)
+        task_min = sum(e.get("minutes", 0.0) for e in wf.events() if e["kind"] == "record" and e.get("id") == tid)
+        wf.event("accept", id=tid, minutes=round(task_min, 1))
+        return f"accepted {tid} ({task_min:.0f} agent-min, {ts['round']} fix rounds). Next: `tp next`."
+
+
+def cmd_reject(wf: Workflow, tid: str, reason: str) -> str:
+    with wf.locked():
+        state = wf.load()
+        _, scope, tasks = _loaded(wf, state)
+        ts = state["tasks"].get(tid)
+        if ts is None or ts["status"] != "needs_check":
+            raise TPError(f"{tid} is not awaiting your fact check.")
+        out = _fail(wf, ts, tid, [f"Manager fact check: {reason}"], fixing=_authoring_step(tasks[tid], scope))
+        wf.save(state)
+        wf.event("reject", id=tid)
+        return out
+
+
+def cmd_sample(wf: Workflow, tid: str) -> str:
+    state = wf.load()
+    _, scope, tasks = _loaded(wf, state)
+    if tid not in tasks:
+        raise TPError(f"{tid} is not a task in the plan.")
+    return _sample(wf, tasks[tid], scope)
+
+
+def cmd_exception(wf: Workflow, summary: str, tid: Optional[str]) -> str:
+    with wf.locked():
+        state = wf.load()
+        if tid:
+            ts = state["tasks"].get(tid)
+            if ts is None:
+                raise TPError(f"{tid} is not a task.")
+            prior = ts["status"]
+            if tid in state["in_flight"]:  # the manager stopped this agent: free its slot
+                prior = state["in_flight"].pop(tid).get("from", "pending")
+            ts["blocked"] = {"kind": "exception", "summary": summary, "prior": prior}
+            ts["status"] = "blocked"
+        else:
+            state["blocked"] = {"kind": "exception", "summary": summary, "since": now_iso()}
+        wf.save(state)
+        wf.event("exception", id=tid, summary=summary)
+        return "raised — stop and put it to the human; record their answer with `tp resolve`."
+
+
+def cmd_lost(wf: Workflow, tid: str, summary: str) -> str:
+    """A dispatch died without handing back (harness interrupt, session restart, host loss,
+    supervisor kill). Freeze its wall clock as dead — it did no work — block the task, and
+    point at a fresh re-dispatch: the interrupted step's context is gone, so the next brief
+    starts fresh. Eleven such losses across the first 14 runs were each hand-written exceptions."""
+    with wf.locked():
+        state = wf.load()
+        ts = state["tasks"].get(tid)
+        if ts is None:
+            raise TPError(f"{tid} is not a task.")
+        fl = state["in_flight"].get(tid)
+        if fl is None:
+            raise TPError(f"{tid} is not in flight (status {ts['status']}) — nothing to mark lost; "
+                          f"`tp exception --task {tid} --summary \"...\"` covers everything else.")
+        state["in_flight"].pop(tid)
+        elapsed = minutes_since(fl["since"])
+        state["dead_minutes"] = round(dead_minutes(state) + elapsed, 1)
+        prior, step = fl.get("from", "pending"), fl.get("step")
+        effective = ts["fixing"] if step == "fix" else step
+        ts["agents"].pop(effective, None)  # the interrupted step's context is gone: the re-dispatch starts fresh
+        ts["blocked"] = {"kind": "exception", "summary": f"{tid}'s dispatch was lost mid-run: {summary} "
+                          f"({elapsed:.0f} in-flight minutes frozen out of the meter as dead clock).",
+                         "prior": prior, "step": step}
+        ts["status"] = "blocked"
+        streak = state.setdefault("lost_counts", {})
+        streak[tid] = streak.get(tid, 0) + 1
+        wf.save(state)
+        wf.event("lost", id=tid, summary=summary, dead_minutes=round(elapsed, 1))
+        tail = ""
+        cap = limit("max_lost_retries")
+        if streak[tid] >= cap:
+            # Break the re-dispatch loop the way the supervisor breaks an agent's: after
+            # `max_lost_retries` consecutive losses the task stays blocked for the human
+            # (three identical losses happened in one real run); the streak resets on the
+            # next real hand-back.
+            wf.event("lost_breaker", id=tid, losses=streak[tid])
+            tail = (f"\nLOSS BREAKER: {tid} has now been lost {streak[tid]} times in a row — it stays blocked "
+                    f"until the human decides (change the approach, change the machine, or skip). The streak "
+                    f"resets on its next real hand-back.")
+        return (f"{tid} marked lost — {elapsed:.0f} in-flight minutes are dead clock, out of the meter. "
+                f"Check the workspace for stranded edits before re-dispatching. To run it again: "
+                f"`tp resolve --task {tid} --action retry --answer \"<the human's words or 'manager: re-run'>\"` "
+                f"then `tp dispatch {tid}` (a fresh brief; the interrupted step's context is gone)."
+                + tail)
+
+
+def cmd_clock(wf: Workflow, tid: str, dead: float, note: str) -> str:
+    """Meter bookkeeping: move recorded wall-clock minutes of a finished hand-back into the
+    dead-clock bucket (backend stall billed 738 minutes to a 21-minute task in a real run)."""
+    with wf.locked():
+        state = wf.load()
+        if state["tasks"].get(tid) is None:
+            raise TPError(f"{tid} is not a task.")
+        if dead <= 0:
+            raise TPError("--dead-minutes must be a positive number of minutes.")
+        recorded = sum(e.get("minutes", 0.0) for e in wf.events()
+                       if e["kind"] == "record" and e.get("id") == tid)
+        frozen = min(dead, recorded)
+        if frozen <= 0:
+            raise TPError(f"{tid} has no recorded minutes to freeze.")
+        state["agent_minutes"] = round(agent_minutes(wf, state) - frozen, 1)
+        state["dead_minutes"] = round(dead_minutes(state) + frozen, 1)
+        wf.save(state)
+        wf.event("clock_correct", id=tid, dead_minutes=round(frozen, 1), note=note)
+        return (f"meter corrected: {frozen:.0f} of {tid}'s recorded minutes are now dead clock "
+                f"({note}). The headline, the budget warnings, and the dispatch gate read the "
+                f"corrected meter immediately.")
+
+
+def _keep_decision(holder: Dict[str, Any], question: str, answer: str, by: Optional[str] = None) -> None:
+    """Keep an answer with the question it settles on the task (or workflow) it settles, so every
+    later brief for that work quotes it; decisions.md alone never reaches an agent."""
+    holder.setdefault("decisions", []).append({"q": question, "a": answer, "by": by, "ts": now_iso()})
+
+
+def decision_lines(state: Dict[str, Any], tids: List[str]) -> List[str]:
+    """The decisions a brief for these tasks must carry: the workflow's, then each task's own."""
+    out = []
+    for prefix, holder in [("", state)] + [(f"{t}: ", state["tasks"].get(t, {})) for t in tids]:
+        for d in holder.get("decisions", []):
+            out.append(f"{prefix}{d['q']} → {d['a']}" + (f" ({d['by']})" if d.get("by") else ""))
+    return out
+
+
+def _release_tests_baseline(wf: Workflow, state: Dict[str, Any], tid: str, by: Optional[str]) -> bool:
+    """Release the frozen tests hash so the impl gate does not read the human-sanctioned
+    test-file edits as weakening. Mirrors the from_review re-baseline in add_fix: the
+    decision is recorded (here as a carried decision too), correctness stays gated by
+    test_cmd. Returns whether a baseline existed to release."""
+    ts = state["tasks"][tid]
+    had = ts.get("tests_hash") is not None
+    ts.pop("tests_hash", None)
+    ts.setdefault("decisions", []).append(
+        {"q": "tests baseline released (--rebaseline-tests)",
+         "a": "The human's decision authorizes editing this task's test files; the impl gate "
+              "will not flag them as tests changed. test_cmd still gates correctness.",
+         "by": by, "ts": now_iso()})
+    wf.event("rebaseline_tests", id=tid)
+    return had
+
+
+def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str, exception: bool = False,
+                noticed: Optional[int] = None, by: Optional[str] = None,
+                rebaseline_tests: bool = False) -> str:
+    if rebaseline_tests and not tid:
+        raise TPError("--rebaseline-tests applies to a task resolution (--task), not to "
+                      "--exception/--noticed/--review.")
+    if noticed is not None:
+        with wf.locked():
+            item = wf.noticed_resolve(noticed, answer)
+            if item is None:
+                raise TPError(f"no noticed item #{noticed}; `tp noticed` lists the open ones.")
+            wf.decision(f"resolve noticed #{noticed}", answer, who=by)
+            return f"noticed #{noticed} resolved — it no longer shows as open in submit output or the report."
+    if exception:
+        with wf.locked():
+            state = wf.load()
+            blocked = state.pop("blocked", None)
+            if blocked is None or blocked.get("kind") != "exception":
+                raise TPError("No workflow-level exception block to resolve (`tp exception --task` "
+                              "ones resolve per task).")
+            wf.decision("resolve workflow exception", answer, who=by)
+            _keep_decision(state, blocked["summary"], answer, by)
+            wf.save(state)
+            return "exception resolved — continue with `tp next`."
+    with wf.locked():
+        state = wf.load()
+        wf.decision(f"resolve {tid or 'workflow'} {action}", answer, who=by)
+        if not tid:
+            blocked = state.pop("blocked", None)
+            if blocked is None:
+                raise TPError("Nothing is blocked at workflow level; pass --task for a task or --review for a "
+                              "review session.")
+            _keep_decision(state, blocked["summary"], answer, by)
+            wf.save(state)
+            return "resolved — continue with `tp next`."
+        ts = state["tasks"].get(tid)
+        if ts is None:
+            raise TPError(f"{tid} is not a task.")
+        if rebaseline_tests and action not in ("answer", "retry"):
+            raise TPError(f"--rebaseline-tests applies to --action answer/retry, not {action}.")
+        if rebaseline_tests and action == "answer" and ts["status"] == "blocked" \
+                and ts["blocked"]["kind"] != "input":
+            raise TPError(f"--rebaseline-tests with --action answer applies to an input block; "
+                          f"{tid} is blocked on {ts['blocked']['kind']} (use --action retry).")
+        if action == "repin":
+            # A sanctioned test change (human-approved while the task is in flight) makes the
+            # recorded tests hash stale; the impl gate would then fail forever on "tests changed".
+            # Re-pin the hash to the current tests files instead of burning fix rounds.
+            if ts["status"] in DONE_STATES:
+                raise TPError(f"{tid} is already done; its tests hash is not re-pinned.")
+            _, scope, tasks = _loaded(wf, state)
+            if not ts.get("tests_hash"):
+                raise TPError(f"{tid} has no recorded tests hash; its tests step has not run.")
+            ts["tests_hash"] = _tests_hash(tasks[tid], scope)
+            _keep_decision(ts, "tests hash re-pinned after an approved test change", answer, by)
+            wf.save(state)
+            return (f"{tid}: tests hash re-pinned to the current tests files. Dispatch its "
+                    f"{ts.get('fixing') or 'impl'} step next: `tp dispatch {tid}`.")
+        if action == "reopen":
+            if ts["status"] not in DONE_STATES + ("blocked",):
+                raise TPError(f"{tid} is {ts['status']}; reopen applies to accepted, skipped, or blocked tasks.")
+            _, scope, tasks = _loaded(wf, state)
+            ts["extra_rounds"] += 1
+            ts.update(status="needs_fix", fixing=_authoring_step(tasks[tid], scope), blocked=None,
+                      findings=[f"Reopened by the human: {answer}"])
+            _keep_decision(ts, "task reopened", answer, by)
+            state.pop("final_failed", None)
+            wf.save(state)
+            return f"{tid} reopened for a fix round. `tp next`."
+        if ts["status"] != "blocked":
+            raise TPError(f"{tid} is not blocked (status {ts['status']}).")
+        kind = ts["blocked"]["kind"]
+        released = False
+        if action == "skip":
+            ts.update(status="skipped", blocked=None, note=answer)
+        elif action == "retry" and kind == "rounds":
+            _keep_decision(ts, ts["blocked"]["summary"], answer, by)
+            ts["extra_rounds"] += 1
+            ts.update(status="needs_fix", blocked=None)
+            released = _release_tests_baseline(wf, state, tid, by) if rebaseline_tests else False
+        elif action == "answer" and kind == "input":
+            _keep_decision(ts, ts["blocked"]["summary"], answer, by)
+            _slots(state)
+            step = ts["blocked"]["step"]
+            state["in_flight"][tid] = {"step": step, "since": now_iso(), "snap": ts["blocked"]["snap"],
+                                       "agent": None, "concurrent": list(state["in_flight"])}
+            ts.update(status="in_flight", blocked=None)
+            released = _release_tests_baseline(wf, state, tid, by) if rebaseline_tests else False
+            result = wf.run_dir(tid) / f"result-{step}.json"
+            if result.exists():
+                result.unlink()
+            msg = (f"Answer: {answer} — continue the step yourself with the same brief and result path, "
+                   f"rewriting {result}.")
+            wf.save(state)
+            tail = "\ntests baseline released (--rebaseline-tests): the impl gate will not flag the " \
+                "sanctioned test-file edits; test_cmd still gates correctness." if released else ""
+            return f"{tid} back in flight.\n{msg}\nthen: tp record {tid}{tail}"
+        elif action == "answer" and kind == "exception":
+            _keep_decision(ts, ts["blocked"]["summary"], answer, by)
+            ts.update(status=ts["blocked"]["prior"], blocked=None)
+        elif action == "retry" and kind == "exception":
+            # A task-blocked exception over a stale check or count usually means: run the
+            # round again with the human's correction in hand. A `tp lost` block re-runs the
+            # step it was flying (fresh brief — the session is gone); a lost review re-runs
+            # as a review.
+            _keep_decision(ts, ts["blocked"]["summary"], answer, by)
+            if ts["blocked"].get("step") == "review" and ts["blocked"].get("prior") == "needs_review":
+                ts.update(status="needs_review", blocked=None)
+            else:
+                ts["extra_rounds"] += 1
+                ts.update(status="needs_fix",
+                          fixing=ts["blocked"].get("step") or ts["blocked"].get("prior") or ts["fixing"],
+                          blocked=None)
+            released = _release_tests_baseline(wf, state, tid, by) if rebaseline_tests else False
+        else:
+            raise TPError(f"action {action!r} does not apply to a {kind} block; use "
+                          + {"rounds": "retry or skip", "input": "answer or skip",
+                             "exception": "answer, retry, or skip"}[kind] + ".")
+        wf.save(state)
+        tail = " The frozen tests baseline is released (--rebaseline-tests); test_cmd still " \
+            "gates correctness." if released else ""
+        return f"{tid} resolved ({action}). `tp next`.{tail}"
+
+
+# --- final ----------------------------------------------------------------------------------
+
+def _baseline_key(failure: str) -> str:
+    """What identifies a final-check failure across runs: which check failed, not the exact
+    tail of its output (command output shifts run to run; the check name does not)."""
+    if failure.startswith("final check "):
+        return "check:" + failure.split()[2]
+    if failure.startswith("docs-all "):
+        return "docs-all:" + failure.split()[1].rstrip(":")
+    return failure  # read-only-workspace changes and anything else: never matches a baseline
+
+
+def _run_final_checks(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any],
+                      scope: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """Run the plan's final checks; returns (failures, result lines). Read-only-workspace
+    changes are failures too and are appended by the caller when wanted."""
+    failures: List[str] = []
+    results: List[str] = []
+    for name in plan.get("final_checks", []):
+        log = wf.meta / f"final-{name}.log"
+        if name == "docs-all":
+            for wname, w in scopemod.workspaces(scope).items():
+                if w["mode"] != "write":
+                    continue
+                root = Path(w["path"])
+                index = next((root / n for n in ("index.md", "README.md") if (root / n).exists()), None)
+                docs = [d for d in docscheck.md_files([root]) if wf.root not in d.parents]
+                # README.md is an entry page, not a nav index: a code repo's notes and
+                # ADRs are legitimately unlinked from it. Only a deliberate index.md
+                # makes reachability blocking; against a README orphans warn.
+                errors, warnings, stats = docscheck.check(
+                    docs, _repos(scope), index,
+                    root_warn=index is not None and index.name != "index.md")
+                log.write_text("\n".join(errors + [f"WARN {w}" for w in warnings]) or f"ok: {stats}")
+                results.append(f"docs-all {wname}: {'ok' if not errors else f'{len(errors)} problems'}, "
+                               f"{len(warnings)} doubtful citations (log {log}) {stats}")
+                failures += [f"docs-all {wname}: {e}" for e in errors]
+        else:
+            spec = plan["checks"][name]
+            raw = spec.get("cwd")
+            # A workspace name is the normal form; an absolute directory is allowed too
+            # (a check can pin a folder that is no workspace at all). The task-check path
+            # already took absolutes; final checks must agree or a legal plan crashes final.
+            if raw and Path(raw).is_absolute():
+                cwd = Path(raw)
+            elif raw:
+                cwd = _ws(scope, raw)
+            else:
+                cwd = Path(next(w["path"] for w in scopemod.workspaces(scope).values()
+                                if w["mode"] == "write"))
+            ok, tail = _run_cmd(_expand_cmd(spec["cmd"], None, scope), cwd, log)
+            results.append(f"{name}: {'ok' if ok else 'failed'}")
+            if not ok:
+                failures.append(f"final check {name} failed (log {log}): {tail}")
+    return failures, results
+
+
+def cmd_baseline(wf: Workflow) -> str:
+    """Record which final checks already fail before this run touches anything (sandbox
+    socket bans, machine quirks, pre-existing dead links). `tp final` then reports them as
+    pre-existing instead of blocking on breakage the pipeline did not cause. Run it right
+    after approval, before the first dispatch; run it again any time with the human's OK."""
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] != "EXECUTING":
+            raise TPError(f"baseline runs while EXECUTING; the workflow is {state['phase']}.")
+        plan, scope, _ = _loaded(wf, state)
+        if state["in_flight"]:
+            raise TPError("agents are in flight — record them before baselining.")
+        failures, results = _run_final_checks(wf, state, plan, scope)
+        keys = sorted({_baseline_key(f) for f in failures})
+        state["final_baseline"] = keys
+        wf.save(state)
+        wf.event("baseline", failures=len(keys))
+        head = f"baseline recorded: {len(keys)} final-check failure(s) pre-date this run." if keys \
+            else "baseline recorded: every final check passes on this machine right now."
+        lines = [head] + [f"  - {r}" for r in results]
+        if keys:
+            lines += [f"  - keyed: {k}" for k in keys]
+        lines.append("`tp final` will report these as pre-existing instead of failing the run.")
+        return "\n".join(lines)
+
+
+# --- closeout --------------------------------------------------------------------------------
+
+CLOSEOUT_CLASSES = ("deferred", "followup", "observation")
+
+
+def _noticed_text(raw: str) -> str:
+    """A noticed line minus its `(source, ×N)` marker, normalized for stable keys."""
+    m = re.match(r"\([^)]*\) (.*)$", raw, re.S)
+    return " ".join((m.group(1) if m else raw).split())
+
+
+def _closeout_unclassified(wf: Workflow, state: Dict[str, Any]) -> int:
+    """How many open noticed items have no classification yet."""
+    items = wf.noticed_items()
+    if not items:
+        return 0
+    cls = state.get("closeout", {}).get("items", {})
+    return len(items) - len({_noticed_text(r) for r in items} & set(cls))
+
+
+def _closeout_pending(wf: Workflow, state: Dict[str, Any]) -> Optional[str]:
+    """What still blocks the report, or None: unclassified noticed items, or deferred /
+    follow-up work without the human's recorded answer."""
+    items = wf.noticed_items()
+    if not items:
+        return None
+    unclassified = _closeout_unclassified(wf, state)
+    if unclassified:
+        return f"{unclassified} noticed item(s) unclassified"
+    if any(v.get("class") in ("deferred", "followup") for v in state.get("closeout", {}).get("items", {}).values()) \
+            and not state.get("closeout", {}).get("decision"):
+        return "deferred or follow-up work awaits the human's decision"
+    return None
+
+
+def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = None,
+                 note: Optional[str] = None, decide: bool = False, answer: Optional[str] = None,
+                 ask: bool = False) -> str:
+    """The closeout gate between the last accept and the report: classify every noticed item,
+    and put the deferred or follow-up work to the human once, verbatim recorded. A real run
+    silently deferred 20 ticket-scope gaps this way; this makes the deferral a decision. The
+    note on a deferred or follow-up item is what the human reads when deciding, so it must
+    state the issue and its consequence in plain language — never bare file paths."""
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] != "EXECUTING":
+            raise TPError(f"closeout applies while EXECUTING; the workflow is {state['phase']}.")
+        items = wf.noticed_items()
+        if ask:
+            marks = state.get("closeout", {}).get("items", {})
+            if state.get("closeout", {}).get("decision"):
+                raise TPError("the human's decision is already recorded — `tp final` writes the report.")
+            unclassified = _closeout_unclassified(wf, state)
+            if unclassified:
+                raise TPError(f"{unclassified} noticed item(s) unclassified — classify them first (`tp closeout`).")
+            chosen = sorted(((text, e) for text, e in marks.items()
+                             if e.get("class") in ("deferred", "followup")),
+                            key=lambda kv: kv[1]["class"])
+            if not chosen:
+                raise TPError("nothing is deferred or a follow-up, so no human decision is needed — `tp final`.")
+            out = [f"DEFERRAL DECISION — {len(chosen)} noticed item(s) are ticket-scope work this run did not "
+                   "do. How should they be handled — accept the deferral, file follow-up tasks, or extend "
+                   "the run?", ""]
+            for i, (text, e) in enumerate(chosen, 1):
+                out.append(f"{i}. {text}")
+                out.append(f"   Why it matters: {e.get('note')}")
+            out += ["", "Ask this with `question` (record the answer verbatim):",
+                    "tp closeout --decide --answer \"<the human's words>\""]
+            return "\n".join(out)
+        if decide:
+            unclassified = _closeout_unclassified(wf, state)
+            if unclassified:
+                raise TPError(f"{unclassified} noticed item(s) unclassified — classify them first (`tp closeout`).")
+            if not any(v.get("class") in ("deferred", "followup")
+                       for v in state.get("closeout", {}).get("items", {}).values()):
+                raise TPError("nothing was deferred or made a follow-up; no human decision is needed — "
+                              "run `tp final`.")
+            if not answer:
+                raise TPError("--decide needs --answer \"<the human's words>\".")
+            state.setdefault("closeout", {})["decision"] = {"ts": now_iso(), "answer": answer}
+            wf.save(state)
+            wf.decision("closeout: deferred and follow-up work", answer, who="human")
+            wf.event("closeout_decision")
+            return "human decision recorded. `tp final` writes the report."
+        if item is not None:
+            if cls not in CLOSEOUT_CLASSES:
+                raise TPError(f"--class must be one of {', '.join(CLOSEOUT_CLASSES)}.")
+            if cls in ("deferred", "followup") and (not note or len(note.strip()) < 12):
+                raise TPError(f"--class {cls} needs --note in plain language: what the issue is and what "
+                              "consequence leaving it has (the note is what the human reads when deciding) — "
+                              "never a bare file path or ticket shorthand.")
+            if not 1 <= item <= len(items):
+                raise TPError(f"no noticed item #{item} ({len(items)} open) — `tp closeout` lists them.")
+            text = _noticed_text(items[item - 1])
+            entry = {"class": cls}
+            if note:
+                entry["note"] = note
+            state.setdefault("closeout", {}).setdefault("items", {})[text] = entry
+            wf.save(state)
+            wf.event("closeout_class", cls=cls)
+            pending = _closeout_pending(wf, state)
+            tail = ("`tp closeout --ask` renders the decision brief; ask it with `question`, then "
+                    "`tp closeout --decide --answer \"<the human's words>\"`."
+                    if pending == "deferred or follow-up work awaits the human's decision"
+                    else ("`tp final` writes the report." if pending is None else "`tp closeout` continues."))
+            return f"item #{item} classified {cls}" + (f" — {note}" if note else "") + f". {tail}"
+        if not items:
+            return "nothing was noticed outside the plan — `tp final` writes the report."
+        marks = state.get("closeout", {}).get("items", {})
+        out = [f"CLOSEOUT — {len(items)} noticed item(s), "
+               f"{sum(1 for r in items if _noticed_text(r) in marks)} classified:"]
+        for n, raw in enumerate(items, 1):
+            text = _noticed_text(raw)
+            c = marks.get(text, {}).get("class", "UNCLASSIFIED")
+            extra = marks.get(text, {}).get("note")
+            out.append(f"  {n}. [{c}]" + (f" ({extra})" if extra and c != "UNCLASSIFIED" else "") + f" {raw}")
+        out += ["Classify each: tp closeout --item N --class deferred|followup|observation [--note \"...\"]",
+                "Then, if anything is deferred or a follow-up, ask the human once (accept the deferral, file "
+                "follow-up tasks, or extend the run) and record it:",
+                "  tp closeout --decide --answer \"<the human's words>\""]
+        return "\n".join(out)
+
+
+def cmd_final(wf: Workflow) -> str:
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] != "EXECUTING":
+            raise TPError(f"final runs while EXECUTING; the workflow is {state['phase']}.")
+        plan, scope, tasks = _loaded(wf, state)
+        open_ = [f"{t} ({ts['status']})" for t, ts in state["tasks"].items() if ts["status"] not in DONE_STATES]
+        if open_ or state["in_flight"]:
+            raise TPError(f"open tasks: {', '.join(open_ or list(state['in_flight']))}.")
+        reviews_open = _review().open_sessions(state)
+        if reviews_open:
+            raise TPError(f"review sessions still open: {', '.join(reviews_open)} — `tp next`.")
+        pending = _closeout_pending(wf, state)
+        if pending:
+            raise TPError(f"the closeout gate is open: {pending} — classify the noticed items "
+                          "(`tp closeout --item N --class deferred|followup|observation --note \"...\"`), "
+                          "render the decision (`tp closeout --ask`), and record the human's answer "
+                          "(`tp closeout --decide --answer \"...\"`).")
+        baseline = set(state.get("final_baseline", []))
+        failures, results = _run_final_checks(wf, state, plan, scope)
+        failures += _readonly_changes(wf, state, scope)
+        if failures:
+            pre = [f for f in failures if _baseline_key(f) in baseline]
+            fresh = [f for f in failures if _baseline_key(f) not in baseline]
+            if pre and not fresh:
+                state.pop("final_failed", None)
+                wf.save(state)
+                raise TPError(*[f"{f} [pre-existing: this check failed at the recorded baseline too]" for f in pre],
+                              "Every failure above predates this run (recorded by `tp baseline`). Fix path: ask "
+                              "the human whether to fix the pre-existing breakage in this run or leave it.")
+            state["final_failed"] = failures[:50]
+            wf.save(state)
+            raise TPError(*failures[:40], "Fix path: `tp exception --summary ...` and ask the human, or "
+                          "`tp resolve --task T## --action reopen --answer ...` if the human already decided.")
+        state["phase"] = "DONE"
+        state["done"] = now_iso()
+        state.pop("final_failed", None)
+        wf.save(state)
+        (wf.root / "report.md").write_text(_report_md(wf, state, plan, scope, results))
+        wf.event("done")
+        return f"DONE — report: {wf.root / 'report.md'}. Present it to the human (answer-first)."
+
+
+def _task_rows(wf: Workflow, state: Dict[str, Any], tasks: Dict[str, Dict[str, Any]]) -> List[str]:
+    rows = ["| Task | Title | Status | Min | Est | Fix rounds | Reviews |", "|---|---|---|---|---|---|---|"]
+    # per-task agent-minutes from the record events (wall-clock spans idle time between messages)
+    per_task: Dict[str, float] = {}
+    for e in wf.events():
+        if e["kind"] == "record" and "minutes" in e:
+            per_task[e.get("id", "?")] = per_task.get(e.get("id", "?"), 0.0) + e["minutes"]
+    for tid, ts in state["tasks"].items():
+        mins = per_task.get(tid, 0.0)
+        rows.append(f"| {tid} | {tasks[tid]['title'] if tid in tasks else '?'} | {ts['status']} | {mins:.0f} | "
+                    f"{tasks.get(tid, {}).get('estimate_min', '?')} | {ts['round']} | {ts['reviews']} |")
+    return rows
+
+
+def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any],
+               results: List[str]) -> str:
+    tasks = {t["id"]: t for t in plan["tasks"]}
+    spent = agent_minutes(wf, state)
+    budget = scope.get("budget_minutes")
+    out = [f"# Report — {plan['title']}", "",
+           f"All {len(tasks)} tasks finished: {sum(ts['status'] == 'accepted' for ts in state['tasks'].values())} "
+           f"accepted, {sum(ts['status'] == 'skipped' for ts in state['tasks'].values())} skipped by the human. "
+           f"Agent-minutes spent: {spent:.0f}"
+           + (f", against a budget of {budget}." if budget else "."), "", "## Deliverables", ""]
+    for d in scope["deliverables"]:
+        served = [t for t in tasks.values() if d["id"] in t["serves"]]
+        out.append(f"- {d['id']} — {d['what']}: " + ", ".join(
+            f"{t['id']} (`{', '.join(t['paths'])}`)" for t in served))
+    out += ["", "## Tasks", ""] + _task_rows(wf, state, tasks)
+    notes = [f"- {tid}: {ts['note']}" for tid, ts in state["tasks"].items() if ts.get("note")]
+    if notes:
+        out += ["", "## Manager fact-check notes", ""] + notes
+    review_lines = _review().report_lines(state)
+    if review_lines:
+        out += ["", "## Review", ""] + review_lines
+    research = _research().summary(state, scope)
+    if research:
+        out += ["", "## Research", "", f"- {research}"]
+    out += ["", "## Final checks", ""] + ([f"- {r}" for r in results] or ["- none planned"])
+    noticed = wf.noticed_items()
+    if noticed:
+        marks = state.get("closeout", {}).get("items", {})
+        groups: Dict[str, List[str]] = {"deferred": [], "followup": [], "observation": [], "unclassified": []}
+        for raw in noticed:
+            m = re.match(r"\(([^)]*)\) (.*)$", raw, re.S)
+            meta = m.group(1) if m else ""
+            text = _noticed_text(raw)
+            e = marks.get(text, {})
+            line = f"- ({meta}) {text}" + (f" — {e['note']}" if e.get("note") else "")
+            groups[e.get("class", "unclassified")].append(line)
+        titles = {"deferred": "Deferred with the human's OK (decision in `decisions.md`)",
+                  "followup": "Follow-ups the run did not do (decision in `decisions.md`)",
+                  "observation": "Observations — no action taken",
+                  "unclassified": "Noticed, unresolved"}
+        for key, lines_ in groups.items():
+            if lines_:
+                out += ["", f"## {titles[key]}", ""] + lines_
+    out += ["", "Human decisions are in `decisions.md`; every brief, result, review, and check log is under `runs/`."]
+    return "\n".join(out) + "\n"
+
+
+def cmd_report(wf: Workflow) -> str:
+    state = wf.load()
+    planning = minutes_since(state["created"], state.get("approved"))
+    out = [f"planning: {planning:.0f} min (start → approval)" + ("" if state.get("approved") else ", still open")]
+    if state.get("approved"):
+        out.append(f"execution: {minutes_since(state['approved'], state.get('done')):.0f} min")
+    plan_tasks: Dict[str, Dict[str, Any]] = {}
+    if wf.plan_json.exists():
+        plan_tasks = {t["id"]: t for t in planmod.load_plan(wf)["tasks"]}
+    out += _task_rows(wf, state, plan_tasks)
+    steps: Dict[str, List[float]] = {}
+    for e in wf.events():
+        if e["kind"] == "record" and "minutes" in e:
+            steps.setdefault(e.get("step", "?"), []).append(e["minutes"])
+    for step, mins in steps.items():
+        out.append(f"{step}: {len(mins)} hand-backs, mean {sum(mins) / len(mins):.1f} min, max {max(mins):.1f} min")
+    return "\n".join(out)
+
+
+def cmd_status(wf: Workflow, as_json: bool) -> str:
+    state = wf.load()
+    if as_json:
+        return json.dumps({"phase": state["phase"], "title": state["title"],
+                           "tasks": {t: v["status"] for t, v in state["tasks"].items()},
+                           "in_flight": state["in_flight"], "blocked": state.get("blocked"),
+                           "elapsed_min": round(minutes_since(state["created"]), 1)})
+    out = [f"{state['title']} — {_headline(wf, state)}", f"dir: {wf.root}"]
+    by: Dict[str, List[str]] = {}
+    for tid, ts in state["tasks"].items():
+        by.setdefault(ts["status"], []).append(tid)
+    for status, ids in by.items():
+        out.append(f"  {status}: {', '.join(ids[:20])}" + (" …" if len(ids) > 20 else ""))
+    if state.get("blocked"):
+        out.append(f"BLOCKED: {state['blocked']['summary']}")
+    if state.get("halt"):
+        out.append(f"HALT {'complete' if state['halt'].get('halted') else 'requested'}: {state['halt']['reason']}")
+    research = state.get("recon", {})
+    if research:
+        out.append("  research: " + ", ".join(f"{rid} {r['status']}" for rid, r in list(research.items())[:12]))
+    reviews = state.get("reviews", {})
+    if reviews:
+        out.append("  reviews: " + ", ".join(f"{sid} {s['status']}" for sid, s in reviews.items()))
+    out.append(cmd_next(wf, False).splitlines()[-1])
+    return "\n".join(out[:24])
+
+
+# --- halt and resume ------------------------------------------------------------------------
+
+def _halt_record(wf: Workflow, state: Dict[str, Any]) -> str:
+    """Once nothing is in flight after a halt request: record where the work stopped."""
+    halt = state["halt"]
+    halt["halted"] = halt.get("halted") or now_iso()
+    by_status: Dict[str, List[str]] = {}
+    for tid, ts in state["tasks"].items():
+        by_status.setdefault(ts["status"], []).append(tid)
+    record = {
+        "requested": halt["requested"], "halted": halt["halted"], "reason": halt["reason"], "phase": state["phase"],
+        "elapsed_min": round(minutes_since(state["created"]), 1), "agent_minutes": round(agent_minutes(wf, state), 1),
+        "budget_minutes": state.get("budget_minutes"),
+        "tasks": by_status,
+        "research": {rid: i["status"] for rid, i in state.get("recon", {}).items()},
+        "reviews": {sid: s["status"] for sid, s in state.get("reviews", {}).items()},
+        "next_on_resume": [{k: a[k] for k in ("action", "id", "step", "agent") if a.get(k)}
+                           for a in actions(wf, state, ignore_halt=True)],
+    }
+    (wf.root / "halt.json").write_text(json.dumps(record, indent=1))
+    wf.save(state)
+    wf.event("halted")
+    counts = ", ".join(f"{len(v)} {k}" for k, v in by_status.items())
+    nxt = "; ".join(f"{a['action']} {a.get('id', '')}".strip() for a in record["next_on_resume"][:6])
+    return (f"HALTED at a clean point — nothing in flight. Recorded in {wf.root / 'halt.json'}.\n"
+            f"{state['phase']}{' · ' + counts if counts else ''}. On resume: {nxt or 'nothing pending'}.\n"
+            "Tell the human; `tp resume --answer \"<their words>\"` continues.")
+
+
+def after_record(wf: Workflow, out: str) -> str:
+    """Called after every recorded hand-back: completes a pending halt once the last agent is in."""
+    state = wf.load()
+    if state.get("halt") and not state["in_flight"] and not state["halt"].get("halted"):
+        return out + "\n" + _halt_record(wf, state)
+    if state.get("halt") and state["in_flight"]:
+        return out + f"\nHalting: still waiting for {', '.join(state['in_flight'])}."
+    return out
+
+
+def cmd_halt(wf: Workflow, reason: str) -> str:
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] == "DONE":
+            raise TPError("The workflow is DONE; there is nothing to halt.")
+        if state.get("halt"):
+            return f"Already halting (requested {state['halt']['requested']}). `tp next` shows what is left."
+        state["halt"] = {"requested": now_iso(), "reason": reason, "halted": None}
+        wf.save(state)
+        wf.decision("halt", reason)
+        wf.event("halt_requested")
+        if not state["in_flight"]:
+            return _halt_record(wf, state)
+        flying = ", ".join(f"{k} ({v['step']})" for k, v in state["in_flight"].items())
+        return (f"Halt requested. Nothing new will start. Let the agents in flight finish their current step — "
+                f"{flying} — and record each one as it hands back; the halt completes when the last is in.")
+
+
+def cmd_resume(wf: Workflow, answer: str) -> str:
+    with wf.locked():
+        state = wf.load()
+        halt = state.pop("halt", None)
+        if halt is None:
+            raise TPError("Nothing is halted.")
+        state.setdefault("halts", []).append(dict(halt, resumed=now_iso()))
+        wf.save(state)
+        wf.decision("resume", answer)
+        wf.event("resume")
+        return "resumed. Run `tp next`."
+
+
+def add_fix(wf: Workflow, state: Dict[str, Any], tid: str, findings: List[str], fixing: str,
+            from_review: bool = False) -> str:
+    """Send findings from outside the task's own steps (review triage, a reopen) to its author.
+    They join a fix round that has not been dispatched yet; otherwise they open a round of their
+    own that does not count against the task's cap. Refused while the task is in flight, not yet
+    authored, or blocked: rewriting its state then would pull it from under the agent or skip the
+    human."""
+    ts = state["tasks"][tid]
+    if tid in state["in_flight"]:
+        raise TPError(f"{tid} is in flight ({state['in_flight'][tid]['step']}); send it more fixes once it has "
+                      "handed back and been recorded.")
+    if ts["status"] in ("pending", "needs_impl", "blocked"):
+        raise TPError(f"{tid} is {ts['status']}; it takes fixes once it is authored and not waiting on the human.")
+    if from_review:
+        # A reviewer-accepted finding may point at the tests themselves (e.g. a guard whose
+        # assertion can never fire). Re-baseline the frozen tests hash so the sanctioned
+        # strengthening is not read as "tests weakened" at the impl gate; correctness stays
+        # gated by test_cmd and the same reviewer's verification session.
+        ts.pop("tests_hash", None)
+        ts["fix_from_review"] = True
+    if ts["status"] == "needs_fix":
+        if ts.get("fixing") != fixing:
+            raise TPError(f"{tid}'s waiting fix round is for its {ts.get('fixing')} step; send these after it.")
+        ts["findings"] = list(ts.get("findings", [])) + findings
+        (wf.run_dir(tid) / f"findings-{ts['round']}.json").write_text(json.dumps(ts["findings"], indent=1))
+        return "\n".join([f"{tid}: added to fix round {ts['round']}, not dispatched yet:"]
+                         + [f"  - {f}" for f in findings])
+    ts["extra_rounds"] = ts.get("extra_rounds", 0) + 1
+    return _fail(wf, ts, tid, findings, fixing=fixing)

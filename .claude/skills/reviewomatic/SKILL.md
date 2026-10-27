@@ -181,7 +181,26 @@ Let **code present** mean `G` or `C` is non-empty.
 
 ## Phase 3: Dispatch
 
-Invoke each chosen skill with the `Skill` tool. **Always forward the mode, PR reference, and flags explicitly** — including `--max-agents=N` when given, which caps each downstream skill's sub-agents (`--max-agents=0`: none) so the downstream skill runs without re-asking Phase 0 or re-discovering the PR. If two skills are chosen, run them **sequentially** (each fans out into its own sub-agents — running both at once overloads the context).
+Invoke each chosen skill with the `Skill` tool. **Always forward the mode, PR reference, and flags explicitly** — including `--max-agents=N` when given, which caps each downstream skill's sub-agents (`--max-agents=0`: none) so the downstream skill runs without re-asking Phase 0 or re-discovering the PR. If two skills are chosen, run them **together** — see *Docs and code together* below.
+
+### Docs and code together: launch both, then wait
+
+A reviewer's time goes almost entirely into its background sub-agents, so launch both fan-outs before waiting on either:
+
+1. Invoke the code reviewer with its forwarded args plus the rider `running alongside doc-reviewomatic: launch your sub-agents, then return to the router before waiting on them`. It gathers the change, writes its brief, starts its baseline checks, and launches its sub-agents in the background.
+2. Invoke `doc-reviewomatic` the same way, with the rider `running alongside <code reviewer>: launch your sub-agents, then return to the router before waiting on them`.
+3. When one reviewer's sub-agents have all reported, finish that reviewer: its consolidation and report (its Phase 3) and, in `review` mode, its posting gate (its Phase 4). Finish one reviewer's report and gate before starting the other's, so the two never interleave.
+
+Why: in past mixed reviews the doc review ran after the code review and added 6.5–11.5 minutes each time, though its sub-agents (6–10 minutes) would have finished inside the code review's wait.
+
+Riders combine after the single `--` separator, e.g. a pinned local scope plus the concurrency rider:
+
+```
+Skill: comp-goreviewomatic
+  args: "local --confidence=80 -- scope is fixed to the branch changes (git diff main...HEAD); do not ask about scope, and do not review unstaged or staged changes; running alongside doc-reviewomatic: launch your sub-agents, then return to the router before waiting on them"
+```
+
+Resolve mode is unaffected: it starts no sub-agents, so its dispatches stay one after the other.
 
 ### Local mode
 
@@ -192,7 +211,7 @@ Skill: comp-goreviewomatic
   args: "local --confidence=80 -- scope is fixed to the branch changes (git diff main...HEAD); do not ask about scope, and do not review unstaged or staged changes"
 ```
 
-For a docs-and-code local run, dispatch `doc-reviewomatic` and the code reviewer in turn, each carrying the same pinned-scope rider.
+For a docs-and-code local run, dispatch the code reviewer and `doc-reviewomatic` together (see *Docs and code together*), each carrying the same pinned-scope rider.
 
 ### PR Review mode
 
@@ -203,7 +222,7 @@ Skill: comp-reviewomatic
   args: "review 123 --auto-comment --confidence=85"
 ```
 
-**Mixed docs-and-code PR:** `doc-reviewomatic` self-filters to doc files, but the code reviewers do **not** skip docs. To avoid both skills commenting on the same `.md`, add a free-text rider to the **code reviewer's** `args` telling it to skip docs; dispatch `doc-reviewomatic` normally.
+**Mixed docs-and-code PR:** `doc-reviewomatic` self-filters to doc files, but the code reviewers do **not** skip docs. To avoid both skills commenting on the same `.md`, add a free-text rider to the **code reviewer's** `args` telling it to skip docs; dispatch `doc-reviewomatic` normally. Launch both together (see *Docs and code together*).
 
 ```
 Skill: comp-reviewomatic
@@ -249,6 +268,7 @@ The router's scan only **finds** review-ready PRs; it does not review them and *
 5. **Forward `mode`, the explicit PR number, `--auto-comment`, and `--confidence=N` verbatim.** Never forward `mode scan` — dispatch scanned PRs as `mode review`.
 6. **Pin local scope as a free-text rider in `args`** (it isn't a downstream flag; downstream interpolates `$ARGUMENTS` verbatim). Use the same channel for the mixed-PR "skip docs" instruction to a code reviewer.
 7. **Resolve mode routes by marker census**, not by file type.
+8. **Docs and code reviewers run together.** Launch both fan-outs before waiting on either, then finish each reviewer's report and posting gate in turn (see *Docs and code together*).
 
 ---
 

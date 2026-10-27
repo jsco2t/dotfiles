@@ -210,8 +210,8 @@ class ReviewPlanTest(unittest.TestCase):
                                                   {"id": "B2", "tasks": ["T03", "T04"]}])
         self.check(plan, **FINAL_REVIEW)
         md = (self.h.wf / "plan.md").read_text()
-        self.assertIn("2 batches × 1 reviewer = 2 review sessions", md)
-        self.assertIn("after every task is accepted", md)
+        self.assertIn("2 review sessions — B1/doc-reviewer; B2/doc-reviewer", md)
+        self.assertIn("document review once the code reviews are done", md)
 
 
 class ApprovalTest(unittest.TestCase):

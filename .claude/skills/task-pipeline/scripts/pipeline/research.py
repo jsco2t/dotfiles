@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import briefs
+from . import briefs, snapshot
 from . import scope as scopemod
 from .common import TPError, Workflow, limit, load_json, minutes_since, now_iso, words
 
@@ -24,6 +24,16 @@ _CONTENT = [
 _WHOLE_FLOW = re.compile(r"\bend[- ]to[- ]end\b", re.I)
 # `investigate` may trace one named flow end to end; `map` and `requirements` may not.
 BANNED = {"map": _CONTENT + [_WHOLE_FLOW], "requirements": _CONTENT + [_WHOLE_FLOW], "investigate": _CONTENT}
+
+
+def _porcelain(scope: Dict[str, Any]) -> Dict[str, List[str]]:
+    """`git status --porcelain` per workspace under git: what a research agent must leave as it was."""
+    out = {}
+    for name, w in scopemod.workspaces(scope).items():
+        status = snapshot.git_porcelain(Path(w["path"]))
+        if status is not None:
+            out[name] = status.splitlines()
+    return out
 
 
 def items(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -79,7 +89,7 @@ def _find_followup(state: Dict[str, Any], ref: str) -> Dict[str, Any]:
 
 
 def cmd_add(wf: Workflow, rid: str, agent: str, purpose: Optional[str], questions_file: Path, done_when: str,
-            minutes: Optional[int], from_ref: Optional[str]) -> str:
+            minutes: Optional[int], from_ref: Optional[str], model: Optional[str] = None) -> str:
     with wf.locked():
         state = wf.load()
         if state["phase"] != "PLANNING":
@@ -120,7 +130,8 @@ def cmd_add(wf: Workflow, rid: str, agent: str, purpose: Optional[str], question
         if errs:
             raise TPError(*errs)
         items(state)[rid] = {"agent": agent, "purpose": purpose, "questions": questions, "done_when": done_when,
-                             "minutes": box, "status": "pending", "from": from_ref}
+                             "minutes": box, "status": "pending", "from": from_ref,
+                             **({"model": model} if model else {})}
         if from_ref:
             f = _find_followup(state, from_ref)
             f.update(status="pursued", by=rid)
@@ -190,10 +201,11 @@ def dispatch(wf: Workflow, state: Dict[str, Any], rid: str, slots) -> str:
     surveys = sorted((wf.root / "survey").glob("*.json")) if (wf.root / "survey").exists() else []
     brief.write_text(briefs.research(rid, item, wf.root / "scope.md", surveys, result))
     item["status"] = "in_flight"
-    state["in_flight"][rid] = {"step": "research", "since": now_iso(), "agent": item["agent"], "concurrent": []}
+    state["in_flight"][rid] = {"step": "research", "since": now_iso(), "agent": item["agent"], "concurrent": [],
+                               "porcelain": _porcelain(scopemod.load_scope(wf))}
     wf.save(state)
     wf.event("dispatch", id=rid, step="research", agent=item["agent"])
-    call = briefs.dispatch_line(item["agent"], f"{rid} research", briefs.prompt(brief, result), None, None)
+    call = briefs.dispatch_line(item["agent"], f"{rid} research", briefs.prompt(brief, result), None, item.get("model"))
     return (f"DISPATCH {rid} · research ({item.get('purpose', 'map')}) · {item['agent']} · "
             f"box {item.get('minutes', limit('research_item_minutes'))} min\nbrief: {brief}\nsend: {call}\n"
             f"then: tp record {rid}")
@@ -228,6 +240,14 @@ def record(wf: Workflow, state: Dict[str, Any], rid: str) -> str:
     errs = _validate(data)
     if errs:
         raise TPError(*[f"{path}: {e}" for e in errs])
+    before = state["in_flight"][rid].get("porcelain") or {}
+    now = _porcelain(scopemod.load_scope(wf))
+    edits = [f"{name}: {ln[3:]}" for name, lines in now.items() if name in before
+             for ln in lines if ln not in before[name]]
+    if edits:
+        raise TPError(f"{rid}: workspace files changed while it ran ({', '.join(edits[:8])}). Research reads and never "
+                      "writes a workspace: restore them (a researcher's scratch work belongs under $TMPDIR), then "
+                      "record again.")
     minutes = minutes_since(state["in_flight"][rid]["since"])
     del state["in_flight"][rid]
     item["followups"] = [{"id": f"{rid}.F{i}", "question": f["question"], "why": f["why"],

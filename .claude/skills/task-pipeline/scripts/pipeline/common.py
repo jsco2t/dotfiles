@@ -20,6 +20,36 @@ TP_SCRIPT = SKILL / "scripts" / "tp.py"
 PHASES = ("SCOPING", "PLANNING", "AWAITING_APPROVAL", "EXECUTING", "DONE")
 # A noticed.md item: `- (<source>[, ×<repeats>]) <text>`.
 _NOTICED_LINE = re.compile(r"- \((.*?)(?:, ×(\d+))?\) (.*)$")
+_LINE_REF = re.compile(r":\d+(?:-\d+)?")
+
+
+def noticed_key(text: str) -> str:
+    """What makes two noticed items the same: their words, with line numbers left out. Later fix
+    rounds re-notice a gap after the lines moved (`LICENSING.md:329` becomes `:340`)."""
+    return " ".join(_LINE_REF.sub(":N", str(text)).lower().split())
+
+
+def agent_context_tokens(agent_id: Optional[str]) -> Optional[int]:
+    """The context an agent carried on its last turn (input plus cached tokens), read from its
+    transcript; None when the transcript cannot be found. Every resumed turn re-reads all of it."""
+    if not agent_id or not re.fullmatch(r"[\w-]+", agent_id):
+        return None
+    root = Path(os.environ.get("TP_TRANSCRIPTS") or "~/.claude/projects").expanduser()
+    for path in root.glob(f"*/*/subagents/agent-{agent_id}.jsonl"):
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - 512_000))
+            tail = handle.read().decode(errors="replace").splitlines()
+        for line in reversed(tail):
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            usage = entry.get("message", {}).get("usage") if entry.get("type") == "assistant" else None
+            if usage:
+                return sum(int(usage.get(k) or 0) for k in
+                           ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+    return None
 
 
 class TPError(Exception):
@@ -220,7 +250,7 @@ class Workflow:
             m = _NOTICED_LINE.match(ln)
             # Merge repeats: later fix rounds and reviews re-notice the same gap, and a pile of
             # duplicates buries the decisions the closeout must put to the human.
-            if m and " ".join(m.group(3).split()) == clean:
+            if m and noticed_key(m.group(3)) == noticed_key(clean):
                 count = int(m.group(2) or 1) + 1
                 lines[i] = f"- ({m.group(1)}, ×{count}) {m.group(3)}"
                 path.write_text("\n".join(lines) + "\n")

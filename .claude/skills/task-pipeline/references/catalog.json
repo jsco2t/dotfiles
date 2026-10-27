@@ -36,6 +36,16 @@
     "pm":          {"author": "planning-author",  "ask": ["doc-reviewer"], "research": ["atlassian-liaison", "github-liaison"]},
     "integration": {"author": null,               "ask": [],               "research": ["atlassian-liaison", "github-liaison"]}
   },
+  "review_packs": {
+    "_comment": "Single-lens code reviewers the human picked run as one lean `lens-reviewer` session per batch, each lens a full pass: a reviewer's cost follows the code it explores, not its lens count. A pack forms only when two or more of its members are confirmed reviewers.",
+    "lens-reviewer": ["correctness-reviewer", "security-reviewer", "api-compat-reviewer"]
+  },
+  "roles": {
+    "_comment": "Which files each agent may own. `transport` agents move approved content between systems and own only `wf:` files; `no_code` authors never own source code (a code change, comments included, is a code task).",
+    "transport": ["atlassian-liaison", "github-liaison"],
+    "no_code": ["doc-author", "kb-author", "planning-author", "education-author", "codebase-researcher", "domain-researcher", "architecture-reviewer"],
+    "code_extensions": [".go", ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".java", ".kt", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".rb", ".php", ".swift", ".scala", ".sh", ".bash", ".zsh", ".lua", ".sql"]
+  },
   "limits": {
     "max_participants": 8,
     "max_reviewers": 5,
@@ -59,6 +69,10 @@
     "review_minutes_per_code_task": 4,
     "max_review_session_minutes": 30,
     "verify_session_minutes": 8,
-    "max_review_rounds": 2
+    "max_review_rounds": 2,
+    "_max_resume_context_tokens": "a fix or verify round resumes its agent only below this context size; past it a fresh agent with a full brief costs less than re-reading the old context every turn",
+    "max_resume_context_tokens": 150000,
+    "review_near_miss_floor": 60,
+    "review_full_finding_floor": 70
   }
 }

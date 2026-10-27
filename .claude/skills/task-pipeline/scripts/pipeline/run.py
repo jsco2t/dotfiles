@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 import shlex
 import shutil
@@ -16,8 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import briefs, docscheck, snapshot
 from . import plan as planmod
 from . import scope as scopemod
-from .common import (TP_SCRIPT, TPError, Workflow, gap_minutes, limit, load_json, minutes_since, now_iso, sha_file,
-                     waiting_gaps, words)
+from .common import (TP_SCRIPT, TPError, Workflow, agent_context_tokens, gap_minutes, limit, load_json, minutes_since,
+                     now_iso, sha_file, waiting_gaps, words)
 
 DONE_STATES = ("accepted", "skipped")
 CHECK_TIMEOUT = 540
@@ -88,6 +89,7 @@ def _loaded(wf: Workflow, state: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
                       "`tp revise --feedback \"<their words>\"`.")
     plan = planmod.load_plan(wf)
     scope = scopemod.load_scope(wf)
+    state.setdefault("integration", [t["id"] for t in plan["tasks"] if planmod.is_integration(t, scope)])
     for path, sha in state.get("conventions_sha", {}).items():
         if sha_file(Path(path)) != sha:
             raise TPError(f"{Path(path).name} changed after approval: conventions are part of every brief's contract. "
@@ -114,13 +116,27 @@ def _cap(ts: Dict[str, Any]) -> int:
 
 # --- next --------------------------------------------------------------------------------
 
+def _integration_held(task: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    """External writes wait for the final review, so each is made once, with reviewed content:
+    in a real run a Jira comment posted before review was edited three times after it."""
+    if not planmod.is_integration(task, scope) or task.get("when", "after_review") == "anytime":
+        return False
+    if any("tasks" not in s for s in state.get("reviews", {}).values()):
+        return False  # a workflow approved before this rule: its review batches still hold integration tasks
+    others = [t for t in state["tasks"] if t not in state.get("integration", [])]
+    return (any(state["tasks"][t]["status"] not in DONE_STATES for t in others)
+            or any(s["status"] != "done" for s in state.get("reviews", {}).values()))
+
+
 def _action_for(tid: str, ts: Dict[str, Any], task: Dict[str, Any], scope: Dict[str, Any],
                 state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     status = ts["status"]
     act: Dict[str, Any] = {"id": tid, "model": task.get("model"), "agent_id": None}
     if status == "pending":
-        if _deps_open(task, state):
+        if _deps_open(task, state) or _integration_held(task, scope, state):
             return None
+        if planmod.is_publish(task):
+            return {"action": "publish", "id": tid}
         code = planmod.is_code(task, scope)
         step = "tests" if code else "author"
         act.update(action="dispatch", step=step,
@@ -173,10 +189,10 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
     order = {"needs_fix": 0, "needs_review": 1, "needs_impl": 2, "pending": 3}
     ranked = sorted((order[ts["status"]], tid) for tid, ts in state["tasks"].items() if ts["status"] in order)
     for _, tid in ranked:
-        if free <= 0:
-            break
         act = _action_for(tid, state["tasks"][tid], tasks[tid], scope, state)
-        if act:
+        if act and act["action"] == "publish":  # the manager posts it; no agent slot
+            acts.append(act)
+        elif act and free > 0:
             acts.append(act)
             free -= 1
     review_acts = _review().actions(state, free)
@@ -186,7 +202,7 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
             and not _review().open_sessions(state)):
         pending = _closeout_pending(wf, state)
         acts.append({"action": "closeout", "why": pending} if pending else {"action": "final"})
-    if (not any(a["action"] in ("dispatch", "fix", "review", "final", "closeout", "rerun") for a in acts)
+    if (not any(a["action"] in ("dispatch", "fix", "review", "final", "closeout", "rerun", "publish") for a in acts)
             and state["in_flight"]):
         acts.append({"action": "wait", "ids": list(state["in_flight"])})
     return acts
@@ -211,6 +227,8 @@ GUIDE = {
     "halting": "Halt requested: record {ids} as they hand back; dispatch nothing new.",
     "halted": "Halted. Tell the human where work stopped (`halt.json`), then stop. `tp resume --answer \"...\"` "
               "continues.",
+    "publish": "`tp publish {id}` (a dry run: renders the reviewed draft and runs the pre-flight checks); show "
+               "the human what it prints, ask once (AskUserQuestion), then `tp publish {id} --answer \"<their words>\"`.",
     "final": "`tp final` — package checks and the report.",
     "closeout": "Closeout ({why}): `tp closeout` lists what was noticed; classify each (`tp closeout --item N "
                 "--class deferred|followup|observation --note \"<the issue and its consequence>\"`), then "
@@ -458,16 +476,22 @@ def _context(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Di
             sources.append(str(wf.root / rel))
         else:
             sources.append(str(Path(wss[name]["path"]) / rel) if name in wss else s)
+    writable = {str(Path(w["path"]).resolve()) for w in wss.values() if w["mode"] == "write"}
+    rel = planmod.wf_rel
     return {
         "serves": "; ".join(f"{d} — {deliverables[d]['what']}" for d in task["serves"] if d in deliverables),
         "scope_md": wf.root / "scope.md",
-        "write_paths": [str(ws / p) for p in task["paths"]],
-        "readonly": [w["path"] for w in wss.values() if w["mode"] == "read"],
+        "write_paths": [str(wf.root / rel(p)) if rel(p) is not None else str(ws / p) for p in task["paths"]],
+        # A read alias of a write workspace is not read-only: the task writes its own paths there.
+        "readonly": [w["path"] for w in wss.values() if w["mode"] == "read"
+                     and str(Path(w["path"]).resolve()) not in writable],
         "sources": sources or [str(ws)],
         "checks": checks,
         "tests_paths": [str(ws / p) for p in task.get("tests_paths", task["paths"])],
         "decisions": decision_lines(state, [task["id"]]),
         "conventions": [str(p) for p in planmod.conventions(plan, scope, wf.root)],
+        "kind": planmod.task_kind(task, scope),
+        "logs": [log for d in task.get("depends_on", []) for log in task_logs(wf, d)] + task_logs(wf, task["id"]),
     }
 
 
@@ -487,12 +511,21 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
         if tid not in tasks:
             raise TPError(f"{tid} is not a task in the approved plan.")
         ts, task = state["tasks"][tid], tasks[tid]
+        if planmod.is_publish(task):
+            raise TPError(f"{tid} is posted by the manager, never by an agent: `tp publish {tid}` (a dry run), then "
+                          f"`tp publish {tid} --answer \"<the human's words>\"`.")
         if ts["status"] == "pending" and _deps_open(task, state):
             raise TPError(f"{tid} waits on {', '.join(_deps_open(task, state))} (not accepted yet).")
+        if ts["status"] == "pending" and _integration_held(task, scope, state):
+            raise TPError(f"{tid} is integration work: it runs once every other task is accepted and the final review "
+                          "is done, so the external system is written once (`\"when\": \"anytime\"` in the plan opts out).")
         act = _action_for(tid, ts, task, scope, state)
         if act is None:
             raise TPError(f"{tid} is {ts['status']}; there is nothing to dispatch.")
         _slots(state)
+        fresh = fresh_note(act["agent_id"])
+        if fresh:
+            act["agent_id"] = None
         step, run = act["step"], wf.run_dir(tid)
         run.mkdir(parents=True, exist_ok=True)
         ctx = _context(wf, task, scope, plan, state)
@@ -507,7 +540,7 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
         elif step == "fix":
             rnd = ts["round"]
             brief, result = run / f"brief-fix-{rnd}.md", run / "result-fix.json"
-            ctx["cap"] = _cap(ts)
+            ctx.update(cap=_cap(ts), fix_expect=ts.get("fix_expect"), fixing=ts.get("fixing"))
             text = briefs.fix(task, rnd, ctx, _stale_guard(wf, task, scope, rnd) + ts["findings"], result,
                               same_agent=bool(act["agent_id"]))
             label = f"fix-{rnd}"
@@ -525,6 +558,7 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
         state["in_flight"][tid] = {"step": step, "since": now_iso(), "snap": str(snap), "agent": act["agent"],
                                    "concurrent": list(state["in_flight"]), "from": ts["status"],
                                    "head": _git_head(_ws(scope, task["workspace"])),
+                                   "wf_hashes": _wf_hashes(wf, task),
                                    "evidence": step != "review"}  # the brief asked for acceptance evidence
         ts["status"], ts["step"] = "in_flight", step
         ts["started"] = ts["started"] or now_iso()
@@ -532,8 +566,8 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
         wf.event("dispatch", id=tid, step=step, agent=act["agent"], round=ts["round"])
         call = briefs.dispatch_line(act["agent"], f"{tid} {step}", briefs.prompt(brief, result),
                                     act["agent_id"], act.get("model"))
-        return (f"DISPATCH {tid} · {step} · {act['agent']}\nbrief: {brief}\nsend: {call}\n"
-                f"then, when it replies: tp record {tid} --agent-id <its agent id>")
+        return (f"DISPATCH {tid} · {step} · {act['agent']}\n" + (f"{fresh}\n" if fresh else "")
+                + f"brief: {brief}\nsend: {call}\nthen, when it replies: tp record {tid} --agent-id <its agent id>")
 
 
 # --- record ---------------------------------------------------------------------------------
@@ -588,7 +622,62 @@ def _run_cmd(cmd: str, cwd: Path, log: Path) -> Tuple[bool, str]:
 
 
 def _repos(scope: Dict[str, Any]) -> Dict[str, Path]:
-    return {n: Path(w["path"]) for n, w in scopemod.workspaces(scope).items() if w["mode"] == "read"}
+    """Where citations resolve: every workspace. Documents describe the code the run is changing,
+    which lives in a write workspace."""
+    return {n: Path(w["path"]) for n, w in scopemod.workspaces(scope).items()}
+
+
+def _task_files(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any]) -> List[Path]:
+    """The files a task's paths name: workspace files, plus `wf:` files that exist."""
+    ws = _ws(scope, task["workspace"])
+    repo = [p for p in task.get("paths", []) if planmod.wf_rel(p) is None]
+    drafts = [wf.root / planmod.wf_rel(p) for p in task.get("paths", []) if planmod.wf_rel(p) is not None]
+    return _expand(ws, repo) + [d for d in drafts if d.is_file()]
+
+
+def _wf_hashes(wf: Workflow, task: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    return {p: sha_file(wf.root / planmod.wf_rel(p)) for p in task.get("paths", []) if planmod.wf_rel(p) is not None}
+
+
+def task_logs(wf: Workflow, tid: str) -> List[str]:
+    """The latest test log and the latest log of each check a task's steps produced."""
+    latest: Dict[str, Path] = {}
+    for log in sorted(wf.run_dir(tid).glob("*.log"), key=lambda p: p.stat().st_mtime):
+        kind = re.sub(r"-(tests|impl|author|fix)-\d+$", "", log.stem)
+        latest[kind] = log
+    return [str(p) for p in latest.values()]
+
+
+# Finding states that say the code does the wrong thing: a test should catch it before the fix.
+BEHAVIOUR_STATES = ("wrong", "broken", "gap", "missing")
+
+
+def fix_route(task: Dict[str, Any], scope: Dict[str, Any], finding: Dict[str, Any]) -> str:
+    """Who fixes a review finding on a task: `author` for non-code work; for code, `tests-green`
+    (a test file: the test author, tests still passing), `tests-red` (a behaviour bug: the test
+    author writes a failing test, then the code author fixes it), or `impl` (the code author)."""
+    if not planmod.is_code(task, scope):
+        return "author"
+    where = re.sub(r":\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$", "", str(finding.get("where", "")).strip().strip("`"))
+    ws = str(_ws(scope, task["workspace"]))
+    rel = where.split(":", 1)[1] if ":" in where and where.split(":", 1)[0] in scopemod.workspaces(scope) else where
+    rel = rel[len(ws) + 1:] if rel.startswith(ws + "/") else rel.lstrip("./")
+    if task.get("tests_paths") and snapshot.matches(rel, task["tests_paths"]):
+        return "tests-green"
+    if finding.get("state") in BEHAVIOUR_STATES and task.get("tests_paths"):
+        return "tests-red"
+    return "impl"
+
+
+def fresh_note(agent_id: Optional[str]) -> Optional[str]:
+    """Why a round goes to a fresh agent instead of resuming agent_id, or None to resume it: every
+    resumed turn re-reads the whole context, and past the threshold a full brief costs less."""
+    tokens = agent_context_tokens(agent_id)
+    cap = limit("max_resume_context_tokens")
+    if tokens is None or tokens <= cap:
+        return None
+    return (f"fresh agent: {agent_id}'s context is {tokens // 1000}k tokens (over {cap // 1000}k), so this round "
+            "starts a new agent with the full brief instead of resuming it.")
 
 
 def _changed_md(root: Path, base: Optional[str]) -> Tuple[Optional[set], set]:
@@ -645,7 +734,7 @@ def _task_checks(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan
     for name in task.get("checks", []):
         log = wf.run_dir(task["id"]) / f"check-{name}-{label}.log"
         if name == "docs":
-            files = [f for f in _expand(ws, task["paths"]) if f.suffix == ".md"]
+            files = [f for f in _task_files(wf, task, scope) if f.suffix == ".md"]
             errors, warnings, stats = docscheck.check(files, _repos(scope))
             log.write_text("\n".join(errors + [f"WARN {w}" for w in warnings]) or f"ok: {stats}")
             if errors:
@@ -741,28 +830,51 @@ def _fail(wf: Workflow, ts: Dict[str, Any], tid: str, findings: List[str], fixin
     return "\n".join([f"FAIL {tid} → fix round {ts['round']} of {_cap(ts)}:"] + lines)
 
 
-def add_fix(wf: Workflow, state: Dict[str, Any], tid: str, findings: List[str], fixing: str) -> str:
+def add_fix(wf: Workflow, state: Dict[str, Any], tid: str, findings: List[str], fixing: str,
+            expect: Optional[str] = None, queued: Optional[List[str]] = None) -> str:
     """Send findings from outside the task's own steps (review triage, a reopen) to its author.
     They join a fix round that has not been dispatched yet; otherwise they open a round of their
     own that does not count against the task's cap. Refused while the task is in flight or blocked:
-    rewriting its state then would pull it from under the agent or skip the human."""
+    rewriting its state then would pull it from under the agent or skip the human.
+
+    fixing "tests" with expect: a review-routed round for the test author — "green" (test files
+    only, the tests still pass) or "red" (a failing test for a behaviour bug). queued: the code
+    author's findings, opened as the next round once the test round is recorded."""
     ts = state["tasks"][tid]
     if tid in state["in_flight"]:
         raise TPError(f"{tid} is in flight ({state['in_flight'][tid]['step']}); send it more fixes once it has "
                       "handed back and been recorded.")
     if ts["status"] in ("pending", "needs_impl", "blocked"):
         raise TPError(f"{tid} is {ts['status']}; it takes fixes once it is authored and not waiting on the human.")
+    shown = [f"  - {f}" for f in findings + [q for q in queued or [] if q not in findings]]
     if ts["status"] == "needs_fix":
-        if ts.get("fixing") != fixing:
+        if ts.get("fixing") == fixing:
+            ts["findings"] = list(ts["findings"]) + findings
+            if expect:
+                ts["fix_expect"] = "red" if "red" in (expect, ts.get("fix_expect")) else "green"
+            ts["queued"] = list(ts.get("queued", [])) + list(queued or [])
+        elif fixing == "tests" and ts.get("fixing") == "impl":
+            # Tests go first: the waiting code round becomes the follow-up of this test round.
+            ts["queued"] = list(ts["findings"]) + list(queued or [])
+            ts.update(fixing="tests", findings=list(findings), fix_expect=expect or "green")
+        elif fixing == "impl" and ts.get("fixing") == "tests" and ts.get("fix_expect"):
+            ts["queued"] = list(ts.get("queued", [])) + findings
+        else:
             raise TPError(f"{tid}'s waiting fix round is for its {ts.get('fixing')} step; send these after it.")
-        ts["findings"] = list(ts["findings"]) + findings
         (wf.run_dir(tid) / f"findings-{ts['round']}.json").write_text(json.dumps(ts["findings"], indent=1))
-        return "\n".join([f"{tid}: added to fix round {ts['round']}, not dispatched yet:"] + [f"  - {f}" for f in findings])
+        return "\n".join([f"{tid}: added to fix round {ts['round']} ({ts['fixing']}), not dispatched yet:"] + shown)
     if ts["status"] == "accepted":  # it sat finished until now; that was not work on it
         _pause(ts, ts.get("accepted"))
     ts["extra_rounds"] = ts.get("extra_rounds", 0) + 1
+    if expect:
+        ts["fix_expect"] = expect
+        ts["queued"] = list(queued or [])
     task = next(t for t in planmod.load_plan(wf)["tasks"] if t["id"] == tid)
-    return _fail(wf, ts, tid, findings, fixing, ws=_ws(scopemod.load_scope(wf), task["workspace"]))
+    out = _fail(wf, ts, tid, findings, fixing, ws=_ws(scopemod.load_scope(wf), task["workspace"]))
+    if expect:
+        out += ("\n  → the test author goes first (" + ("a failing test" if expect == "red" else "test files only")
+                + ")" + (f"; then the code author: {len(queued or [])} finding(s) queued." if queued else "."))
+    return out
 
 
 def _pause(ts: Dict[str, Any], since: Optional[str]) -> None:
@@ -790,29 +902,67 @@ def agent_minutes(wf: Workflow) -> Dict[str, float]:
     return out
 
 
-def _evidence_lines(wf: Workflow, task: Dict[str, Any]) -> List[str]:
-    """The latest authoring hand-back's evidence for each Done-when item, for the manager to check."""
+def _evidence(wf: Workflow, task: Dict[str, Any]) -> Optional[Dict[int, str]]:
+    """The latest authoring hand-back's evidence, by Done-when number; None when it gave none."""
     results = sorted((p for p in wf.run_dir(task["id"]).glob("result-*.json")
                       if p.stem in ("result-author", "result-impl", "result-fix")), key=lambda p: p.stat().st_mtime)
     given = load_json(results[-1], "the agent's result").get("acceptance") if results else None
     if not isinstance(given, list):
-        return []
-    by_n = {int(str(e.get("criterion")).strip()): e.get("evidence") for e in given
+        return None
+    return {int(str(e.get("criterion")).strip()): str(e.get("evidence") or "") for e in given
             if isinstance(e, dict) and str(e.get("criterion", "")).strip().isdigit()}
-    return (["acceptance evidence (check each holds up):"]
-            + [f"  {n}. {a} — {by_n.get(n, '(none given)')}" for n, a in enumerate(task["acceptance"], 1)])
+
+
+def evidence_lines(wf: Workflow, task: Dict[str, Any]) -> List[str]:
+    """Every Done-when item with its evidence (`tp show T## --part acceptance`)."""
+    by_n = _evidence(wf, task) or {}
+    return [f"{n}. {a} — {by_n.get(n, '(none given)')}" for n, a in enumerate(task.get("acceptance", []), 1)]
+
+
+_CITE = re.compile(r"([\w./-]+\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?")
+
+
+def _quote(wf: Workflow, scope: Dict[str, Any], text: str, limit_cites: int = 3) -> List[str]:
+    """The source lines a piece of evidence cites, so the fact check needs no reads of its own."""
+    repos = dict(_repos(scope), wf=wf.root)
+    out = []
+    for path, a, b in _CITE.findall(text)[:limit_cites]:
+        src, _ = docscheck.resolve(path, repos)
+        if src is None:
+            continue
+        lines = src.read_text(errors="replace").splitlines()
+        lo, hi = int(a), int(b or a)
+        out += [f"    {path}:{i}: {lines[i - 1]}" for i in range(lo, min(hi, lo + 5, len(lines)) + 1)]
+    return out
+
+
+def _evidence_sample(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], seed: str) -> List[str]:
+    """One Done-when item for the manager's fact check — one whose evidence cites lines, when any
+    does — with those lines quoted. The rest stays behind `tp show T## --part acceptance`: printing
+    every item's evidence on every hand-back filled the manager's context in a real run."""
+    by_n = _evidence(wf, task)
+    if not by_n:
+        return []
+    given = [n for n in range(1, len(task["acceptance"]) + 1) if by_n.get(n)]
+    if not given:
+        return []
+    pool = [n for n in given if _CITE.search(by_n[n])] or given
+    pick = random.Random(seed).choice(pool)
+    return ([f"fact-check sample — criterion {pick} of {len(task['acceptance'])} (does the evidence hold up? every "
+             f"item: `tp show {task['id']} --part acceptance`):",
+             f"  {pick}. {task['acceptance'][pick - 1]} — {by_n[pick]}"] + _quote(wf, scope, by_n[pick]))
 
 
 def _sample(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any]) -> str:
     ws = _ws(scope, task["workspace"])
-    files = _expand(ws, task["paths"])
+    files = _task_files(wf, task, scope)
     md = [f for f in files if f.suffix == ".md"]
-    out = _evidence_lines(wf, task)
+    out = _evidence_sample(wf, task, scope, seed=f"{task['id']}:{len(list(wf.run_dir(task['id']).glob('result-*')))}")
     if md:
-        cites = docscheck.sample(md, _repos(scope), n=3, seed=task["id"])
-        out += (["sample for your fact check (does each source line say what the sentence claims?):"] + cites
+        cites = docscheck.sample(md, _repos(scope), n=2, seed=task["id"])
+        out += (["citation sample (does each source line say what the sentence claims?):"] + cites
                 if cites else ["sample: no path:line citations in the deliverable — read one section against its source."])
-    code = [f for f in files if f.suffix != ".md"]
+    code = [f for f in files if f.suffix != ".md" and wf.root not in f.parents]
     if code:
         stat = subprocess.run(["git", "-C", str(ws), "diff", "--stat", "--", *[str(f) for f in code]],
                               capture_output=True, text=True).stdout.strip()
@@ -835,6 +985,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
         if step == "review":
             return _record_review(wf, state, scope, tasks, tid, fl, agent_id)
         effective = ts["fixing"] if step == "fix" else step
+        _own_agent(state, tid, agent_id)
         if agent_id:
             ts["agents"][effective] = agent_id
         res_path = wf.run_dir(tid) / f"result-{step}.json"
@@ -871,7 +1022,8 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
         ws = _ws(scope, task["workspace"])
         changed = snapshot.diff(snapshot.load(Path(fl["snap"])), _take(wf, ws))
         # Integration work lands in Jira or GitHub, so an untouched workspace says nothing there.
-        if step != "fix" and not changed and planmod.task_kind(task, scope) != "integration":
+        drafted = any(sha_file(wf.root / planmod.wf_rel(p)) != h for p, h in (fl.get("wf_hashes") or {}).items())
+        if step != "fix" and not changed and not drafted and planmod.task_kind(task, scope) != "integration":
             if fl.get("head") and _git_head(ws) != fl["head"]:
                 # A commit-only task: history moved, the tree did not (snapshots skip .git).
                 msgs.append("the tree is unchanged, but git history advanced (a commit) — counted as work.")
@@ -891,10 +1043,24 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
             findings.append(f"Changed files outside this task's paths: {', '.join(off[:10])} — revert them; if the "
                             "task cannot be done without them, hand back `blocked` and say why.")
         findings += _readonly_changes(wf, state, scope)
+        findings += _role_fence(task, effective, step, [c for c in changed if c not in off],
+                                [p for o in fl.get("concurrent", []) if o in tasks and o != tid
+                                 and tasks[o]["workspace"] == task["workspace"] for p in tasks[o].get("paths", [])])
         label = f"{step}-{ts['round']}"
-        if effective == "tests":
+        expect = ts.get("fix_expect") if step == "fix" else None
+        if effective == "tests" and expect == "green":
             ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
-            if task.get("test_mode", "red") == "red":
+            if ok:
+                msgs.append(f"tests still pass: `{task['test_cmd']}`.")
+            else:
+                findings.append(f"A test-files-only fix must leave the tests passing, and `{task['test_cmd']}` now "
+                                f"fails: {tail}")
+            if not findings:
+                ts["tests_hash"] = _tests_hash(task, scope)
+                _freeze_tests_baseline(wf, task, scope)
+        elif effective == "tests":
+            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
+            if expect == "red" or task.get("test_mode", "red") == "red":
                 if ok:
                     findings.append(f"The tests pass before any implementation, so they are not red: they do not "
                                     f"prove the new behaviour. `{task['test_cmd']}` passed.")
@@ -938,6 +1104,19 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
         del state["in_flight"][tid]
         if findings:
             out = _fail(wf, ts, tid, findings, fixing=effective, ws=ws)
+        elif effective == "tests" and expect and ts.get("queued"):
+            # The failing test is in; the code author fixes the behaviour against it. This round
+            # was opened by the review, so it does not count against the task's own cap.
+            queued = ts.pop("queued")
+            ts.pop("fix_expect", None)
+            ts["extra_rounds"] = ts.get("extra_rounds", 0) + 1
+            out = (f"{tid} failing test recorded; " + " ".join(msgs) + " Next: the code author fixes it.\n"
+                   + _fail(wf, ts, tid, queued, fixing="impl", ws=ws))
+        elif effective == "tests" and expect:
+            ts.pop("fix_expect", None)
+            ts.pop("queued", None)
+            ts["status"] = "needs_review" if planmod.reviewer_for(task, scope) else "needs_check"
+            out = f"{tid} test fix recorded. " + " ".join(msgs) + "\n" + _sample(wf, task, scope)
         elif effective == "tests":
             ts["status"] = "needs_impl"
             out = f"{tid} tests recorded; " + " ".join(msgs) + " Next: implementation."
@@ -947,9 +1126,89 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
         else:
             ts["status"] = "needs_check"
             out = f"{tid} passed its checks. " + " ".join(msgs) + "\n" + _sample(wf, task, scope)
+        if not findings and (changed or drafted):
+            out += _stale_docs(wf, state, plan, scope, tasks, tid, ws, changed)
         wf.save(state)
         wf.event("record", id=tid, step=step, status=ts["status"], minutes=round(minutes, 1), round=ts["round"])
         return out
+
+
+def _own_agent(state: Dict[str, Any], tid: str, agent_id: Optional[str]) -> None:
+    """An agent works one task. Sending a new task to an earlier task's agent (seen live: a Jira
+    task at 348k tokens of context handed a second task) makes every turn re-read the old work."""
+    if not agent_id:
+        return
+    for other, ts in state["tasks"].items():
+        if other != tid and agent_id in ts.get("agents", {}).values():
+            raise TPError(f"agent {agent_id} already worked {other}; {tid} needs a fresh agent — send the "
+                          f"`Agent(...)` call `tp dispatch {tid}` printed, then record with that agent's id.")
+    for sid, s in state.get("reviews", {}).items():
+        if s.get("agent_id") == agent_id:
+            raise TPError(f"agent {agent_id} is the {sid} reviewer; {tid} needs a fresh agent — send the "
+                          f"`Agent(...)` call `tp dispatch {tid}` printed.")
+
+
+def _role_fence(task: Dict[str, Any], effective: str, step: str, changed: List[str], concurrent: List[str]) -> List[str]:
+    """Inside the task's own paths, each step still writes only its role's files: the test step
+    writes tests, and a code author's fix round leaves the tests to the test author."""
+    tests = task.get("tests_paths")
+    if not tests:
+        return []
+    mine = [c for c in changed if not snapshot.matches(c, concurrent)]
+    if effective == "tests":
+        prod = [c for c in mine if not snapshot.matches(c, tests)]
+        if prod:
+            return [f"The test step writes only test files, and it changed {', '.join(prod[:8])} — revert them: "
+                    "production code is the code author's next step."]
+    elif effective == "impl" and step == "fix":
+        touched = [c for c in mine if snapshot.matches(c, tests)]
+        if touched:
+            return [f"A code author's fix round changed test files ({', '.join(touched[:8])}); they belong to the "
+                    "test author — revert them, and dispute a wrong test in `disputes` so the pipeline routes it "
+                    "to the test author."]
+    return []
+
+
+def _doc_problems(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    md = [f for f in _task_files(wf, task, scope) if f.suffix == ".md"]
+    if not md:
+        return [], []
+    errors, warnings, _ = docscheck.check(md, _repos(scope))
+    return errors, warnings
+
+
+def _stale_docs(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any],
+                tasks: Dict[str, Dict[str, Any]], tid: str, ws: Path, changed: List[str]) -> str:
+    """Accepted documents that cite a file this step just changed are checked again; one whose
+    citations now break, or newly fail to support their sentences, is reopened at once — not left
+    for the closeout (in a real run, a nine-task amendment existed largely to re-point them)."""
+    touched = {(ws / c).resolve() for c in changed}
+    out = []
+    for other, ts in state["tasks"].items():
+        task = tasks.get(other)
+        if other == tid or task is None or ts["status"] != "accepted" or "docs" not in task.get("checks", []):
+            continue
+        md = [f for f in _task_files(wf, task, scope) if f.suffix == ".md"]
+        cited = set()
+        for doc in md:
+            for c in docscheck.citations(doc, docscheck.prose_lines(doc.read_text(errors="replace"))):
+                src, _ = docscheck.resolve(c.path, _repos(scope))
+                if src is not None:
+                    cited.add(src.resolve())
+        hit = sorted(str(p.relative_to(ws)) for p in cited & touched)
+        if not hit:
+            continue
+        errors, warnings = _doc_problems(wf, task, scope)
+        new = errors + [w for w in warnings if w not in ts.get("doc_doubts", [])]
+        if not new:
+            continue
+        note = (f"{tid}'s change to {', '.join(hit)} left citations here stale: " + "; ".join(new[:6])
+                + " — re-point them at the lines that now say it.")
+        try:
+            out.append(add_fix(wf, state, other, [note], fixing=_authoring_step(task, scope)))
+        except TPError as exc:
+            out.append(f"{other} cites {', '.join(hit)}, which {tid} changed, but could not be reopened: {exc}")
+    return ("\nStale citations — reopened:\n" + "\n".join(out)) if out else ""
 
 
 def _validate_review(data: Any, tid: str) -> List[str]:
@@ -1019,11 +1278,16 @@ def _record_review(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], t
 def cmd_accept(wf: Workflow, tid: str, note: str) -> str:
     with wf.locked():
         state = wf.load()
-        _loaded(wf, state)
+        _, scope, tasks = _loaded(wf, state)
         ts = state["tasks"].get(tid)
         if ts is None or ts["status"] != "needs_check":
             raise TPError(f"{tid} is not awaiting your fact check (status {ts and ts['status']}).")
         ts.update(status="accepted", accepted=now_iso(), note=note)
+        task = tasks.get(tid)
+        if task and "docs" in task.get("checks", []):
+            # What the docs check already doubts at acceptance: a later code change is judged
+            # only on doubts it adds (see _stale_docs).
+            ts["doc_doubts"] = _doc_problems(wf, task, scope)[1]
         wf.save(state)
         mins = task_minutes(state, ts)
         wf.event("accept", id=tid, minutes=round(mins, 1), wall=round(minutes_since(ts["started"]), 1))
@@ -1232,12 +1496,24 @@ def _noticed_text(raw: str) -> str:
     return " ".join((m.group(1) if m else raw).split())
 
 
-def _closeout_marks(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    return state.get("closeout", {}).get("items", {})
+# Notes agents leave about their own work, which never need the human: classified by the script.
+_CHATTER = re.compile(r"^\s*implementation note\b|\bsibling task\b.*\b(left|untouched|unstaged|not mine)\b|"
+                      r"\bleft (it |them )?untouched\b|^\s*(fyi|for the record)\b", re.I)
+
+
+def _closeout_marks(state: Dict[str, Any], wf: Optional[Workflow] = None) -> Dict[str, Dict[str, Any]]:
+    """The class of each noticed item: the manager's, else the script's for plain chatter."""
+    marks = dict(state.get("closeout", {}).get("items", {}))
+    if wf is not None:
+        for raw in wf.noticed_items():
+            text = _noticed_text(raw)
+            if text not in marks and _CHATTER.search(text):
+                marks[text] = {"class": "observation", "auto": True}
+    return marks
 
 
 def _closeout_unclassified(wf: Workflow, state: Dict[str, Any]) -> int:
-    return len({_noticed_text(r) for r in wf.noticed_items()} - set(_closeout_marks(state)))
+    return len({_noticed_text(r) for r in wf.noticed_items()} - set(_closeout_marks(state, wf)))
 
 
 def _closeout_pending(wf: Workflow, state: Dict[str, Any]) -> Optional[str]:
@@ -1247,14 +1523,32 @@ def _closeout_pending(wf: Workflow, state: Dict[str, Any]) -> Optional[str]:
     if unclassified:
         return f"{unclassified} noticed item(s) unclassified"
     open_ = {_noticed_text(r) for r in wf.noticed_items()}
-    if (any(v.get("class") in ("deferred", "followup") for k, v in _closeout_marks(state).items() if k in open_)
+    if (any(v.get("class") in ("deferred", "followup") for k, v in _closeout_marks(state, wf).items() if k in open_)
             and not state.get("closeout", {}).get("decision")):
         return _UNDECIDED
     return None
 
 
+def _item_numbers(spec: str, count: int) -> List[int]:
+    """`1,3,5-7` → [1, 3, 5, 6, 7]."""
+    out: List[int] = []
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lo, _, hi = part.partition("-")
+        if not lo.isdigit() or (hi and not hi.isdigit()):
+            raise TPError(f"--items {spec!r}: give numbers and ranges, e.g. 1,3,5-7.")
+        out += list(range(int(lo), int(hi or lo) + 1))
+    bad = [n for n in out if not 1 <= n <= count]
+    if bad:
+        raise TPError(f"there is no noticed item #{bad[0]} ({count} open) — `tp closeout` lists them.")
+    return sorted(set(out))
+
+
 def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = None, note: Optional[str] = None,
-                 decide: bool = False, answer: Optional[str] = None, ask: bool = False) -> str:
+                 decide: bool = False, answer: Optional[str] = None, ask: bool = False,
+                 items_spec: Optional[str] = None, show_all: bool = False) -> str:
     """The gate between the last acceptance and the report: classify every noticed item, and put
     deferred or follow-up work to the human once, their answer recorded. Without it, ticket-scope
     gaps found mid-run rest as noticed lines and go silently undone. A deferred or follow-up item's
@@ -1264,7 +1558,7 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
         if state["phase"] != "EXECUTING":
             raise TPError(f"closeout applies while EXECUTING; the workflow is {state['phase']}.")
         items = wf.noticed_items()
-        marks = _closeout_marks(state)
+        marks = _closeout_marks(state, wf)
         open_ = {_noticed_text(r) for r in items}
         chosen = sorted(((text, e) for text, e in marks.items()
                          if text in open_ and e.get("class") in ("deferred", "followup")), key=lambda kv: kv[1]["class"])
@@ -1280,10 +1574,13 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
                 raise TPError("nothing is deferred or a follow-up, so no human decision is needed — `tp final`.")
         if ask:
             out = [f"DEFERRAL DECISION — {len(chosen)} noticed item(s) are work this run did not do. How should they "
-                   "be handled: accept the deferral, file follow-up tasks, or extend the run?", ""]
+                   "be handled: fix them now, file them as tickets, or accept them as recorded?", ""]
             for i, (text, e) in enumerate(chosen, 1):
                 out += [f"{i}. [{e['class']}] {text}", f"   Why it matters: {e.get('note')}"]
-            out += ["", "Ask this once with AskUserQuestion, then record their words verbatim:",
+            out += ["", "Offer exactly these: fix them now (a plan amendment, `tp plan amend`); file them as tickets "
+                    "(an integration task the human approves); or accept them as recorded (the report lists them). "
+                    "Never offer to park them in a local file or drafts folder.",
+                    "Ask this once with AskUserQuestion, then record their words verbatim:",
                     "tp closeout --decide --answer \"<the human's words>\""]
             return "\n".join(out)
         if decide:
@@ -1292,35 +1589,43 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
             wf.decision("closeout: deferred and follow-up work", str(answer), who="human")
             wf.event("closeout_decision")
             return "the human's decision is recorded. `tp final` writes the report."
-        if item is not None:
+        if item is not None or items_spec:
             if cls not in CLOSEOUT_CLASSES:
                 raise TPError(f"--class must be one of {', '.join(CLOSEOUT_CLASSES)}.")
             if cls != "observation" and (not note or words(note) < 4):
                 raise TPError(f"--class {cls} needs --note in plain language: what the issue is and the consequence "
                               "of leaving it (the note is what the human reads when deciding) — never a bare file "
                               "path or ticket shorthand.")
-            if not 1 <= item <= len(items):
+            numbers = _item_numbers(items_spec, len(items)) if items_spec else [item]
+            if item is not None and not 1 <= item <= len(items):
                 raise TPError(f"there is no noticed item #{item} ({len(items)} open) — `tp closeout` lists them.")
             entry = {"class": cls, **({"note": " ".join(note.split())} if note else {})}
-            state.setdefault("closeout", {}).setdefault("items", {})[_noticed_text(items[item - 1])] = entry
+            for n in numbers:
+                state.setdefault("closeout", {}).setdefault("items", {})[_noticed_text(items[n - 1])] = dict(entry)
             if cls != "observation":
                 state["closeout"].pop("decision", None)  # new deferred work needs its own answer
             wf.save(state)
-            wf.event("closeout_class", cls=cls)
+            wf.event("closeout_class", cls=cls, items=len(numbers))
             pending = _closeout_pending(wf, state)
             tail = ("`tp closeout --ask` renders the question for the human." if pending == _UNDECIDED
                     else "`tp final` writes the report." if pending is None else "`tp closeout` lists the rest.")
-            return f"item #{item} classified {cls}" + (f" — {entry['note']}" if note else "") + f". {tail}"
+            which = f"item #{numbers[0]}" if len(numbers) == 1 else f"items {', '.join(f'#{n}' for n in numbers)}"
+            return f"{which} classified {cls}" + (f" — {entry['note']}" if note else "") + f". {tail}"
         if not items:
             return "nothing was noticed outside the plan — `tp final` writes the report."
-        out = [f"CLOSEOUT — {len(items)} noticed item(s), "
-               f"{sum(_noticed_text(r) in marks for r in items)} classified:"]
+        auto = sum(1 for r in items if marks.get(_noticed_text(r), {}).get("auto"))
+        done = sum(_noticed_text(r) in marks for r in items)
+        out = [f"CLOSEOUT — {len(items)} noticed item(s), {done} classified ({auto} classified automatically as "
+               f"observations: notes about an agent's own work)" + ("" if show_all else "; unclassified ones below "
+                                                                     "(`--all` lists every item)") + ":"]
         for n, raw in enumerate(items, 1):
             e = marks.get(_noticed_text(raw), {})
-            out.append(f"  {n}. [{e.get('class', 'UNCLASSIFIED')}] {raw}" + (f" — {e['note']}" if e.get("note") else ""))
-        out += ["Classify each: tp closeout --item N --class deferred|followup|observation --note \"<the issue and "
-                "its consequence>\" (deferred: work left undone; followup: its own task to file; observation: no "
-                "action). Then, if anything is deferred or a follow-up: tp closeout --ask, and ask the human once."]
+            if show_all or not e:
+                out.append(f"  {n}. [{e.get('class', 'UNCLASSIFIED')}] {raw}" + (f" — {e['note']}" if e.get("note") else ""))
+        out += ["Classify them, several at a time: tp closeout --items 1,3,5-7 --class deferred|followup|observation "
+                "--note \"<the issue and its consequence>\" (deferred: work left undone; followup: its own task to "
+                "file; observation: no action). Then, if anything is deferred or a follow-up: tp closeout --ask, and "
+                "ask the human once."]
         return "\n".join(out)
 
 
@@ -1478,7 +1783,7 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
     out += ["", "## Final checks", ""] + ([f"- {r}" for r in results] or ["- none planned"])
     groups: Dict[str, List[str]] = {c: [] for c in CLOSEOUT_CLASSES + ("unclassified",)}
     for raw in wf.noticed_items():
-        e = _closeout_marks(state).get(_noticed_text(raw), {})
+        e = _closeout_marks(state, wf).get(_noticed_text(raw), {})
         groups[e.get("class", "unclassified")].append(f"- {raw}" + (f" — {e['note']}" if e.get("note") else ""))
     titles = {"deferred": "Deferred with the human's OK (their decision is in `decisions.md`)",
               "followup": "Follow-ups this run did not do (the human's decision is in `decisions.md`)",
@@ -1574,6 +1879,30 @@ def after_record(wf: Workflow, out: str) -> str:
     if state.get("halt") and state["in_flight"]:
         return out + f"\nHalting: still waiting for {', '.join(state['in_flight'])}."
     return out
+
+
+def cmd_advance(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
+    """Record a hand-back, then dispatch every step that is ready because of it, in one call: the
+    manager's turns each re-read its whole context, and record → next → dispatch took three."""
+    out = [after_record(wf, cmd_record(wf, tid, agent_id))]
+    state = wf.load()
+    if state.get("halt"):
+        return out[0]
+    acts = actions(wf, state)
+    ready = [a["id"] for a in acts if a["action"] in ("dispatch", "fix", "review")]
+    for rid in ready:
+        try:
+            out.append(cmd_dispatch(wf, rid))
+        except TPError as exc:
+            out.append("\n".join(f"not dispatched: {rid}: {ln}" for ln in exc.lines))
+    if ready:
+        out.append("Send every call above in one message.")
+    rest = [a for a in actions(wf, wf.load()) if a["action"] not in ("dispatch", "fix", "review")]
+    for a in rest:
+        about = f" about {a['id']}" if a.get("id") else ""
+        out.append(f"→ {a['action']} {a.get('id', '')}".rstrip() + ": " + GUIDE[a["action"]].format(
+            id=a.get("id", ""), why=a.get("why", ""), about=about, ids=", ".join(a.get("ids", []))))
+    return "\n\n".join(out)
 
 
 def cmd_halt(wf: Workflow, reason: str) -> str:

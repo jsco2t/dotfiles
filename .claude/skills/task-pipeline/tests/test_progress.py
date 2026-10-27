@@ -162,7 +162,7 @@ class EmptyHandbackTest(unittest.TestCase):
                                     "where": "jira"}],
                      participants=[{"agent": "atlassian-liaison", "role": "author",
                                     "why": "Makes the approved Jira updates for D1."}])
-        task = h.task("T01", "notes/jira.md", agent="atlassian-liaison", checks=[],
+        task = h.task("T01", "wf:receipts/jira.json", agent="atlassian-liaison", checks=[],
                       brief="Post the approved status comment on the calc epic.",
                       acceptance=["The comment is on the epic, read back."])
         h.approved(h.plan([task], final_checks=[]), **scope)

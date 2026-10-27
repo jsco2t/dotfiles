@@ -16,7 +16,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pipeline import docscheck, issuesurvey, research, review, run, schemas, survey  # noqa: E402
+from pipeline import docscheck, issuesurvey, publish, research, review, run, schemas, survey  # noqa: E402
 from pipeline import plan as planmod  # noqa: E402
 from pipeline import scope as scopemod  # noqa: E402
 from pipeline.common import TPError, Workflow, now_iso  # noqa: E402
@@ -103,6 +103,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("closeout", help="the gate before the report: classify every noticed item, and record the "
                                         "human's decision on deferred or follow-up work; `tp final` waits for it")
     s.add_argument("--item", type=int, help="the noticed item's number, as `tp closeout` lists them")
+    s.add_argument("--items", help="several at once: 1,3,5-7 (one class and note for all of them)")
+    s.add_argument("--all", action="store_true", help="list every item, classified ones too")
     s.add_argument("--class", dest="cls", help="deferred (work left undone) | followup (its own task to file) | "
                                                "observation (no action)")
     s.add_argument("--note", help="deferred/followup: the issue and its consequence, in plain language "
@@ -138,6 +140,8 @@ def parser() -> argparse.ArgumentParser:
         a.add_argument("--done-when", required=True)
         a.add_argument("--minutes", type=int, help="time box, at most 15 (default 15)")
         a.add_argument("--from", dest="from_ref", help="the followup this item pursues, e.g. R1.F2")
+        a.add_argument("--model", choices=["sonnet", "opus", "haiku"],
+                       help="run this item on another model (pattern work such as a `map` often needs less)")
         e = rs.add_parser("extend", help="raise the research budget (your re-estimate: reporting metadata, never "
                                          "a refusal)")
         e.add_argument("--minutes", type=int, required=True)
@@ -152,7 +156,8 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("show", help="print one part of a structured result (research, review session, task)")
     s.add_argument("id")
-    s.add_argument("--part", help="research: answers|followups|unknowns|areas · review: blocking|findings")
+    s.add_argument("--part", help="research: answers|followups|unknowns|areas · review: blocking|findings · "
+                                  "task: acceptance|noticed|questions|changed|disputes")
 
     s = sub.add_parser("triage", help="decide a review session's blocking findings")
     s.add_argument("id", help="review session, e.g. B1/doc-reviewer")
@@ -204,6 +209,14 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("record", help="record an agent's hand-back and run the gates")
     s.add_argument("id")
     s.add_argument("--agent-id", help="the agent's id, for fix rounds by the same agent")
+    s = sub.add_parser("advance", help="record a hand-back, then dispatch every step that is ready because of it "
+                                       "(one call instead of record, next, dispatch)")
+    s.add_argument("id")
+    s.add_argument("--agent-id", help="the agent's id, for fix rounds by the same agent")
+    s = sub.add_parser("publish", help="post a publish task's reviewed draft to Jira: a dry run without --answer; "
+                                       "with the human's words, the post itself, then a read-back")
+    s.add_argument("id")
+    s.add_argument("--answer", help="the human's OK, verbatim, given after they saw the dry run")
     s = sub.add_parser("accept", help="accept a task after your fact check")
     s.add_argument("id")
     s.add_argument("--note", required=True)
@@ -254,6 +267,11 @@ def cmd_show(wf: Workflow, tid: str, part) -> str:
         return review.show(state, tid, part)
     if tid.startswith("R"):
         return research.show(wf, state, tid, part)
+    if part == "acceptance":
+        _, _, tasks = run._loaded(wf, state)
+        if tid not in tasks:
+            raise TPError(f"{tid} is not a task in the plan.")
+        return "\n".join(run.evidence_lines(wf, tasks[tid])) or "no acceptance criteria."
     results = sorted(wf.run_dir(tid).glob("result-*.json"), key=lambda p: p.stat().st_mtime)
     if not results:
         raise TPError(f"{tid} has no result yet.")
@@ -286,7 +304,8 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "digest":
         return run.cmd_digest(wf)
     if c == "closeout":
-        return run.cmd_closeout(wf, args.item, args.cls, args.note, args.decide, args.answer, args.ask)
+        return run.cmd_closeout(wf, args.item, args.cls, args.note, args.decide, args.answer, args.ask,
+                                args.items, args.all)
     if c == "widen":
         return planmod.cmd_widen(wf, args.id, args.path, args.reason, args.answer)
     if c == "budget":
@@ -308,7 +327,7 @@ def dispatch(args: argparse.Namespace) -> str:
     if c in ("research", "recon"):
         if args.what == "add":
             return research.cmd_add(wf, args.id, args.agent, args.purpose, Path(args.questions_file), args.done_when,
-                                    args.minutes, args.from_ref)
+                                    args.minutes, args.from_ref, args.model)
         if args.what == "extend":
             return research.cmd_extend(wf, args.minutes, args.answer, args.note)
         if args.what == "dismiss":
@@ -343,6 +362,10 @@ def dispatch(args: argparse.Namespace) -> str:
         return "\n\n".join(done)
     if c == "record":
         return run.after_record(wf, run.cmd_record(wf, args.id, args.agent_id))
+    if c == "advance":
+        return run.cmd_advance(wf, args.id, args.agent_id)
+    if c == "publish":
+        return publish.cmd_publish(wf, args.id, args.answer)
     if c == "sample":
         return run.cmd_sample(wf, args.id)
     if c == "accept":

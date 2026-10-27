@@ -19,13 +19,55 @@ BUILTIN_TASK_CHECKS = {"docs": "every relative link resolves, and every code cit
 BUILTIN_FINAL_CHECKS = {"docs-all": "links, citations, and reachability from index.md for the Markdown each write "
                                     "workspace gained or changed since approval (every file when it is not under git)"}
 REVIEW_MINUTES = 8
+# `tp publish` destinations: what the manager posts, from a reviewed `wf:` draft, after the human's OK.
+PUBLISH_TARGETS = ("jira-comment", "jira-description")
+WHEN = ("after_review", "anytime")
+# A transport agent's brief that asks it to write the content itself: content is a document task's.
+_DRAFTING = re.compile(r"(?<![\w:/.-])(draft(s|ing)?|summari[sz](e[sd]?|ing)|write[- ]up|documenting)\b", re.I)
+
+
+def is_integration(task: Dict[str, Any], scope: Dict[str, Any]) -> bool:
+    return task_kind(task, scope) == "integration" or bool(task.get("publish"))
+
+
+def is_publish(task: Dict[str, Any]) -> bool:
+    return bool(task.get("publish"))
+
+
+def wf_rel(path: str) -> Optional[str]:
+    """`wf:<rel>` → rel; None for a workspace path."""
+    return str(path)[3:] if str(path).startswith("wf:") else None
 
 
 def review_batches(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The end-of-pipeline review batches: the plan's, or one batch of every task."""
+    """The end-of-pipeline review batches: the plan's, or one batch of every task. Integration
+    tasks are never reviewed: they post content another task wrote and the review already saw."""
     if not scopemod.final_reviewers(scope):
         return []
-    return plan.get("review_batches") or [{"id": "B1", "tasks": [t["id"] for t in plan["tasks"]]}]
+    if plan.get("review_batches"):
+        return plan["review_batches"]
+    # By default code and documents are separate batches, so code review can start before the
+    # documents are written, and the documents are reviewed against the reviewed code.
+    work = [t for t in plan["tasks"] if not is_integration(t, scope)]
+    groups = [[t["id"] for t in work if is_code(t, scope)], [t["id"] for t in work if not is_code(t, scope)]]
+    return [{"id": f"B{i}", "tasks": ids} for i, ids in enumerate((g for g in groups if g), 1)]
+
+
+def review_sessions(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """One session per batch and review unit (a packed lens session or a lone reviewer), over the
+    batch's whole work. Every unit sees every batch: in a real run the doc reviewer caught wrong
+    code comments, and the code lenses caught false claims in the documents. code: the batch is
+    all code, so its review may start before the rest of the work is done."""
+    tasks = {t["id"]: t for t in plan["tasks"]}
+    out = []
+    for b in review_batches(plan, scope):
+        mine = [tid for tid in b.get("tasks", []) if tid in tasks and not is_integration(tasks[tid], scope)]
+        if not mine:
+            continue
+        for unit in scopemod.review_units(scope):
+            out.append({"sid": f"{b['id']}/{unit['name']}", "batch": b["id"], "reviewer": unit["agent"],
+                        "lenses": unit["lenses"], "tasks": mine, "code": all(is_code(tasks[t], scope) for t in mine)})
+    return out
 
 
 def session_minutes(batch: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any]) -> int:
@@ -38,8 +80,7 @@ def session_minutes(batch: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str
 def review_tail(plan: Dict[str, Any], scope: Dict[str, Any]) -> Tuple[int, int]:
     """(review sessions, minutes they add after the last task): the sessions spread over the
     lanes, then one verification session each."""
-    reviewers = len(scopemod.final_reviewers(scope))
-    lengths = [session_minutes(b, plan, scope) for b in review_batches(plan, scope) for _ in range(reviewers)]
+    lengths = [session_minutes(s, plan, scope) for s in review_sessions(plan, scope)]
     if not lengths:
         return 0, 0
     lanes = limit("max_in_flight")
@@ -47,7 +88,7 @@ def review_tail(plan: Dict[str, Any], scope: Dict[str, Any]) -> Tuple[int, int]:
     return len(lengths), review + math.ceil(len(lengths) / lanes) * limit("verify_session_minutes")
 
 
-def _validate_batches(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
+def _validate_batches(plan: Dict[str, Any], scope: Dict[str, Any], frozen: Set[str] = frozenset()) -> List[str]:
     ids = [t.get("id") for t in plan["tasks"]]
     if plan.get("review_batches") and not scopemod.final_reviewers(scope):
         return ["review_batches need review 'final' in scope.json."]
@@ -56,6 +97,7 @@ def _validate_batches(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
         return []
     errs = []
     seen: Dict[str, str] = {}
+    by_id = {t.get("id"): t for t in plan["tasks"]}
     for b in batches:
         bid = str(b.get("id", ""))
         if not re.fullmatch(r"B\d+", bid):
@@ -65,14 +107,19 @@ def _validate_batches(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
                 errs.append(f"{bid}: unknown task {tid}.")
             elif tid in seen:
                 errs.append(f"{tid} is in two review batches ({seen[tid]}, {bid}).")
+            elif is_integration(by_id[tid], scope) and tid not in frozen:
+                errs.append(f"{bid}: {tid} is integration work, which is never reviewed — review the task that "
+                            "writes its content, and leave the integration task out of review_batches.")
             seen[tid] = bid
-        minutes, cap = session_minutes(b, plan, scope), limit("max_review_session_minutes")
-        if len(b.get("tasks", [])) > limit("max_batch_tasks") or minutes > cap:
-            errs.append(f"{bid} needs about {minutes} min of review per reviewer ({len(b.get('tasks', []))} tasks); "
-                        f"one session is at most {cap} min and {limit('max_batch_tasks')} tasks — split the work "
-                        "into smaller review_batches.")
+    cap = limit("max_review_session_minutes")
+    for s in review_sessions(plan, scope):
+        minutes = session_minutes(s, plan, scope)
+        if len(s["tasks"]) > limit("max_batch_tasks") or minutes > cap:
+            errs.append(f"{s['sid']} needs about {minutes} min of review ({len(s['tasks'])} tasks); one session is "
+                        f"at most {cap} min and {limit('max_batch_tasks')} tasks — split the work into smaller "
+                        "review_batches.")
     for tid in ids:
-        if tid not in seen:
+        if tid not in seen and not is_integration(by_id[tid], scope):
             errs.append(f"{tid} is in no review batch.")
     return errs
 
@@ -172,7 +219,7 @@ def conventions_shas(plan: Dict[str, Any], scope: Dict[str, Any], wf_root: Path)
 
 
 def lane_minutes(task: Dict[str, Any], scope: Dict[str, Any]) -> int:
-    return int(task.get("estimate_min", 0)) + (REVIEW_MINUTES if reviewer_for(task, scope) else 0)
+    return int(task.get("estimate_min", 5 if task.get("publish") else 0)) + (REVIEW_MINUTES if reviewer_for(task, scope) else 0)
 
 
 def critical_path(tasks: Dict[str, Dict[str, Any]], scope: Dict[str, Any]) -> Tuple[int, List[str]]:
@@ -192,8 +239,16 @@ CATCH_ALLS = (".", "./", "**", "**/*")
 
 
 def path_errors(tid: str, p: Any) -> List[str]:
-    """Why a task path is not one the task can own: it leaves the workspace, or it names all of it
-    (`.` once swept .git objects into a hand-back; `**` once swept ~1000 node_modules files)."""
+    """Why a task path is not one the task can own: it leaves the workspace (or, for `wf:<path>`,
+    the workflow folder), or it names all of it (`.` once swept .git objects into a hand-back;
+    `**` once swept ~1000 node_modules files)."""
+    rel = wf_rel(str(p))
+    if rel is not None:
+        rp = PurePosixPath(rel)
+        if not rel.strip() or rp.is_absolute() or ".." in rp.parts or rel.strip() in CATCH_ALLS \
+                or any(ch in rel for ch in "*?["):
+            return [f"{tid}: path {p} must name one file inside the workflow folder (`wf:drafts/x.md`)."]
+        return []
     pp = PurePosixPath(str(p))
     if pp.is_absolute() or ".." in pp.parts or not str(p).strip():
         return [f"{tid}: path {p} leaves the workspace; paths are relative to it."]
@@ -203,7 +258,54 @@ def path_errors(tid: str, p: Any) -> List[str]:
     return []
 
 
-def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any], wf_root: Path) -> List[str]:
+def _role_errors(tid: str, t: Dict[str, Any], kind: Optional[str]) -> List[str]:
+    """A task's files must be ones its author is built to write. A transport agent (a liaison)
+    moves approved content and owns only `wf:` files; a document author never owns source code."""
+    agent, paths = t.get("agent"), [str(p) for p in t.get("paths", [])]
+    roles = scopemod.roles()
+    if t.get("publish"):
+        return []
+    errs = []
+    if scopemod.is_transport(agent):
+        repo = [p for p in paths if wf_rel(p) is None]
+        if repo:
+            errs.append(f"{tid}: {agent} transports approved content and never writes repository files "
+                        f"({', '.join(repo)}): give it only `wf:` paths (a receipt or a dry-run payload).")
+        if _DRAFTING.search(str(t.get("brief", ""))):
+            errs.append(f"{tid}: {agent} is asked to write content itself. Content is a document: a doc-author task "
+                        "writes it to `wf:drafts/<name>.md` (reviewed like any document), and a `publish` task posts "
+                        "it (`tp publish`, after the human's OK) — `tp schema plan` shows both.")
+    if agent in roles.get("no_code", []):
+        code = [p for p in paths if wf_rel(p) is None and scopemod.is_code_file(p)]
+        if code:
+            errs.append(f"{tid}: {agent} owns source code ({', '.join(code)}) — a code change, comments included, "
+                        "belongs to a code task (test-author then code-author); split those files out.")
+    return errs
+
+
+def _publish_errors(tid: str, t: Dict[str, Any], tasks: Dict[str, Dict[str, Any]], before: Set[str],
+                    kinds: Optional[str]) -> List[str]:
+    pub = t.get("publish") or {}
+    errs = []
+    if kinds != "integration":
+        errs.append(f"{tid}: a publish task serves an integration deliverable.")
+    if pub.get("to") not in PUBLISH_TARGETS:
+        errs.append(f"{tid}: publish.to must be one of {', '.join(PUBLISH_TARGETS)}.")
+    if not str(pub.get("target", "")).strip():
+        errs.append(f"{tid}: publish.target names the issue key or PR number.")
+    body = str(pub.get("body", ""))
+    writers = [o for o in before if body in [str(p) for p in tasks[o].get("paths", [])]]
+    if wf_rel(body) is None or not writers:
+        errs.append(f"{tid}: publish.body {body or '(missing)'} must be a `wf:` file that a task {tid} depends on "
+                    "writes (a doc-author task drafts it; the review checks it before it is posted).")
+    return errs
+
+
+def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any], wf_root: Path,
+             frozen: Set[str] = frozenset()) -> List[str]:
+    """frozen: tasks an amendment leaves exactly as approved. Rules added since a run was approved
+    (role fit, integration out of review) judge only what the amendment adds or changes; a frozen
+    task cannot change, so refusing it would make the run impossible to amend."""
     errs: List[str] = []
     wss = scopemod.workspaces(scope)
     deliverables = {d["id"] for d in scope["deliverables"]}
@@ -247,7 +349,10 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
             computable = False
             continue
         tasks[tid] = t
-        for key in ("title", "agent", "workspace", "paths", "brief", "acceptance", "serves"):
+        publish = t.get("publish")
+        required = ("title", "workspace", "serves", "publish") if publish else \
+            ("title", "agent", "workspace", "paths", "brief", "acceptance", "serves")
+        for key in required:
             if not t.get(key):
                 errs.append(f"{tid}: needs `{key}`.")
         unknown = [d for d in t.get("serves", []) if d not in deliverables]
@@ -257,7 +362,7 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
         kind = task_kind(t, scope)
         if t.get("serves") and not unknown and kind is None:
             errs.append(f"{tid}: every deliverable a task serves must be of one kind.")
-        agent = t.get("agent")
+        agent = None if publish else t.get("agent")
         if agent and kind and (agent not in authors or kind not in scopemod.agent_kinds(agent, "author")):
             errs.append(f"{tid}: agent {agent} is not a confirmed author for {kind} in scope.json.")
         ws = wss.get(t.get("workspace", ""))
@@ -267,6 +372,9 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
             errs.append(f"{tid}: workspace {ws['name']} is read-only; deliverables go in a write workspace.")
         for p in t.get("paths", []):
             errs += path_errors(tid, p)
+        errs += [] if tid in frozen else _role_errors(tid, t, kind)
+        if t.get("when", "after_review") not in WHEN:
+            errs.append(f"{tid}: when must be after_review (integration waits for the final review) or anytime.")
         for src in t.get("sources", []):
             prefix, _, ref = str(src).partition(":")
             if prefix == "research":
@@ -287,7 +395,7 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
             if c not in checks:
                 errs.append(f"{tid}: unknown check {c!r} (built in: {', '.join(BUILTIN_TASK_CHECKS)}; "
                             "or define it in plan `checks`).")
-        est = t.get("estimate_min")
+        est = t.get("estimate_min", 5 if publish else None)
         if not isinstance(est, int) or est < 1:
             errs.append(f"{tid}: estimate_min must be a whole number of minutes.")
             computable = False
@@ -318,6 +426,9 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
         ancestors = _ancestors(tasks)
     except TPError as exc:
         return errs + exc.lines
+    for tid, t in tasks.items():
+        if t.get("publish") and tid not in frozen:
+            errs += _publish_errors(tid, t, tasks, ancestors[tid], kinds=task_kind(t, scope))
     ids = list(tasks)
     for i, a in enumerate(ids):
         for b in ids[i + 1:]:
@@ -330,14 +441,42 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
                         errs.append(f"{a} and {b} overlap on {pa} / {pb} — order them with depends_on "
                                     "or split the paths (parallel tasks must write disjoint files).")
 
-    errs += _validate_batches(plan, scope)
+    errs += _validate_batches(plan, scope, frozen)
     # The budget never refuses a plan: a plan that runs past it is shown that way in plan.md and
     # the human approves it knowingly. Small tasks come from the per-task size limits above, not
     # from cutting or merging work to fit a number.
     return errs
 
 
-def warnings(plan: Dict[str, Any]) -> List[str]:
+def _serial_chains(tasks: Dict[str, Dict[str, Any]], scope: Dict[str, Any]) -> List[Tuple[List[str], str]]:
+    """Runs of three or more code tasks, each depending on the one before, that write the same
+    file: each one starts a fresh test author and code author who re-read that file from scratch."""
+    shared: Dict[Tuple[str, str], Set[str]] = {}
+    for tid, t in tasks.items():
+        for dep in t.get("depends_on", []):
+            if dep in tasks and is_code(t, scope) and is_code(tasks[dep], scope):
+                common = set(map(str, t.get("paths", []))) & set(map(str, tasks[dep].get("paths", [])))
+                if common:
+                    shared[(dep, tid)] = common
+    nxt: Dict[str, List[str]] = {}
+    for a, b in shared:
+        nxt.setdefault(a, []).append(b)
+    has_prev = {b for _, b in shared}
+    chains = []
+    for start in sorted(a for a in nxt if a not in has_prev):
+        chain, files = [start], None
+        while chain[-1] in nxt:
+            step = sorted(nxt[chain[-1]])[0]
+            files = shared[(chain[-1], step)] if files is None else files & shared[(chain[-1], step)]
+            if not files:
+                break
+            chain.append(step)
+        if len(chain) >= 3 and files:
+            chains.append((chain, sorted(files)[0]))
+    return chains
+
+
+def warnings(plan: Dict[str, Any], scope: Optional[Dict[str, Any]] = None) -> List[str]:
     """What a plan check cannot refuse but the manager should know before the run hits it."""
     out = []
     for t in plan.get("tasks", []):
@@ -346,6 +485,18 @@ def warnings(plan: Dict[str, Any]) -> List[str]:
             if "report" in PurePosixPath(name).stem.lower():
                 out.append(f"{t.get('id')} writes {name}: Claude Code has refused a sub-agent creating a new "
                            "report-like file (seen with report.md) — prefer a name such as README.md or synthesis.md.")
+    if scope is None:
+        return out
+    tasks = {t["id"]: t for t in plan.get("tasks", [])}
+    for chain, f in _serial_chains(tasks, scope):
+        out.append(f"{' → '.join(chain)} write {f} one after another: each code task starts a fresh test author and "
+                   "code author who re-read it. Merge them into fewer tasks (up to "
+                   f"{limit('max_task_minutes')} min each) unless each needs its own review.")
+    span, path = critical_path(tasks, scope)
+    total = sum(lane_minutes(t, scope) for t in tasks.values())
+    if len(path) >= 3 and total and span >= 0.8 * total:
+        out.append(f"critical path {' → '.join(path)} holds {span} of {total} task-minutes: little runs in parallel "
+                   f"(3 lanes). Split the work along disjoint files so tasks can run side by side.")
     return out
 
 
@@ -367,23 +518,30 @@ def render(plan: Dict[str, Any], scope: Dict[str, Any], wf: Workflow) -> str:
         out += ["**Conventions every brief starts from** (frozen with the plan): "
                 + ", ".join(f"`{c}`" for c in plan["conventions"]), ""]
     if sessions:
-        nb, nr = len(review_batches(plan, scope)), len(scopemod.final_reviewers(scope))
-        out += [f"**Review:** {nb} batch{'es' if nb > 1 else ''} × {nr} reviewer{'s' if nr > 1 else ''} = "
-                f"{sessions} review session{'s' if sessions > 1 else ''} ({', '.join(scopemod.final_reviewers(scope))}), "
-                f"run together after every task is accepted, plus at most {sessions} verification "
-                f"session{'s' if sessions > 1 else ''} scoped to what they find (about {tail} min).", ""]
+        names = [s["sid"] + (f" ({', '.join(s['lenses'])})" if s["lenses"] else "") for s in review_sessions(plan, scope)]
+        out += [f"**Review:** {sessions} review session{'s' if sessions > 1 else ''} — {'; '.join(names)} — each over "
+                "its whole batch. An all-code batch is reviewed once its code is accepted; any other batch once "
+                f"every task is accepted and the code reviews are done (document review once the code reviews are done). Then at most {sessions} verification session{'s' if sessions > 1 else ''} scoped "
+                f"to what they find (about {tail} min). Integration tasks run after the review.", ""]
     out += [
            "| Task | Title | Agent | Review | Est | After | Writes |", "|---|---|---|---|---|---|---|"]
     for t in tasks.values():
         rev = reviewer_for(t, scope) or "—"
         deps = ", ".join(t.get("depends_on", [])) or "—"
-        paths = ", ".join(f"`{p}`" for p in t["paths"])
-        out.append(f"| {t['id']} | {t['title']} | {t['agent']} | {rev} | {t['estimate_min']}m | {deps} | "
-                   f"{t['workspace']}: {paths} |")
+        if t.get("publish"):
+            pub = t["publish"]
+            writes = f"{pub['to']} {pub['target']} ← `{pub['body']}`"
+            agent = "tp publish"
+        else:
+            writes = f"{t['workspace']}: " + ", ".join(f"`{p}`" for p in t["paths"])
+            agent = t["agent"]
+        out.append(f"| {t['id']} | {t['title']} | {agent} | {rev} | {t.get('estimate_min', 5)}m | {deps} | {writes} |")
     out += ["", "## Tasks"]
     for t in tasks.values():
-        out += ["", f"### {t['id']} — {t['title']} (serves {', '.join(t['serves'])})", "", t["brief"], ""]
-        out += [f"- [ ] {a}" for a in t["acceptance"]]
+        out += ["", f"### {t['id']} — {t['title']} (serves {', '.join(t['serves'])})", "",
+                t.get("brief") or f"The manager posts `{t['publish']['body']}` with `tp publish {t['id']}` after the "
+                                  "human's OK.", ""]
+        out += [f"- [ ] {a}" for a in t.get("acceptance", [])]
         checks = list(t.get("checks", []))
         if t.get("test_cmd"):
             checks.insert(0, f"tests first, then `{t['test_cmd']}` {'passes' if t.get('test_mode') == 'pin' else 'red → green'}")
@@ -418,9 +576,9 @@ def cmd_check(wf: Workflow) -> str:
     state = wf.load()
     if state["phase"] != "PLANNING":
         raise TPError(f"Plans are checked in PLANNING; the workflow is {state['phase']}.")
-    plan, _ = _checked(wf, state)
+    plan, scope = _checked(wf, state)
     wf.event("plan_check", tasks=len(plan["tasks"]))
-    return "\n".join([f"WARN: {w}" for w in warnings(plan)]
+    return "\n".join([f"WARN: {w}" for w in warnings(plan, scope)]
                      + [f"plan ok — {len(plan['tasks'])} tasks; rendered {wf.root / 'plan.md'}. Next: `tp plan submit`."])
 
 
@@ -477,6 +635,7 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
     from . import review  # end-of-pipeline review sessions and their diff baseline
     state["write_baseline"] = review.write_baseline(scope)
     state["reviews"] = review.new_reviews(plan, scope, state.get("reviews", {}))
+    state["integration"] = review.integration_ids(plan, scope)
     wf.save(state)
     wf.decision("plan approve", answer)
     wf.event("approve")
@@ -566,7 +725,9 @@ def cmd_amend(wf: Workflow, answer: Optional[str]) -> str:
         draft = load_json(draft_path, "the amended plan")
         if not isinstance(draft, dict) or not isinstance(draft.get("tasks"), list):
             raise TPError(f"{draft_path} must be a JSON object with a `tasks` list.")
-        errs = validate(draft, scope, state, wf.root)
+        new = {t.get("id"): t for t in draft["tasks"]}
+        frozen = {t["id"] for t in approved["tasks"] if new.get(t["id"]) == t}
+        errs = validate(draft, scope, state, wf.root, frozen)
         changes, refusals = _amendment(approved, draft, scope, state, wf.root)
         if errs or refusals:
             raise TPError(*(errs + refusals))
@@ -589,6 +750,7 @@ def cmd_amend(wf: Workflow, answer: Optional[str]) -> str:
         for tid in ids:
             state["tasks"].setdefault(tid, run.new_task_state())
         state["reviews"] = review.new_reviews(draft, scope, state.get("reviews", {}))
+        state["integration"] = review.integration_ids(draft, scope)
         state.setdefault("amendments", []).append({"ts": now_iso(), "changes": changes, "answer": answer})
         wf.save(state)
         (wf.root / "plan.md").write_text(render(draft, scope, wf))
@@ -614,6 +776,8 @@ def cmd_widen(wf: Workflow, tid: str, paths: List[str], reason: str, answer: Opt
         task = next((t for t in plan["tasks"] if t["id"] == tid), None)
         if task is None or tid not in state["tasks"]:
             raise TPError(f"{tid} is not a task in the approved plan.")
+        if task.get("publish"):
+            raise TPError(f"{tid} is a publish task: it writes no files.")
         added = [p for p in dict.fromkeys(str(p).strip() for p in paths) if p and p not in task["paths"]]
         if not added:
             raise TPError("no new paths: every path is already in the task's write set.")
@@ -635,7 +799,7 @@ def cmd_widen(wf: Workflow, tid: str, paths: List[str], reason: str, answer: Opt
         unordered = [o for o in plan["tasks"] if o["id"] != tid and o["workspace"] == task["workspace"]
                      and o["id"] not in ancestors[tid] and tid not in ancestors[o["id"]]]
         errs += [f"{p} overlaps {o['id']}'s {q}, and the two tasks are not ordered — route the finding to "
-                 f"{o['id']} (reopen it) or amend the plan." for o in unordered for p in added for q in o["paths"]
+                 f"{o['id']} (reopen it) or amend the plan." for o in unordered for p in added for q in o.get("paths", [])
                  if paths_overlap(p, q)]
         if errs:
             raise TPError(*errs)

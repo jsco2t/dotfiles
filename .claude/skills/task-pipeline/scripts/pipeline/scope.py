@@ -56,6 +56,38 @@ def final_reviewers(scope: Dict[str, Any]) -> List[str]:
     return participants(scope, "reviewer") if scope.get("review") in ("final", "both") else []
 
 
+def review_units(scope: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The final review's sessions per batch: each catalog pack whose confirmed members number two
+    or more runs as one session of its runner agent (each member a lens); every other confirmed
+    reviewer runs as itself. kinds: what the unit reviews (its members' reviewer kinds)."""
+    reviewers = final_reviewers(scope)
+    units, packed = [], set()
+    for runner, members in catalog().get("review_packs", {}).items():
+        if runner.startswith("_"):
+            continue
+        chosen = [r for r in reviewers if r in members]
+        if len(chosen) >= 2:
+            packed |= set(chosen)
+            units.append({"name": runner, "agent": runner, "lenses": chosen,
+                          "kinds": sorted({k for r in chosen for k in agent_kinds(r, "reviewer")})})
+    for r in reviewers:
+        if r not in packed:
+            units.append({"name": r, "agent": r, "lenses": [], "kinds": agent_kinds(r, "reviewer")})
+    return units
+
+
+def roles() -> Dict[str, Any]:
+    return catalog().get("roles", {})
+
+
+def is_transport(agent: Optional[str]) -> bool:
+    return agent in roles().get("transport", [])
+
+
+def is_code_file(path: str) -> bool:
+    return Path(str(path)).suffix.lower() in roles().get("code_extensions", [])
+
+
 def validate(scope: Dict[str, Any]) -> List[str]:
     cat = catalog()
     agents = cat["agents"]
@@ -126,7 +158,7 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     if reviewers > limit("max_reviewers"):
         errs.append(f"{reviewers} reviewers; the limit is {limit('max_reviewers')} — keep the lenses this change needs.")
 
-    for kind in sorted(kinds):
+    for kind in sorted(kinds - {"integration"}):  # tp publish posts integration work; a liaison is optional
         authors = [a for a in participants(scope, "author") if kind in agent_kinds(a, "author")]
         if not authors:
             who = ", ".join(d["id"] for d in scope["deliverables"] if d.get("kind") == kind)

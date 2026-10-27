@@ -10,14 +10,15 @@ import re
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import briefs, snapshot
 from . import plan as planmod
 from . import run
 from . import scope as scopemod
-from .common import TPError, Workflow, limit, load_json, minutes_since, now_iso
+from .common import SKILL, TPError, Workflow, limit, load_json, minutes_since, now_iso
 
+AGENTS = SKILL.parents[1] / "agents"
 CITE_TAIL = re.compile(r":\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 
 
@@ -34,14 +35,35 @@ def write_baseline(scope: Dict[str, Any]) -> Dict[str, str]:
 
 
 def new_reviews(plan: Dict[str, Any], scope: Dict[str, Any], existing: Dict[str, Any]) -> Dict[str, Any]:
+    """The review sessions the plan implies (planmod.review_sessions). A session already started
+    keeps running as it is, even when the plan would now shape it differently. A run approved
+    before packed, batch-scoped sessions keeps its shape (one session per batch and reviewer)."""
+    if any("tasks" not in s for s in existing.values()):
+        legacy = dict(existing)
+        for b in planmod.review_batches(plan, scope):
+            for reviewer in scopemod.final_reviewers(scope):
+                legacy.setdefault(f"{b['id']}/{reviewer}", {
+                    "batch": b["id"], "reviewer": reviewer, "status": "pending", "round": 0, "agent_id": None,
+                    "findings": [], "accepted": [], "dismissed": {}, "fix_tasks": [], "extra_rounds": 0})
+        return legacy
     sessions = {}
-    for b in planmod.review_batches(plan, scope):
-        for reviewer in scopemod.final_reviewers(scope):
-            sid = f"{b['id']}/{reviewer}"
-            sessions[sid] = existing.get(sid) or {"batch": b["id"], "reviewer": reviewer, "status": "pending",
-                                                  "round": 0, "agent_id": None, "findings": [], "accepted": [],
-                                                  "dismissed": {}, "fix_tasks": [], "extra_rounds": 0}
+    for spec in planmod.review_sessions(plan, scope):
+        cur = existing.get(spec["sid"])
+        if cur is None:
+            cur = {"batch": spec["batch"], "reviewer": spec["reviewer"], "status": "pending", "round": 0,
+                   "agent_id": None, "findings": [], "accepted": [], "dismissed": {}, "fix_tasks": [],
+                   "extra_rounds": 0}
+        if cur["status"] == "pending":
+            cur.update(lenses=spec["lenses"], tasks=spec["tasks"], code=spec["code"])
+        sessions[spec["sid"]] = cur
+    for sid, s in existing.items():
+        if sid not in sessions and s["status"] != "pending":
+            sessions[sid] = s
     return sessions
+
+
+def integration_ids(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
+    return [t["id"] for t in plan["tasks"] if planmod.is_integration(t, scope)]
 
 
 def sessions(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -66,17 +88,35 @@ def _all_accepted(state: Dict[str, Any], ids: Optional[List[str]] = None) -> boo
     return all(tasks[t]["status"] in run.DONE_STATES for t in ids) and not any(t in state["in_flight"] for t in ids)
 
 
+def _ready(state: Dict[str, Any], s: Dict[str, Any]) -> bool:
+    """Whether a session can be dispatched now. Code review starts once its own tasks are accepted;
+    document review waits for every non-integration task and every code review, so the documents
+    it judges already describe the final code. Sessions from before kind-aware review wait for
+    every task, as they always did."""
+    if s["status"] == "waiting_fixes":
+        return _all_accepted(state, s["fix_tasks"])
+    if s["status"] != "pending":
+        return False
+    if "tasks" not in s:
+        return _all_accepted(state)
+    if not _all_accepted(state, s["tasks"]):
+        return False
+    if s.get("code"):
+        return True
+    work = [t for t in state["tasks"] if t not in state.get("integration", [])]
+    return _all_accepted(state, work) and all(o["status"] == "done" for o in sessions(state).values()
+                                              if o.get("code"))
+
+
 def actions(state: Dict[str, Any], free: int) -> List[Dict[str, Any]]:
     acts: List[Dict[str, Any]] = []
-    everything = _all_accepted(state)
     for sid, s in sessions(state).items():
         if s["status"] == "blocked":
             acts.append({"action": "human", "id": sid, "why": s.get("summary", f"{sid} is blocked")})
         elif s["status"] == "needs_triage":
             acts.append({"action": "triage", "id": sid})
     for sid, s in sessions(state).items():
-        ready = (s["status"] == "pending" and everything) or \
-                (s["status"] == "waiting_fixes" and _all_accepted(state, s["fix_tasks"]))
+        ready = _ready(state, s)
         if ready and free > 0:
             acts.append({"action": "review", "id": sid, "step": "review" if s["round"] == 0 else "verify",
                          "agent": s["reviewer"], "agent_id": s["agent_id"] if s["round"] else None, "model": None})
@@ -84,18 +124,30 @@ def actions(state: Dict[str, Any], free: int) -> List[Dict[str, Any]]:
     return acts
 
 
+DIFF_CAP = 2_000_000
+
+
 def _changes(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], tasks: List[Dict[str, Any]],
-             bid: str) -> Dict[str, Any]:
+             bid: str, label: str, whole_batch: bool = True) -> Dict[str, Any]:
+    """The change under review, as two files: a structured one (files, and each workspace's diff
+    command) and the diff itself — tracked changes against the approval baseline, then new files
+    and `wf:` drafts in full — so no reviewer runs git, and none re-reads what another listed."""
     files: List[str] = []
     abs_paths: Dict[str, List[str]] = {}
     pathspecs: Dict[str, List[str]] = {}
+    drafts: List[Path] = []
     for t in tasks:
         ws = run._ws(scope, t["workspace"])
-        found = [str(p.relative_to(ws)) for p in run._expand(ws, t["paths"])]
-        files += [f"{t['workspace']}:{r}" for r in found]
-        abs_paths[t["id"]] = [str(ws / r) for r in found] or [str(ws / p) for p in t["paths"]]
-        pathspecs.setdefault(t["workspace"], []).extend(t["paths"])
+        repo = [p for p in t.get("paths", []) if planmod.wf_rel(p) is None]
+        mine = [wf.root / planmod.wf_rel(p) for p in t.get("paths", []) if planmod.wf_rel(p) is not None]
+        found = [str(p.relative_to(ws)) for p in run._expand(ws, repo)]
+        files += [f"{t['workspace']}:{r}" for r in found] + [f"wf:{f.relative_to(wf.root)}" for f in mine]
+        abs_paths[t["id"]] = ([str(ws / r) for r in found] or [str(ws / p) for p in repo]) + [str(f) for f in mine]
+        if repo:
+            pathspecs.setdefault(t["workspace"], []).extend(repo)
+        drafts += [f for f in mine if f.is_file()]
     diff, untracked = {}, {}
+    text: List[str] = []
     for name, specs in pathspecs.items():
         base = state.get("write_baseline", {}).get(name)
         if not base:
@@ -106,10 +158,39 @@ def _changes(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], tasks: 
         listed = subprocess.run(["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "--",
                                  *sorted(set(specs))], capture_output=True, text=True)
         untracked[name] = [ln for ln in listed.stdout.splitlines() if ln]
+        shown = subprocess.run(["git", "-C", str(root), "diff", base, "--", *sorted(set(specs))],
+                               capture_output=True, text=True, errors="replace")
+        text += [f"=== {name}: {diff[name]}", shown.stdout]
+        text += [f"=== {name}: new file {rel}\n" + (root / rel).read_text(errors="replace")
+                 for rel in untracked[name] if (root / rel).is_file()]
+    text += [f"=== wf: {d.relative_to(wf.root)}\n" + d.read_text(errors="replace") for d in drafts]
     data = {"batch": bid, "files": sorted(set(files)), "diff": diff, "untracked": untracked}
-    out = wf.run_dir(bid) / "changes.json"
+    out = wf.run_dir(bid) / ("changes.json" if whole_batch else f"changes-{label}.json")
     out.write_text(json.dumps(data, indent=1))
-    return {"changes": str(out), "paths": abs_paths}
+    diff_file = wf.run_dir(bid) / f"{label}-change.diff"
+    body = "\n".join(text)
+    diff_file.write_text(body[:DIFF_CAP] + ("\n[... cut at 2 MB: read the remaining files directly]" if len(body) > DIFF_CAP else ""))
+    return {"changes": str(out), "paths": abs_paths, "diff_file": str(diff_file)}
+
+
+def _lens_texts(lenses: List[str]) -> List[Tuple[str, str]]:
+    """Each packed reviewer's own definition (its body, without frontmatter): the lens in full."""
+    out = []
+    for name in lenses:
+        path = AGENTS / f"{name}.md"
+        text = path.read_text() if path.exists() else f"Review through the {name} lens."
+        if text.startswith("---"):
+            text = text.split("---", 2)[2]
+        out.append((name, text))
+    return out
+
+
+def session_tasks(plan: Dict[str, Any], scope: Dict[str, Any], s: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """What a session reviews: its own tasks, or, for sessions from before kind-aware review, the batch."""
+    if s.get("tasks"):
+        by_id = {t["id"]: t for t in plan["tasks"]}
+        return [by_id[t] for t in s["tasks"] if t in by_id]
+    return _batch_tasks(plan, scope, s["batch"])
 
 
 def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
@@ -118,9 +199,13 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
         raise TPError(f"{sid} is not a review session in the approved plan.")
     plan, scope, _ = run._loaded(wf, state)
     if s["status"] == "pending":
-        if not _all_accepted(state):
-            open_ = [t for t, ts in state["tasks"].items() if ts["status"] not in run.DONE_STATES]
-            raise TPError(f"Review starts once every task is accepted; still open: {', '.join(open_)}.")
+        if not _ready(state, s):
+            open_ = [t for t, ts in state["tasks"].items() if ts["status"] not in run.DONE_STATES
+                     and t not in state.get("integration", [])]
+            raise TPError(f"{sid} is not ready: " + (
+                "code review starts once its tasks are accepted" if s.get("code") else
+                "document review starts once every task is accepted and the code reviews are done")
+                + (f"; still open: {', '.join(open_)}." if open_ else "; a code review is still open."))
     elif s["status"] == "waiting_fixes":
         if not _all_accepted(state, s["fix_tasks"]):
             raise TPError(f"{sid} verifies once {', '.join(s['fix_tasks'])} are accepted again.")
@@ -128,17 +213,29 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
         raise TPError(f"{sid} is {s['status']}; there is nothing to dispatch.")
     run._slots(state)
     n = s["round"] + 1
-    tasks = _batch_tasks(plan, scope, s["batch"])
+    tasks = session_tasks(plan, scope, s)
+    batch = _batch_tasks(plan, scope, s["batch"])
     rdir = wf.run_dir(s["batch"])
     rdir.mkdir(parents=True, exist_ok=True)
-    ctx = _changes(wf, state, scope, tasks, s["batch"])
-    ctx["sources"] = [w["path"] for w in scopemod.workspaces(scope).values() if w["mode"] == "read"] or ["the deliverables' own sources"]
+    ctx = _changes(wf, state, scope, tasks, s["batch"], s["reviewer"],
+                   whole_batch=[t["id"] for t in tasks] == [t["id"] for t in batch])
+    ctx["sources"] = [w["path"] for w in scopemod.workspaces(scope).values()] or ["the deliverables' own sources"]
     ctx["decisions"] = run.decision_lines(state, [t["id"] for t in tasks])  # so the reviewer does not flag them
     ctx["conventions"] = [str(p) for p in planmod.conventions(plan, scope, wf.root)]
+    ctx["lenses"] = _lens_texts(s.get("lenses") or [])
+    ctx["full_floor"], ctx["near_floor"] = limit("review_full_finding_floor"), limit("review_near_miss_floor")
+    # The logs tp wrote when it ran each task's own tests and checks: reviewers read them instead
+    # of re-running the suite. Nothing is run in a workspace on their behalf — snapshots would
+    # blame that run's build output on whichever agent is in flight.
+    ctx["logs"] = [log for t in (tasks if n == 1 else [x for x in tasks if x["id"] in s["fix_tasks"]])
+                   for log in run.task_logs(wf, t["id"])]
     brief, result = rdir / f"brief-{s['reviewer']}-{n}.md", rdir / f"{s['reviewer']}-{n}.json"
     if result.exists():
         result.unlink()
     agent_id = s["agent_id"] if n > 1 else None
+    fresh = run.fresh_note(agent_id)
+    if fresh:
+        agent_id = None
     if n == 1:
         brief.write_text(briefs.batch_review(s["batch"], s["reviewer"], tasks, ctx, result))
     else:
@@ -158,8 +255,10 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
     wf.event("dispatch", id=sid, step="review" if n == 1 else "verify", agent=s["reviewer"], round=n)
     call = briefs.dispatch_line(s["reviewer"], f"{sid} {'review' if n == 1 else 'verify'}",
                                 briefs.prompt(brief, result), agent_id, None)
-    return (f"DISPATCH {sid} · {'review' if n == 1 else 'verification'} · {s['reviewer']}\nbrief: {brief}\n"
-            f"send: {call}\nthen, when it replies: tp record {sid} --agent-id <its agent id>")
+    lenses = f" ({', '.join(s['lenses'])})" if s.get("lenses") else ""
+    return (f"DISPATCH {sid} · {'review' if n == 1 else 'verification'} · {s['reviewer']}{lenses}\n"
+            + (f"{fresh}\n" if fresh else "") + f"brief: {brief}\nsend: {call}\n"
+            f"then, when it replies: tp record {sid} --agent-id <its agent id>")
 
 
 def _validate(data: Any) -> List[str]:
@@ -184,6 +283,8 @@ def _validate(data: Any) -> List[str]:
         if f.get("id") in ids:
             errs.append(f"finding id {f['id']} is used twice.")
         ids.add(f.get("id"))
+    if not isinstance(data.get("near_misses", []), list):
+        errs.append("near_misses must be a list of one-line strings.")
     blocking = [f.get("id") for f in findings if isinstance(f, dict) and f.get("blocking") is True]
     if blocking and data.get("verdict") == "pass":
         errs.append(f"verdict 'pass' contradicts blocking finding {', '.join(map(str, blocking))}.")
@@ -243,8 +344,10 @@ def record(wf: Workflow, state: Dict[str, Any], sid: str, agent_id: Optional[str
     if agent_id:
         s["agent_id"] = agent_id
     for item in data.get("noticed", []):
-        wf.noticed(f"{sid} review", str(item))
-    tasks = _batch_tasks(plan, scope, s["batch"])
+        if not re.search(r":\s*no issues found\.?$", str(item), re.I):  # a packed lens reporting in
+            wf.noticed(f"{sid} review", str(item))
+    s["near_misses"] = [str(x) for x in data.get("near_misses", [])]
+    tasks = _batch_tasks(plan, scope, s["batch"])  # a finding routes to whichever batch task owns its file
     # Fix rounds dispatched while the reviewer worked write their own paths, as run.py allows for tasks.
     plan_tasks = {t["id"]: t for t in plan["tasks"]}
     allowed: Dict[str, List[str]] = {}
@@ -353,8 +456,23 @@ def _route(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope: Dic
         by_task.setdefault(f["task"], []).append(
             f"{result_name} {f['id']} ({f['state']}) at {f['where']}: {f['issue']}"
             + (f" Fix: {f['fix']}" if f.get("fix") else ""))
-    return {tid: run.add_fix(wf, state, tid, lines, fixing=run._authoring_step(plan_task(plan, tid), scope))
-            for tid, lines in sorted(by_task.items())}
+    out = {}
+    for tid in sorted(by_task):
+        task = plan_task(plan, tid)
+        routes: Dict[str, List[str]] = {}
+        for f, line in zip([f for f in findings if f["task"] == tid], by_task[tid]):
+            routes.setdefault(run.fix_route(task, scope, f), []).append(line)
+        tests = routes.get("tests-red", []) + routes.get("tests-green", [])
+        if tests:
+            # Test files are the test author's; a behaviour bug gets its failing test first, and
+            # the code author fixes it next, against that test.
+            queued = routes.get("tests-red", []) + routes.get("impl", [])
+            out[tid] = run.add_fix(wf, state, tid, tests, fixing="tests",
+                                   expect="red" if routes.get("tests-red") else "green", queued=queued)
+        else:
+            step = "impl" if routes.get("impl") else run._authoring_step(task, scope)
+            out[tid] = run.add_fix(wf, state, tid, routes.get("impl", []) + routes.get("author", []), fixing=step)
+    return out
 
 
 def _reopen(wf: Workflow, state: Dict[str, Any], sid: str, s: Dict[str, Any], fids: List[str], assign: List[str],

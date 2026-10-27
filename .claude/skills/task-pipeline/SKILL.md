@@ -21,7 +21,7 @@ python3 ~/.claude/skills/task-pipeline/scripts/tp.py -w <workflow dir> <command>
 ```
 
 `tp <command>` below means exactly that line; spell it out in every Bash call (zsh does not
-word-split a variable). **`tp next` always says what to do next** — run it after every step.
+word-split a variable). **`tp next` always says what to do next.**
 
 ## Rules
 
@@ -30,7 +30,7 @@ word-split a variable). **`tp next` always says what to do next** — run it aft
 2. **At most 3 agents in flight**, only agents confirmed in scope.json (both script-enforced).
    Never the Workflow tool or ad-hoc agents.
 3. **Structured files, not messages.** Agents read a brief file and write JSON; their reply is
-   one line. Read only the part you need: `tp show <id> --part …`, `tp schema <name>`.
+   one line. Read only what you need: `tp show <id> --part …`, `tp schema <name>`.
 4. **The approved plan is the contract.** Outside it: `tp note "<one line>"`; blocking:
    `tp exception --summary "..."` and a question.
 5. **Script before judgment.** If a command can decide it, a command decides it.
@@ -47,8 +47,7 @@ word-split a variable). **`tp next` always says what to do next** — run it aft
    workflow's own `<location>/<date>-<slug>/` folder and prints it: that is `-w` from then on.
 2. **Size it yourself first**, in ten minutes or less and with no agents: `tp survey <repo> --name
    <ws>` per repository, and `tp survey-issue jira:KEY` or `gh:owner/repo#N` for a named issue or
-   epic (it needs network access to that host). It prints children, thin issues, links, and a
-   starting-point research estimate.
+   epic (network needed): children, thin issues, links, and a research estimate.
 3. **Judge the research.** A clear, bounded ask needs none — plan directly. Research earns its
    cost when details are missing or the work is large: an epic's children, linked designs,
    unfamiliar code a change must fit. **If you are unsure how much research to do, ask.**
@@ -57,8 +56,7 @@ word-split a variable). **`tp next` always says what to do next** — run it aft
    security, api-compat, test) over broad ones; if unsure whether one should take part, ask.
 5. **One AskUserQuestion call** (at most 4 questions) covering the output (kind, format, where),
    participants (multiSelect), review (`none` or `final`), and conventions to honor. **Never ask
-   the human to approve or pick a time budget**: you size budgets, as reporting metadata. Still
-   ambiguous? Ask again; never assume.
+   the human to approve or pick a time budget**: you size it. Still ambiguous? Ask again.
 6. Write `scope.json` (`tp schema scope`), `tp scope check`, show the human the key lines of
    `scope.md`, and confirm (AskUserQuestion: Confirm / Change): `tp scope confirm --answer "..."`.
 
@@ -67,8 +65,9 @@ word-split a variable). **`tp next` always says what to do next** — run it aft
 - Each item is one agent, at most 3 narrow questions, a box of 15 minutes or less, and a purpose:
   `map` (how to split the work), `requirements` (what named issues or pages require), or
   `investigate` (how one named thing works). Many small items beat one big one.
-  `tp research add R1 --agent <a> --purpose <p> --questions-file <f> --done-when "..." [--minutes N]`
-- `tp dispatch R1 R2 R3`, send the calls, `tp record` each. Fact-check one answer per item.
+  `tp research add R1 --agent <a> --purpose <p> --questions-file <f> --done-when "..."` (`--model
+  sonnet` suits pattern work). `tp dispatch R1 R2 R3`, send the calls, `tp advance` each, and
+  fact-check one answer per item.
 - **Followups** come back in the result; decide each: `tp research add … --from R1.F2`, or
   `tp research dismiss R1.F2 --reason "..."`. Submit refuses while any is undecided.
 
@@ -76,15 +75,17 @@ word-split a variable). **`tp next` always says what to do next** — run it aft
 
 - **Planning maps the work; it never does the work.** One task per area, article, or unit, about
   15 minutes (30 at most), 1–6 objective acceptance criteria, a brief of 150 words or less.
-  Tasks cite findings as sources: `research:R3`.
-- Paths name the files a task writes — never `.` or a bare `**`.
-- Parallel tasks write disjoint paths; shared files (`index.md`) go to one integration task.
-- Rules every task follows go in one file in the workflow folder, listed in plan `conventions`
-  (`wf:conventions.md`): every brief starts from it, and it freezes with the plan. Sources may be `wf:<path>`.
+  Tasks cite findings as sources: `research:R3`. Paths name the files a task writes, never `.` or `**`.
+- **Route each kind of work to the agent built for it** (`tp plan check` enforces it):
+  code, comments included, is a code task; a document author never owns source files; a liaison
+  only transports (`wf:` paths only, never drafting). Text for Jira is a doc-author task writing
+  `wf:drafts/<name>.md`; a `publish` task posts it (`tp schema plan`). Integration runs after review.
+- Parallel tasks write disjoint paths; shared files (`index.md`) go to one task.
+- Rules every task follows: one file in plan `conventions` (`wf:conventions.md`); it freezes with the plan.
 - Code is test-forward: `test_cmd` (the task's package, not the whole suite) and `tests_paths`.
-- `docs` is a built-in task check; `docs-all` a built-in final check. Define repo commands in `checks`.
-- With `review: final`, split packages over 10 tasks into `review_batches`.
-- `tp plan check` until clean, then `tp plan submit`.
+- `docs` is a built-in task check; `docs-all` a built-in final check. Repo commands go in `checks`.
+- `review: final` packs the single-lens code reviewers into one session; split over 10 tasks
+  into `review_batches`. `tp plan check` until clean, then `tp plan submit`.
 
 ## Stage 4 — Approval
 
@@ -97,51 +98,48 @@ and noticed items, with the path to `plan.md`. AskUserQuestion: Approve / Revise
 Load the deferred tools first: ToolSearch `select:SendMessage,TaskStop`. Pre-existing breakage →
 `tp baseline` once now. Then loop on `tp next`:
 
-- **dispatch / fix / review** → `tp dispatch <id> [<id> …]` (every ready id in one call, never
-  chained), then send each printed `Agent(...)`/`SendMessage(...)` call, all in one message.
-- **An agent replies** → `tp record <id> --agent-id <its id>` with Bash `timeout` 600000.
-- **Digest** (`tp digest`) after each wave settles and for a mid-run "status?" — then keep working.
-- **check** → fact-check the printed sample (does each cited line say what the sentence claims?
-  for code, read the diff), then `tp accept <id> --note "..."` or `tp reject <id> --reason "..."`.
-- **A fix needs a file just outside its paths** → `tp widen <id> --path <file> --reason "..."`,
-  only for a file the same deliverable needs.
-  A noticed item the task's own acceptance depends on routes now (widen, amend, reopen).
-- **triage** (after the end-of-pipeline review) → `tp show <id> --part blocking`, verify each
-  against the source, then `tp triage <id> --accept-all`, or `--dismiss F# --reason "..."` and
-  `--assign F#=T##`. Accepted findings go to the owning authors; one verification follows. A done
-  session's dropped or wrongly dismissed findings: `tp resolve --review <id> --action reopen --findings F1,F2`.
+- **dispatch / fix / review** → `tp dispatch <id> [<id> …]` (every ready id in one call), then
+  send exactly the printed `Agent(...)`/`SendMessage(...)` calls, all in one message. Never
+  SendMessage a new task to an earlier task's agent: `tp` starts fresh agents when it is cheaper.
+- **An agent replies** → `tp advance <id> --agent-id <its id>` (Bash `timeout` 600000): it records,
+  dispatches what that unblocks, and prints the calls to send and what else is due.
+- **Digest** (`tp digest`) after a wave settles or on a mid-run "status?" — then keep working.
+- **check** → fact-check the printed sample (do the quoted lines say what is claimed? for code,
+  read the diff), then `tp accept <id> --note "..."` or `tp reject <id> --reason "..."`.
+- **A fix needs one file just outside its paths** → `tp widen <id> --path <file> --reason "..."`.
+- **triage** → `tp show <id> --part blocking`, verify each against the source, then
+  `tp triage <id> --accept-all`, or `--dismiss F# --reason "..."` and `--assign F#=T##`. `tp` routes
+  each to its author: test files to the test author; behaviour bugs get a failing test first.
+  Reopen a done session's findings: `tp resolve --review <id> --action reopen --findings F1,F2`.
+- **publish** → `tp publish <id>` (dry run), show the human, ask once, `tp publish <id> --answer "..."`.
 - **human** → stop, ask, then `tp resolve [--task <id> | --review <id>] --action … --answer "..." --by human`.
   A needs_input question that scope, plan, or decisions already settle, answer yourself (`--by manager`).
-  Answers reach every later brief for that task (workflow-level answers: every brief).
-- **The work outgrows the plan** → `tp plan amend` starts `plan-amend.json`: add tasks, change only
-  undispatched ones; `tp plan amend` checks it; ask the human; `tp plan amend --answer "..."`.
-  New conventions go in a new file the draft points at — never edit the frozen one.
+- **The work outgrows the plan** → `tp plan amend` starts `plan-amend.json` (add tasks, change only
+  undispatched ones, new conventions in a new file); `tp plan amend` checks it; ask the human;
+  `tp plan amend --answer "..."`.
 - **wait** → end your turn; each hand-back re-invokes you.
 - **Past its estimate** is a cue to look (`tp digest`), never a verdict. TaskStop only an agent
-  the digest calls possibly stuck, or on the human's say-so.
-  Stopped, crashed, or session gone → `tp lost <id> --summary "..."`; `tp next` says what follows.
+  the digest calls possibly stuck, or on the human's say-so. Lost → `tp lost <id> --summary "..."`.
 
 ## Stage 6 — Closeout and final
 
-**closeout** → `tp closeout`: classify every noticed item (a deferred or follow-up note states
-the issue and its consequence in plain words) and ask the human once (`tp closeout --ask`).
-`tp final` runs the package checks and writes `report.md`. Present it answer-first: what was
-delivered, time against the budget, review outcome, and what the human should decide.
-Committing and pushing are the human's call.
+**closeout** → `tp closeout` lists what still needs a class (chatter is classified for you);
+classify in bulk (`--items 1,3-5 --class ... --note "<issue and consequence>"`) and ask the
+human once (`tp closeout --ask`): fix now, file tickets, or accept — never a local file.
+`tp final` writes `report.md`. Present it answer-first: what was delivered, time against the
+budget, review outcome, and what the human should decide. Committing and pushing are theirs.
 
 ## Halt, resume, status
 
 - **`/task-pipeline halt`** (or `hault`) → `tp halt --reason "<their words>"`. Nothing new
-  starts; agents in flight finish their current step. Keep recording them as they reply; when
-  the last is in, `halt.json` records where work stopped and what runs next. Tell the human, stop.
+  starts; record agents in flight as they reply; `halt.json` then records where work stopped.
 - **`/task-pipeline resume <dir>`** → `tp status`; if halted, `tp resume --answer "<their words>"`;
-  then `tp next`. An agent lost with a dead session: SendMessage its id if known, otherwise
-  `tp lost <id>`.
+  then `tp next`. An agent lost with its session: SendMessage its id if known, else `tp lost <id>`.
 - **`/task-pipeline status <dir>`** → `tp status`, present it, stop (from outside a run only).
-- Unattended runs need no permission prompts: keep the workflow and write workspaces
-  sandbox-writable, and allow `Bash(python3 ~/.claude/skills/task-pipeline/scripts/tp.py:*)`.
+- Unattended runs: sandbox-writable workflow and workspaces; allow `Bash(python3 ~/.claude/skills/task-pipeline/scripts/tp.py:*)`.
 
 ### Coding Related Tasks
 
-- **Always** be test forward with code changes
-- **Always** review code before considering a unit of work as done. This is true even if smaller reviews happened during the coding tasks. If you are not sure which reviewer to use: Use the skill `reviewomatic`
+- **Always** be test forward with code changes.
+- **Always** review code before a unit of work is done, even after smaller reviews. Unsure which
+  reviewer to use: the skill `reviewomatic`.

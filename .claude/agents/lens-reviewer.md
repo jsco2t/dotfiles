@@ -2,9 +2,10 @@
 name: lens-reviewer
 description: >-
   Read-only review sub-agent for the reviewomatic skills (comp-reviewomatic, comp-goreviewomatic,
-  doc-reviewomatic). Runs the review lenses its caller assigns, each as its own full pass, over a
+  doc-reviewomatic) and /task-pipeline's final review, which packs the single-lens code reviewers
+  into one session. Runs the review lenses its caller assigns, each as its own full pass, over a
   bounded change described in a brief file, and returns one structured report. Launched by those
-  skills' fan-out; not for standalone use.
+  callers; not for standalone use.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
 effort: high

@@ -193,12 +193,13 @@ class Harness:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"# {title}\n\n`Add` returns the sum of two ints (`calc/calc.go:5`).\n")
 
-    def author(self, tid: str, rel: str, step: str = "author", agent_id: str = "agent-1") -> Result:
-        """Dispatch, write a good article, hand back, and record."""
+    def author(self, tid: str, rel: str, step: str = "author", agent_id: Optional[str] = None) -> Result:
+        """Dispatch, write a good article, hand back, and record. Each task gets its own agent
+        unless told otherwise: tp refuses one agent for two tasks."""
         self.tp("dispatch", tid)
         self.good_article(rel)
         self.result(tid, step, changed=[rel])
-        return self.tp("record", tid, "--agent-id", agent_id)
+        return self.tp("record", tid, "--agent-id", agent_id or f"agent-{tid}")
 
 
 def deep(d: Dict[str, Any]) -> Dict[str, Any]:

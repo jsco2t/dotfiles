@@ -121,9 +121,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("what", choices=["suggest"])
     s.add_argument("--kinds", required=True, help="comma-separated deliverable kinds")
 
-    s = sub.add_parser("scope", help="check or confirm scope.json")
-    s.add_argument("what", choices=["check", "confirm"])
-    s.add_argument("--answer", help="the human's confirmation, verbatim (confirm)")
+    s = sub.add_parser("scope", help="check or confirm scope.json; amend the confirmed scope (scope-amend.json)")
+    s.add_argument("what", choices=["check", "confirm", "amend"])
+    s.add_argument("--answer", help="the human's words, verbatim (confirm; amend: approves the checked draft)")
 
     s = sub.add_parser("survey-issue", help="deterministic sizing of a Jira or GitHub issue (jira:KEY, gh:o/r#N)")
     s.add_argument("ref")
@@ -177,6 +177,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("plan", help="check or submit plan.json; amend it mid-run (plan-amend.json)")
     s.add_argument("what", choices=["check", "submit", "amend"])
     s.add_argument("--answer", help="amend: the human's agreement, verbatim (without it, amend only checks)")
+    s.add_argument("--delegated", action="store_true", help="amend: apply a checked draft inside the human's standing "
+                                                            "fix-task delegation (scope fix_tasks), without a question")
+    s.add_argument("--note", help="amend --delegated: what is wrong and why it needs fixing, in plain words")
 
     s = sub.add_parser("widen", help="add a file the same deliverable needs to one task's write set while EXECUTING, "
                                      "even after acceptance (two per task on your say-so; more takes the human)")
@@ -319,6 +322,8 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "scope":
         if args.what == "check":
             return scopemod.cmd_check(wf)
+        if args.what == "amend":
+            return planmod.cmd_scope_amend(wf, args.answer)
         if not args.answer:
             raise TPError("scope confirm needs --answer with the human's words.")
         return scopemod.cmd_confirm(wf, args.answer)
@@ -344,7 +349,7 @@ def dispatch(args: argparse.Namespace) -> str:
         return run.cmd_resume(wf, args.answer)
     if c == "plan":
         if args.what == "amend":
-            return planmod.cmd_amend(wf, args.answer)
+            return planmod.cmd_amend(wf, args.answer, args.delegated, args.note)
         return planmod.cmd_check(wf) if args.what == "check" else planmod.cmd_submit(wf)
     if c == "approve":
         return planmod.cmd_approve(wf, args.answer)

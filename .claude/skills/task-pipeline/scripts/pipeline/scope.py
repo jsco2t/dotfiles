@@ -52,6 +52,37 @@ def research_budget(scope: Dict[str, Any]) -> int:
     return int(research.get("budget_minutes") or 0) if isinstance(research, dict) else 0
 
 
+def fix_tasks(scope: Dict[str, Any]) -> Dict[str, Any]:
+    """The human's standing answer on fix tasks: how many small fix tasks the manager may add
+    without asking, and how big each may be. A scope from before the question allows none."""
+    fx = scope.get("fix_tasks")
+    return fx if isinstance(fx, dict) else {"allow": 0}
+
+
+FIX_TASKS_ASK = ("Ask the human, in the scope question, whether you may add small fix tasks without asking them each "
+                 "time (a doc that needs one clarifying sentence, a stale comment) — and if so how many, and how many "
+                 "minutes each — then record their words: \"fix_tasks\": {\"allow\": 2, \"max_minutes\": 15, "
+                 "\"answer\": \"<their words>\"} (allow 0: every fix task is asked).")
+
+
+def _fix_task_errors(scope: Dict[str, Any]) -> List[str]:
+    fx = scope.get("fix_tasks")
+    if not isinstance(fx, dict):
+        return ["scope.json needs `fix_tasks`. " + FIX_TASKS_ASK]
+    errs = []
+    allow, cap = fx.get("allow"), limit("max_delegated_fix_tasks")
+    if not isinstance(allow, int) or not 0 <= allow <= cap:
+        errs.append(f"fix_tasks.allow must be a whole number from 0 to {cap}.")
+    elif allow:
+        minutes = fx.get("max_minutes")
+        if not isinstance(minutes, int) or not 1 <= minutes <= limit("max_task_minutes"):
+            errs.append(f"fix_tasks.max_minutes must be a whole number from 1 to {limit('max_task_minutes')}: how big "
+                        "one fix task may be.")
+    if len(str(fx.get("answer", "")).strip()) < 2:
+        errs.append("fix_tasks.answer must hold the human's words, verbatim. " + FIX_TASKS_ASK)
+    return errs
+
+
 def final_reviewers(scope: Dict[str, Any]) -> List[str]:
     return participants(scope, "reviewer") if scope.get("review") in ("final", "both") else []
 
@@ -88,7 +119,10 @@ def is_code_file(path: str) -> bool:
     return Path(str(path)).suffix.lower() in roles().get("code_extensions", [])
 
 
-def validate(scope: Dict[str, Any]) -> List[str]:
+def validate(scope: Dict[str, Any], require_fix_tasks: bool = True) -> List[str]:
+    """require_fix_tasks: False for a scope confirmed before the fix-task question existed — a
+    revision or amendment of it must not force that question on the human mid-run (it allows
+    no delegated fix tasks)."""
     cat = catalog()
     agents = cat["agents"]
     errs: List[str] = []
@@ -190,14 +224,24 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     elif rb:
         if len(str(research.get("why", "")).strip()) < 12:
             errs.append("research.why must say what is unknown enough to need research.")
-        lanes = limit("max_in_flight")
-        if isinstance(budget, int) and math.ceil(rb / lanes) >= budget:
-            errs.append(f"a research budget of {rb} agent-min takes {math.ceil(rb / lanes)} of the {budget}-min "
-                        "budget on its own — shrink it or raise the budget.")
     for t in scope.get("terms", []):
         if not t.get("term") or not t.get("means"):
             errs.append("each term needs `term` and `means` (and ideally `not`).")
+    if require_fix_tasks or "fix_tasks" in scope:
+        errs += _fix_task_errors(scope)
     return errs
+
+
+def warnings(scope: Dict[str, Any]) -> List[str]:
+    """What the scope check reports but never refuses: budgets are estimates, not gates."""
+    out = []
+    budget, rb = scope.get("budget_minutes"), research_budget(scope)
+    lanes = limit("max_in_flight")
+    if rb and isinstance(budget, int) and math.ceil(rb / lanes) >= budget:
+        out.append(f"the research estimate ({rb} agent-min, about {math.ceil(rb / lanes)} min on {lanes} lanes) takes "
+                   f"the whole {budget}-min budget on its own. Both are estimates: raise budget_minutes if that is "
+                   "the honest forecast; never shrink the research to fit.")
+    return out
 
 
 def render(scope: Dict[str, Any]) -> str:
@@ -207,7 +251,7 @@ def render(scope: Dict[str, Any]) -> str:
     out += [f"**Budget:** {budget} min, planning included." if budget else "**Budget:** none set.",
             f"**Research budget:** {rb} agent-min — {scope['research'].get('why', '')}" if rb
             else "**Research:** none — the work is specified well enough to plan directly.",
-            f"**Review:** {scope['review']}.", "", "## Deliverables"]
+            f"**Review:** {scope['review']}.", _fix_tasks_line(scope), "", "## Deliverables"]
     out += [f"- {d['id']} ({d['kind']}): {d['what']}" + (f" — in `{d['where']}`" if d.get("where") else "")
             for d in scope["deliverables"]]
     if scope.get("terms"):
@@ -225,13 +269,22 @@ def render(scope: Dict[str, Any]) -> str:
     return "\n".join(out) + "\n"
 
 
+def _fix_tasks_line(scope: Dict[str, Any]) -> str:
+    fx = fix_tasks(scope)
+    said = f" Your answer: {fx['answer']}" if fx.get("answer") else ""
+    if fx.get("allow"):
+        return (f"**Fix tasks:** the manager may add up to {fx['allow']} fix tasks of {fx['max_minutes']} min or less "
+                f"without asking (each one is listed in the report).{said}")
+    return f"**Fix tasks:** none without asking — every fix task outside the plan is put to the human.{said}"
+
+
 def cmd_check(wf: Workflow) -> str:
     state = wf.load()
     if state["phase"] != "SCOPING":
         raise TPError(f"Scope is checked in SCOPING; the workflow is {state['phase']}.",
                       "To change a confirmed scope, the human must ask: `tp revise --scope --feedback ...`.")
     scope = load_scope(wf)
-    errs = validate(scope)
+    errs = validate(scope, require_fix_tasks=not state.get("scope_confirmed"))
     if errs:
         raise TPError(*errs)
     (wf.root / "scope.md").write_text(render(scope))
@@ -239,7 +292,7 @@ def cmd_check(wf: Workflow) -> str:
     state["budget_minutes"] = scope.get("budget_minutes")
     wf.save(state)
     wf.event("scope_check")
-    return (f"scope ok — rendered {wf.root / 'scope.md'}.\n"
+    return ("".join(f"WARN: {w}\n" for w in warnings(scope)) + f"scope ok — rendered {wf.root / 'scope.md'}.\n"
             "Present it to the human and ask them to confirm (AskUserQuestion); the budgets in it are your "
             "own estimates, shown for information, not for approval. On yes: "
             "`tp scope confirm --answer \"<their words>\"`.")
@@ -254,10 +307,38 @@ def cmd_confirm(wf: Workflow, answer: str) -> str:
     state["scope_sha"] = state["scope_checked_sha"]
     state["phase"] = "PLANNING"
     state["scope_confirmed"] = now_iso()
+    kept = _keep_approved_plan(wf, state)
     wf.save(state)
     wf.decision("scope confirm", answer)
     wf.event("scope_confirm")
+    if kept:
+        wf.decision("plan approval kept", "plan.json is unchanged since the human approved it and still fits the "
+                    "confirmed scope, so that approval stands", who=None)
+        wf.event("plan_approval_kept")
+        return ("scope confirmed and frozen. The approved plan is unchanged and still fits it, so its approval stands: "
+                "EXECUTING — run `tp next`.")
     return "scope confirmed and frozen. Now PLANNING — run `tp next`."
+
+
+def _keep_approved_plan(wf: Workflow, state: Dict[str, Any]) -> bool:
+    """After `tp revise --scope` mid-run, the plan the human approved stays approved when plan.json
+    is byte-identical and still valid under the newly confirmed scope: asking them to approve it
+    again would approve nothing new. Otherwise planning resumes as usual."""
+    from . import plan as planmod
+    from . import review
+    revised = state.pop("revised_from", None)
+    if not revised or not revised.get("plan_sha") or sha_file(wf.plan_json) != revised["plan_sha"]:
+        return False
+    plan, scope = planmod.load_plan(wf), load_scope(wf)
+    if planmod.validate(plan, scope, state, wf.root, {t["id"] for t in plan["tasks"]}):
+        return False
+    state["plan_approved_sha"] = state["plan_submitted_sha"] = revised["plan_sha"]
+    state["phase"] = "EXECUTING"
+    planmod.merge_baselines(wf, state, scope)
+    state["reviews"] = review.new_reviews(plan, scope, state.get("reviews", {}))
+    state["integration"] = review.integration_ids(plan, scope)
+    (wf.root / "plan.md").write_text(planmod.render(plan, scope, wf))
+    return True
 
 
 def cmd_budget_extend(wf: Workflow, minutes: int, answer: Optional[str], note: Optional[str]) -> str:

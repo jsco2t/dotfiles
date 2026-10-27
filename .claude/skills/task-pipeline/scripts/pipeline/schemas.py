@@ -20,6 +20,8 @@ SCHEMAS = {
         "workspaces": [{"name": "kb", "path": "/abs/kb", "mode": "write"},
                        {"name": "src", "path": "/abs/repo", "mode": "read"}],
         "answers": [{"q": "What output?", "a": "<the human's words>"}],
+        "fix_tasks": {"allow": "2  (0: every fix task is asked)", "max_minutes": 15,
+                      "answer": "<the human's words to: may I add small fix tasks without asking — how many, how big?>"},
     },
     "plan": {
         "title": "...", "summary": "<= 80 words", "questions": ["<non-blocking, shown at approval>"],

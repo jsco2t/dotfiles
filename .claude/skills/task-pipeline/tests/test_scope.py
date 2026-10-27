@@ -194,12 +194,14 @@ class ScopeCheckTest(unittest.TestCase):
         self.check(participants=[kb, liaison], research={"budget_minutes": 45, "why": "Epic children are thin."})
         self.assertIn("Research budget:** 45 agent-min", (self.h.wf / "scope.md").read_text())
 
-    def test_research_budget_must_fit_the_whole_budget(self) -> None:
+    def test_research_past_the_whole_budget_is_reported_never_refused(self) -> None:
+        # Budgets are estimates: research forecast past the whole budget is a warning to re-estimate,
+        # never a refusal that pushes the manager to shrink the research.
         kb = {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."}
         liaison = {"agent": "atlassian-liaison", "role": "research", "why": "Reads the epic's child issues for D1."}
-        res = self.check(expect=2, participants=[kb, liaison], budget_minutes=60,
-                         research={"budget_minutes": 400, "why": "Everything."})
-        self.assertIn("research budget", res.text)
+        res = self.check(participants=[kb, liaison], budget_minutes=60,
+                         research={"budget_minutes": 400, "why": "Every child issue of the epic is unread."})
+        self.assertIn("WARN: the research estimate", res.text)
 
     def test_legacy_recon_role_still_reads_as_research(self) -> None:
         self.check(participants=[{"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},

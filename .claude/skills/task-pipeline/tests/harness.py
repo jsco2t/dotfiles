@@ -98,6 +98,7 @@ class Harness:
                 {"name": "src", "path": str(self.src), "mode": "read"},
             ],
             "answers": [{"q": "What output do you want?", "a": "Markdown KB articles."}],
+            "fix_tasks": {"allow": 0, "answer": "No, ask me every time."},
         }
         base.update(over)
         return base

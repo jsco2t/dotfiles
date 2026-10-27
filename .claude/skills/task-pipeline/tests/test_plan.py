@@ -323,6 +323,7 @@ class AmendTest(unittest.TestCase):
         self.assertIn("B1", h.tp("plan", "amend", expect=2).text)
         draft["review_batches"] = [{"id": "B1", "tasks": ["T01", "T02"]}, {"id": "B2", "tasks": ["T03"]}]
         (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        h.tp("plan", "amend")                                       # the human is shown the checked draft
         h.tp("plan", "amend", "--answer", "Add T03 with its own review.")
         self.assertEqual(h.state()["reviews"]["B2/doc-reviewer"]["status"], "pending")
         self.assertEqual(h.state()["reviews"]["B1/doc-reviewer"]["status"], "in_flight")

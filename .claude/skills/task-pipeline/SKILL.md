@@ -36,15 +36,14 @@ word-split a variable). **`tp next` always says what to do next.**
 5. **Script before judgment.** If a command can decide it, a command decides it.
 6. **Answer-first** (`~/.claude/output-styles/answer-first-core.md`) for everything you write.
 7. **Never write deliverables or agents' result files.** You fact-check and route.
-8. **Time reports; it never cuts work or stops an agent.** Tasks stay small by sizing; `tp`
+8. **Budgets and estimates forecast; they never cut or squeeze work, or stop an agent.** `tp`
    flags stalls. Re-estimate with `tp budget extend` / `tp research extend` and `--note`.
 
 ## Stage 1 — Scope (one round with the human)
 
 1. The first argument is the **location** for planning documents; if missing, ask. Save the
-   request verbatim to a file, then run `python3 ~/.claude/skills/task-pipeline/scripts/tp.py init
-   <location> --title "<title>" --request-file <file> [--budget <minutes>]`. It always creates the
-   workflow's own `<location>/<date>-<slug>/` folder and prints it: that is `-w` from then on.
+   request verbatim to a file, then `tp init <location> --title "<title>" --request-file <file>
+   [--budget <minutes>]` (no `-w`): it creates `<location>/<date>-<slug>/`, the `-w` from then on.
 2. **Size it yourself first**, in ten minutes or less and with no agents: `tp survey <repo> --name
    <ws>` per repository, and `tp survey-issue jira:KEY` or `gh:owner/repo#N` for a named issue or
    epic (network needed): children, thin issues, links, and a research estimate.
@@ -54,17 +53,18 @@ word-split a variable). **`tp next` always says what to do next.**
 4. **Choose participants critically.** `tp roster suggest --kinds <kinds>`. Keep an agent only
    when it has a direct bearing on the output; prefer the specific lenses (correctness,
    security, api-compat, test) over broad ones; if unsure whether one should take part, ask.
-5. **One AskUserQuestion call** (at most 4 questions) covering the output (kind, format, where),
-   participants (multiSelect), review (`none` or `final`), and conventions to honor. **Never ask
-   the human to approve or pick a time budget**: you size it. Still ambiguous? Ask again.
+5. **AskUserQuestion** (at most 4 questions a call; two calls if needed) covering the output
+   (kind, format, where), participants (multiSelect), review (`none` or `final`), conventions, and
+   **fix tasks**: may you add small fix tasks without asking — how many, how big? (`fix_tasks`,
+   their words). **Never ask them to pick a time budget**: you size it. Ambiguous? Ask again.
 6. Write `scope.json` (`tp schema scope`), `tp scope check`, show the human the key lines of
    `scope.md`, and confirm (AskUserQuestion: Confirm / Change): `tp scope confirm --answer "..."`.
 
 ## Stage 2 — Research (your call)
 
 - Each item is one agent, at most 3 narrow questions, a box of 15 minutes or less, and a purpose:
-  `map` (how to split the work), `requirements` (what named issues or pages require), or
-  `investigate` (how one named thing works). Many small items beat one big one.
+  `map` (how to split the work), `requirements` (what named issues require), or `investigate`
+  (how one named thing works). Many small items beat one big one.
   `tp research add R1 --agent <a> --purpose <p> --questions-file <f> --done-when "..."` (`--model
   sonnet` suits pattern work). `tp dispatch R1 R2 R3`, send the calls, `tp advance` each, and
   fact-check one answer per item.
@@ -83,9 +83,8 @@ word-split a variable). **`tp next` always says what to do next.**
 - Parallel tasks write disjoint paths; shared files (`index.md`) go to one task.
 - Rules every task follows: one file in plan `conventions` (`wf:conventions.md`); it freezes with the plan.
 - Code is test-forward: `test_cmd` (the task's package, not the whole suite) and `tests_paths`.
-- `docs` is a built-in task check; `docs-all` a built-in final check. Repo commands go in `checks`.
-- `review: final` packs the single-lens code reviewers into one session; split over 10 tasks
-  into `review_batches`. `tp plan check` until clean, then `tp plan submit`.
+- `docs` is a built-in task check, `docs-all` a final one; repo commands go in `checks`. Over 10
+  tasks: `review_batches`. `tp plan check` until clean, then `tp plan submit`.
 
 ## Stage 4 — Approval
 
@@ -103,7 +102,7 @@ Load the deferred tools first: ToolSearch `select:SendMessage,TaskStop`. Pre-exi
   SendMessage a new task to an earlier task's agent: `tp` starts fresh agents when it is cheaper.
 - **An agent replies** → `tp advance <id> --agent-id <its id>` (Bash `timeout` 600000): it records,
   dispatches what that unblocks, and prints the calls to send and what else is due.
-- **Digest** (`tp digest`) after a wave settles or on a mid-run "status?" — then keep working.
+- **Digest** (`tp digest`) after a wave settles or on "status?" — then keep working.
 - **check** → fact-check the printed sample (do the quoted lines say what is claimed? for code,
   read the diff), then `tp accept <id> --note "..."` or `tp reject <id> --reason "..."`.
 - **A fix needs one file just outside its paths** → `tp widen <id> --path <file> --reason "..."`.
@@ -111,12 +110,13 @@ Load the deferred tools first: ToolSearch `select:SendMessage,TaskStop`. Pre-exi
   `tp triage <id> --accept-all`, or `--dismiss F# --reason "..."` and `--assign F#=T##`. `tp` routes
   each to its author: test files to the test author; behaviour bugs get a failing test first.
   Reopen a done session's findings: `tp resolve --review <id> --action reopen --findings F1,F2`.
-- **publish** → `tp publish <id>` (dry run), show the human, ask once, `tp publish <id> --answer "..."`.
+- **publish** → `tp publish <id>` (dry run), show the human, ask once, `--answer "..."`.
 - **human** → stop, ask, then `tp resolve [--task <id> | --review <id>] --action … --answer "..." --by human`.
   A needs_input question that scope, plan, or decisions already settle, answer yourself (`--by manager`).
-- **The work outgrows the plan** → `tp plan amend` starts `plan-amend.json` (add tasks, change only
-  undispatched ones, new conventions in a new file); `tp plan amend` checks it; ask the human;
-  `tp plan amend --answer "..."`.
+- **Something falls outside the plan** → a task's own files: reopen or `tp widen`, no question.
+  Else draft first (`tp plan amend` starts `plan-amend.json`); `tp plan amend` checks it and prints
+  the one question: ask once, then `--answer "..."` — or, inside the human's fix-task allowance,
+  `--delegated --note "..."`. Scope changes: `tp scope amend`, the same way.
 - **wait** → end your turn; each hand-back re-invokes you.
 - **Past its estimate** is a cue to look (`tp digest`), never a verdict. TaskStop only an agent
   the digest calls possibly stuck, or on the human's say-so. Lost → `tp lost <id> --summary "..."`.

@@ -51,10 +51,12 @@ def _take(wf: Workflow, root: Path, only: Optional[List[str]] = None) -> snapsho
     return snapshot.take(root, [wf.root], cache=cache, only=only)
 
 
-def readonly_baseline(wf: Workflow, scope: Dict[str, Any]) -> Dict[str, Any]:
-    base: Dict[str, Any] = {}
+def readonly_baseline(wf: Workflow, scope: Dict[str, Any], keep: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """keep: baselines already recorded, kept as they are (a re-approval or scope amendment adds
+    only the workspaces that have none)."""
+    base: Dict[str, Any] = dict(keep or {})
     for name, ws in scopemod.workspaces(scope).items():
-        if ws["mode"] != "read":
+        if ws["mode"] != "read" or name in base:
             continue
         root = Path(ws["path"])
         porcelain = snapshot.git_porcelain(root)
@@ -220,7 +222,9 @@ GUIDE = {
               "`tp triage {id} --accept-all`, or `--dismiss F# --reason \"...\"` and/or `--assign F#=T##`.",
     "followup": "Decide {id} ({why}): pursue it (`tp research add ... --from {id}`) or "
                 "`tp research dismiss {id} --reason \"...\"`.",
-    "human": "Stop and ask the human{about}: {why}. Record the answer with `tp resolve ... --by human`.",
+    "human": "Stop and ask the human{about}: {why}. If settling it changes the plan, draft and check the amendment "
+             "first (`tp plan amend`) and show its change in this one question; the same answer then goes to `tp "
+             "resolve` and `tp plan amend --answer`. Record the answer with `tp resolve ... --by human`.",
     "rerun": "{why}. Check the workspace for stranded edits, then `tp resolve --task {id} --action retry "
              "--answer \"...\" --by manager` and `tp dispatch {id}` (a fresh agent).",
     "wait": "Wait for {ids} to hand back; end your turn if nothing else is actionable.",
@@ -231,8 +235,10 @@ GUIDE = {
                "the human what it prints, ask once (AskUserQuestion), then `tp publish {id} --answer \"<their words>\"`.",
     "final": "`tp final` — package checks and the report.",
     "closeout": "Closeout ({why}): `tp closeout` lists what was noticed; classify each (`tp closeout --item N "
-                "--class deferred|followup|observation --note \"<the issue and its consequence>\"`), then "
-                "`tp closeout --ask`, ask it once, and `tp closeout --decide --answer \"<their words>\"`.",
+                "--class deferred|followup|observation --note \"<the issue and its consequence>\"`). To offer fixing "
+                "them now, draft and check that amendment first (`tp plan amend`): `tp closeout --ask` then carries "
+                "it, so one question shows the cost. Ask it once; the answer goes to `tp closeout --decide --answer` "
+                "and, if they chose the fix, to `tp plan amend --answer` too.",
     "done": "Report to the human from report.md.",
 }
 
@@ -1546,6 +1552,25 @@ def _item_numbers(spec: str, count: int) -> List[int]:
     return sorted(set(out))
 
 
+def _closeout_amendment(wf: Workflow, state: Dict[str, Any]) -> List[str]:
+    """The drafted fix, when one is checked, for the closeout's one question: the human then decides
+    with its cost in view, and one answer settles the closeout and approves the amendment."""
+    draft = wf.root / planmod.AMEND_JSON
+    if not draft.exists():
+        return ["", "To offer fixing them now, draft and check the amendment first (`tp plan amend`), then run "
+                "`--ask` again: the question then shows the fix and its cost, and one answer approves it."]
+    if (state.get("amend_checked") or {}).get("sha") != sha_file(draft):
+        return ["", "plan-amend.json is not checked as it stands: `tp plan amend`, then `--ask` again."]
+    try:
+        approved, plan_draft, scope, changes, _ = planmod._checked_draft(wf, state)
+    except TPError as exc:
+        return ["", "The drafted amendment does not check: " + "; ".join(exc.lines[:3])]
+    remaining, _ = planmod._remaining(plan_draft, scope, state)
+    return (["", f"The fix, as drafted and checked — {'; '.join(changes)}:"] + planmod._change_lines(approved, plan_draft)
+            + remaining + ["If they choose it, the same answer goes to `tp closeout --decide --answer` and `tp plan "
+                           "amend --answer` — one question, both gates."])
+
+
 def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = None, note: Optional[str] = None,
                  decide: bool = False, answer: Optional[str] = None, ask: bool = False,
                  items_spec: Optional[str] = None, show_all: bool = False) -> str:
@@ -1577,6 +1602,7 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
                    "be handled: fix them now, file them as tickets, or accept them as recorded?", ""]
             for i, (text, e) in enumerate(chosen, 1):
                 out += [f"{i}. [{e['class']}] {text}", f"   Why it matters: {e.get('note')}"]
+            out += _closeout_amendment(wf, state)
             out += ["", "Offer exactly these: fix them now (a plan amendment, `tp plan amend`); file them as tickets "
                     "(an integration task the human approves); or accept them as recorded (the report lists them). "
                     "Never offer to park them in a local file or drafts folder.",
@@ -1774,6 +1800,12 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
     notes = [f"- {tid}: {ts['note']}" for tid, ts in state["tasks"].items() if ts.get("note")]
     if notes:
         out += ["", "## Manager fact-check notes", ""] + notes
+    delegated = [a for a in state.get("amendments", []) if a.get("delegated")]
+    if delegated:
+        out += ["", "## Fix tasks added under your standing delegation", "",
+                "Added by the manager without a question, inside the fix-task allowance you gave at scope time:", ""]
+        out += [f"- {tid} — {tasks[tid]['title'] if tid in tasks else '?'}: {a.get('note')}"
+                for a in delegated for tid in a.get("tasks", [])]
     review_lines = _review().report_lines(state)
     if review_lines:
         out += ["", "## Review", ""] + review_lines

@@ -72,6 +72,7 @@
     "max_review_rounds": 2,
     "_max_resume_context_tokens": "a fix or verify round resumes its agent only below this context size; past it a fresh agent with a full brief costs less than re-reading the old context every turn",
     "max_resume_context_tokens": 150000,
+    "max_delegated_fix_tasks": 5,
     "review_near_miss_floor": 60,
     "review_full_finding_floor": 70
   }

@@ -4,7 +4,7 @@
     "external_directory": {
       "~/Developer/sources/personal/notebook/**": "allow",
       "~/Developer/sources/personal/projects/**": "allow",
-      "~/.config/opencode/output-styles/": "allow"
+      "~/.config/opencode/output-styles/**": "allow"
     },
     "edit": {
       "*": "allow",

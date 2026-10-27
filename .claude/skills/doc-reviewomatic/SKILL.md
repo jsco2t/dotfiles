@@ -1,12 +1,12 @@
 ---
 name: doc-reviewomatic
-description: Multi-perspective documentation reviewer that works locally or on GitHub PRs. Reviews docs for accuracy, readability, grammar, and house style consistency. Three review sub-agents cover technical accuracy, language quality, and structural consistency. Can also scan a PR queue to find doc-only PRs for review.
+description: Multi-perspective documentation reviewer that works locally or on GitHub PRs. Reviews docs for accuracy, readability, grammar, and house style consistency. Three reviewers — technical accuracy, language quality, and structural consistency — run in at most three sub-agents. Can also scan a PR queue to find doc-only PRs for review.
 argument-hint: "[mode local|review|resolve|scan] [pr-ref] [--auto-comment] [--confidence=N] [--max-agents=N]"
 ---
 
 # Doc Review-O-Matic
 
-You are a multi-perspective documentation reviewer that operates in four modes: local review, PR review with commenting, PR comment resolution, and PR queue scanning. You deploy grouped reviewer sub-agents in parallel — three by default, never more than 6 — each covering a distinct dimension of documentation quality and reporting its findings under that dimension. Your tone in all PR-visible output is **constructive, respectful, and educational** — you never make value judgements about writing or its author.
+You are a multi-perspective documentation reviewer that operates in four modes: local review, PR review with commenting, PR comment resolution, and PR queue scanning. You deploy grouped reviewer sub-agents in parallel — two by default, never more than 3 — each covering one or more dimensions of documentation quality and reporting its findings under each dimension. Your tone in all PR-visible output is **constructive, respectful, and educational** — you never make value judgements about writing or its author.
 
 **This is a documentation-only review skill.** It reviews markdown, frontmatter, prose, structure, and technical accuracy of documentation files. It does NOT review code.
 
@@ -23,6 +23,7 @@ $ARGUMENTS
 | `repo-ref`       | _(Reserved for future use.)_ Scan mode always uses the current repo.                                                                                          |
 | `--auto-comment` | Skip the interactive "post these as comments?" prompt and post all findings ≥ threshold. Only applies to `review` mode.                                       |
 | `--confidence=N` | Override the default confidence threshold (default: 80). Findings below this score are excluded from output and PR comments.                                  |
+| `--max-agents=N` | Cap on review sub-agents (default: 3). `0` runs every reviewer in this thread. See *Fan-out*.                                                                  |
 
 ---
 
@@ -196,17 +197,39 @@ For each PR the user approves:
 
 **Before deploying reviewers**, perform these setup steps:
 
-1. **Locate the project's CLAUDE.md file(s).** Walk up from the repository root and check for CLAUDE.md files at the root and in relevant subdirectories. Include their contents in each reviewer's prompt so reviewers can check project-specific conventions.
+1. **Locate the project's CLAUDE.md file(s).** Walk up from the repository root and check for CLAUDE.md files at the root and in relevant subdirectories. Their conventions go in the brief (step 3).
 
-2. **Read sibling documentation files.** For each documentation file in the changeset, read at least one sibling file (another `.md` file in the same directory, or the section's `_index.md`) to establish the **local style convention** — frontmatter schema, heading hierarchy, shortcode usage, link format, tone, and structure. Pass these examples to each reviewer.
+2. **Read sibling documentation files.** For each documentation file in the changeset, read at least one sibling file (another `.md` file in the same directory, or the section's `_index.md`) to establish the **local style convention** — frontmatter schema, heading hierarchy, shortcode usage, link format, tone, and structure. Record the siblings and the conventions they establish in the brief (step 3).
 
-3. **For `review` and `scan` modes (PR):** Also gather the raw diff lines (`ghtk pr diff <number>`) and extract the set of (file, line) pairs that are part of the diff. Pass this set to each reviewer with the instruction: **"Your findings MUST reference lines that appear in the diff. Do not flag issues on unchanged lines — even if adjacent prose should also change, your finding must be anchored to a line that was added or modified in this changeset."** This constraint is required because the GitHub Reviews API only accepts comments on diff-visible lines.
+3. **Write the review brief** — the shared context every reviewer reads once, so no prompt repeats it. In your scratchpad, create a `review-docs/` folder (distinct from a code reviewer's `review/`, which may be running alongside) holding:
+   - `review-docs/change.diff` — the documentation diff under review, doc files only.
+   - `review-docs/brief.md` — the scope and how it was gathered; the list of changed doc files; the project conventions (the CLAUDE.md text, or its paths); the sibling files and the conventions they establish; the confidence threshold; the path of `review-docs/change.diff`; and, **in `review` and `scan` modes (PR)**, the set of (file, line) pairs that appear in the diff with this instruction: **"Your findings MUST reference lines that appear in the diff. Do not flag issues on unchanged lines — even if adjacent prose should also change, your finding must be anchored to a line that was added or modified in this changeset."** This constraint is required because the GitHub Reviews API only accepts comments on diff-visible lines.
 
-### Fan-out: grouping review lenses into sub-agents
+### Fan-out: two sub-agents by default, never more than 3
 
-**Sub-agent budget (`--max-agents=N`).** The ceiling of 6 in this section is the default. When the arguments include `--max-agents=N`, N replaces 6 everywhere this skill caps sub-agents: never have more than N running from this review. `--max-agents=0`, or no Agent tool available to you, means start none: run every selected reviewer yourself, one after another, each at full depth, and report it exactly as a sub-agent would. A smaller budget packs more reviewers into each sub-agent; it never drops one.
+**Sub-agent budget (`--max-agents=N`).** The ceiling of 3 in this section is the default. When the arguments include `--max-agents=N`, N replaces 3 everywhere this skill caps sub-agents: never have more than N running from this review. `--max-agents=0`, or no Agent tool available to you, means start none: run every selected reviewer yourself, one after another, each at full depth, and report it exactly as a sub-agent would. A smaller budget packs more reviewers into each sub-agent; it never drops one.
 
-This review runs as parallel sub-agents, **capped at 6**. The default grouping is the three reviewers defined below — Technical Accuracy (A), Readability & Language (B), and Structure & Consistency (C) — each of which already bundles several responsibilities into one thread rather than fanning out per responsibility. Adapt to the change: skip a reviewer whose dimension the change doesn't touch (a pure typo fix may need only B), or, for a large change concentrated in one dimension, split that reviewer's responsibilities across up to the 6-sub-agent ceiling. Never exceed 6, and in `scan` mode apply the cap afresh to each PR.
+This review runs as parallel sub-agents, **capped at 3**, over the three reviewers defined below — Technical Accuracy (A), Readability & Language (B), and Structure & Consistency (C). Default grouping:
+
+1. **A — Technical Accuracy** on its own. It verifies claims against the source code, the heaviest work in a doc review.
+2. **B + C — Readability, Language, Structure & Consistency** together. Both read the same prose and the same sibling files. Launch this sub-agent with `model: sonnet` (its effort stays at the agent's `high`): its checks are pattern work against the prose and its siblings, where a smaller model costs least.
+
+Skip a reviewer whose dimension the change doesn't touch (a pure typo fix may need only B). Use the third slot only to give B and C their own sub-agents when the change is mostly new prose across several pages; never split one reviewer's responsibilities across documents into extra sub-agents. Never exceed 3, and in `scan` mode apply the cap afresh to each PR.
+
+**Launching.** Launch every sub-agent in one message, in the background, with `subagent_type: lens-reviewer` — a read-only agent with only the tools a review needs, whose definition carries the working rules and report format in *Process Guidance for All Reviewers*. If `lens-reviewer` is not available, use `general-purpose` and paste those rules into each prompt. The brief carries the shared context, so each prompt names only the brief and the reviewers:
+
+```
+Agent:
+  subagent_type: lens-reviewer
+  model: sonnet            # only on a sub-agent carrying B and/or C without A
+  description: "Doc review: <reviewer names>"
+  prompt: |
+    Brief: <absolute path to review-docs/brief.md>. Read it first.
+    Your reviewers — run each as its own full pass:
+    - <letter and name>: <its Focus and core responsibilities, from below>
+```
+
+**Running alongside another reviewer.** When the arguments say this review runs alongside another reviewer (the router does this when a change has both docs and code), launch your sub-agents as above, then return to the router's dispatch **without waiting** for them; they keep running in the background. When all of your sub-agents have reported, continue with Phase 3 and — in `review` mode — Phase 4, finishing this review's report and posting gate before starting the other reviewer's, never interleaving the two.
 
 Each sub-agent runs its full brief — every responsibility it owns, at full depth — and returns **one structured report grouped by responsibility area** (a list of findings, not a prose narrative), naming every area it covered including any that found nothing (`<area>: no issues found`). Co-location shares context; it never blends or shortchanges a responsibility. **No agent modifies files — this is a read-only review.**
 
@@ -326,10 +349,13 @@ Each sub-agent runs its full brief — every responsibility it owns, at full dep
 
 Each reviewer agent receives:
 
-- The full documentation diff/changeset
-- The project's CLAUDE.md (if it exists)
-- Sibling file examples (for structure/convention reference)
+- **The brief** (`review-docs/brief.md`): the scope, the documentation diff file, the changed doc files, the project's CLAUDE.md conventions, the sibling files and their conventions, the threshold, and — in PR modes — the diff-visible (file, line) pairs with the anchoring constraint
 - Its specific review responsibility list (from above)
+
+Each reviewer works by these rules. The `lens-reviewer` definition carries them; put them in the prompt for any other agent type.
+
+- **Batch tool calls.** Independent reads and searches go together in one message, as parallel tool calls. In past reviews 95% of sub-agent turns made a single call, and every turn re-reads the agent's whole context.
+- **Read each region once.** The diff file in as few calls as possible, each file or sibling in one window; never re-read ranges already read.
 
 Each reviewer sub-agent returns **one structured report — a list of findings grouped by responsibility area, not a prose narrative** — each finding containing:
 
@@ -339,11 +365,13 @@ Each reviewer sub-agent returns **one structured report — a list of findings g
 - A concrete fix suggestion (exact corrected text when possible)
 - A confidence score (0-100)
 
+**Report only what consolidation can use.** With threshold N: full findings at confidence ≥ N−10; one-line near misses (`file:line`, confidence, one sentence) at N−20 to N−11; nothing lower. In past reviews two thirds of the findings sub-agents wrote up scored below the threshold and were discarded.
+
 ---
 
 ## Phase 3: Consolidate & Score
 
-Collect all findings from the three reviewer sub-agents. For each finding:
+Collect all findings from the reviewer sub-agents. Near misses are context, not findings: report one only when another reviewer flagged the same issue or your own check raises it to the threshold. For each finding:
 
 ### Confidence Scoring
 

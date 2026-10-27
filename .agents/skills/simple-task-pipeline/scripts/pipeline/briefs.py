@@ -7,15 +7,21 @@ from typing import Any, Dict, List
 
 from .common import limit, style_core
 
+# Every turn re-reads the context the work carries, and in past runs nine turns in ten made one call.
+WORKING_RULES = ("**Working rules.** Batch independent reads and searches into one message, as parallel tool "
+                 "calls. Read each region once, in one window. Never re-run a suite or build the pipeline already "
+                 "ran: read the log this brief names; run only a targeted check of what you changed.")
 HEADER = ("This brief comes from the simple task pipeline and is your complete contract: it replaces any "
           "result format or report path your definition names. You are the main agent: do the work yourself "
           "in this context, with no sub-agents — never call tools that launch other agents. When you "
           "load a skill that can start sub-agents, do not start them; apply its review lenses yourself, one "
-          "after another. Estimates are advisory, never deadlines or reasons to stop early. {box}")
+          "after another. Estimates are advisory, never deadlines or reasons to stop early. {box}\n\n"
+          + WORKING_RULES)
 
 RESULT_SCHEMA = ('{{"task": "{tid}", "step": "{step}", "status": "done | blocked | needs_input", '
                  '"summary": "<= 80 words, answer-first", "changed": ["<paths relative to the workspace>"], '
-                 '"noticed": ["<one line per thing outside this task; never act on it>"], '
+                 '"noticed": ["<one line per problem outside this task that someone must act on — not notes '
+                 'about your own work; never act on it>"], '
                  '"questions": ["<only with needs_input>"], "disputes": [{{"finding": "F1", "why": "<evidence>"}}]}}')
 
 REVIEW_SCHEMA = ('{{"task": "{tid}", "verdict": "pass | changes", "findings": [{{"id": "F1", '
@@ -88,6 +94,9 @@ def _task_body(task: Dict[str, Any], ctx: Dict[str, Any]) -> List[str]:
     out += [f"- `{s}`" for s in ctx["sources"]]
     out += ["", "Read anything in the read-only workspaces that an acceptance criterion needs (callers, "
             "tests, docs); the fence is on what you write, not on what you read."]
+    if ctx.get("logs"):
+        out += ["", "Logs the pipeline already produced (read them; do not re-run these commands): "
+                + "; ".join(f"`{p}`" for p in ctx["logs"]) + "."]
     out += ["", "## Done when", ""] + [f"- {a}" for a in task["acceptance"]]
     if ctx["checks"]:
         out += ["", "The pipeline then checks your work and fails the step unless: " + "; ".join(ctx["checks"]) + "."]
@@ -165,12 +174,28 @@ def research(rid: str, item: Dict[str, Any], scope_md: Path, surveys: List[Path]
     return "\n".join(out) + "\n"
 
 
+def _shared_files(ctx: Dict[str, Any]) -> List[str]:
+    """The change and the pipeline's own logs, so the review runs no git and no suite of its own."""
+    out = []
+    if ctx.get("diff_file"):
+        out.append(f"The change as one diff (tracked changes against the approval baseline, then new files "
+                   f"in full): `{ctx['diff_file']}` — read it in as few calls as you can instead of running "
+                   "git yourself.")
+    if ctx.get("logs"):
+        out.append("The pipeline already ran each task's tests and checks; their logs: "
+                   + "; ".join(f"`{p}`" for p in ctx["logs"]) + ". Read them instead of re-running the suite; "
+                   "write any targeted throwaway test under `$TMPDIR`, never in a workspace.")
+    return out + ([""] if out else [])
+
+
 def batch_review(bid: str, reviewer: str, tasks: List[Dict[str, Any]], ctx: Dict[str, Any], result: Path) -> str:
     out = [f"# simple-task-pipeline review brief — {bid} · {reviewer}", "",
            HEADER.format(box="Estimated duration: about 20 min for the batch."), "", "## Review this batch as a whole", "",
            f"Every task below is finished and accepted. Review them together, through your lens only, in one pass. "
            f"The change, as a structured file: `{ctx['changes']}` (files, and the exact diff command for each "
-           "workspace under version control).", "", "Deliverables, by task:"]
+           "workspace under version control).", ""]
+    out += _shared_files(ctx)
+    out += ["Deliverables, by task:"]
     for t in tasks:
         out.append(f"- {t['id']} {t['title']}: " + ", ".join(f"`{p}`" for p in ctx["paths"][t["id"]]))
         out += [f"  - done when: {a}" for a in t["acceptance"]]
@@ -195,6 +220,7 @@ def verify(bid: str, reviewer: str, findings: List[Dict[str, Any]], ctx: Dict[st
            "check whether "
            "it is resolved; do not start a new review. Report only findings that are still unresolved, and any new "
            f"problem the fixes themselves introduced. The change: `{ctx['changes']}`. Do not edit any file.", ""]
+    out += _shared_files(ctx)
     if ctx.get("decisions"):
         out += _decisions(ctx)
     out += [f"- {f['id']} ({f['state']}) at {f['where']}: {f['issue']}" for f in findings] + [""]

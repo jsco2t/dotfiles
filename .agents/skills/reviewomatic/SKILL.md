@@ -55,13 +55,24 @@ Announce the census and route.
 ## Dispatch
 
 Read each selected `SKILL.md` at its path above and follow it with the resolved
-inputs (there is no assumed Skill tool or `$ARGUMENTS` interpolation). Run two
-reviewers sequentially. Forward mode, full scope, PR identity, confidence, and
-posting authorization verbatim. Pass any agent limit as an explicit caller
-constraint even if the downstream skill does not define that flag; respect runtime
-slots and `0` as no delegation. For mixed changes, give disjoint doc/code scopes
-and have the code reviewer skip the docs covered by doc-reviewomatic.
-Return the downstream reports and mutation results, preserving authorship and markers.
+inputs (there is no assumed Skill tool or `$ARGUMENTS` interpolation). Forward
+mode, full scope, PR identity, confidence, and posting authorization verbatim.
+Pass any agent limit as an explicit caller constraint even if the downstream
+skill does not define that flag; respect runtime slots and `0` as no delegation.
+For mixed changes, give disjoint doc/code scopes and have the code reviewer skip
+the docs covered by doc-reviewomatic. Return the downstream reports and mutation
+results, preserving authorship and markers.
+
+**Two reviewers: launch together, finish in turn.** A reviewer's time goes
+almost entirely into its delegated sub-agents, so when the host supports
+parallel subagents and both reviewers are selected, run each reviewer's
+delegation before waiting on either — gather both scopes, write both review
+briefs, and launch both sets of sub-agents, then wait. When a reviewer's
+sub-agents have all reported, finish that reviewer — its consolidation, report,
+and (when authorized) its posting gate — before starting the other's; never
+interleave the two. When subagents are unavailable, run the two reviewers
+sequentially. Resolve mode is unaffected: it starts no sub-agents, so its
+dispatches stay one after the other.
 
 ## Resolve and scan
 

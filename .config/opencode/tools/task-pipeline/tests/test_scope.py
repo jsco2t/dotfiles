@@ -178,12 +178,16 @@ class ScopeCheckTest(unittest.TestCase):
         self.check(participants=[kb, liaison], research={"budget_minutes": 45, "why": "Epic children are thin."})
         self.assertIn("Research budget:** 45 agent-min", (self.h.wf / "scope.md").read_text())
 
-    def test_research_budget_must_fit_the_whole_budget(self) -> None:
+    def test_a_research_estimate_that_takes_the_whole_budget_warns_never_refuses(self) -> None:
+        # An estimate is information for the human, not a gate: never shrink the research to
+        # fit a budget — raise the budget if that is the honest forecast.
         kb = {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."}
         liaison = {"agent": "atlassian-liaison", "role": "research", "why": "Reads the epic's child issues for D1."}
-        res = self.check(expect=2, participants=[kb, liaison], budget_minutes=60,
-                         research={"budget_minutes": 400, "why": "Everything."})
-        self.assertIn("research budget", res.text)
+        res = self.check(participants=[kb, liaison], budget_minutes=60,
+                         research={"budget_minutes": 400, "why": "The epic's children are thin and unlinked."})
+        self.assertIn("WARN", res.out)
+        self.assertIn("never shrink the research to fit", res.out)
+        self.assertIn("scope ok", res.out)                      # a warning, not a refusal
 
     def test_legacy_recon_role_still_reads_as_research(self) -> None:
         self.check(participants=[{"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},

@@ -108,9 +108,15 @@ For a deeper general review, a caller may chain `comp-reviewomatic` in local mod
 
 ### 4. Delegate and consolidate
 
-If subagents are available and delegation is allowed, run one agent per perspective in parallel. Supply full scope, relevant source, project guidance, threshold, and PR line constraints. Tell agents to review only, not re-delegate, and return file/line, category, evidence, impact, fix, and confidence.
+If subagents are available and delegation is allowed, fan out — but share the setup work and cap the sub-agents at 3:
 
-Otherwise run all three perspectives directly. Deduplicate findings by cause and location, verify them against current code, and remove pre-existing, speculative, or stylistic issues.
+1. **Write one review brief first.** In a scratch location outside the repository (or under `$TMPDIR`), save the full diff as `change.diff` and write `brief.md`: the scope and how it was gathered; the changed files; the detected languages, frameworks, and versions; the project guidance (`AGENTS.md` text or its paths); the active threshold; the paths of `change.diff` and `baseline.txt` (next step); and, in PR modes, the diff-visible `(file, line)` set with the anchoring rule. Every sub-agent reads this one brief; no prompt repeats the context.
+2. **Run the baseline checks once, in the background.** When the reviewed code is checked out locally, start the project's own test and lint commands for the changed packages once, in the background, writing all output to `baseline.txt` and ending it with the line `== baseline done (exit <code>) ==`. Launch the reviewers without waiting for it; sub-agents read that file instead of each re-running the suite. Skip this when the code is not checked out locally.
+3. **Run at most one sub-agent per perspective (A, B, C) — 3 is a ceiling, not a target.** Never split a perspective across code areas into extra sub-agents. A caller-supplied agent limit packs perspectives together; it never drops one, and a small change may need only one or two sub-agents. This caps threads, not coverage: each perspective still runs as its own full pass, never blended or shortchanged.
+4. **Give each sub-agent the brief plus its perspectives.** Prefer a dedicated read-only review sub-agent when the host defines one. Tell each to review only, not re-delegate, and to work lean: batch independent reads and searches into one turn, read each file region once rather than re-reading, read `baseline.txt` instead of re-running the suite, and put any targeted throwaway test under `$TMPDIR`, never in the repository. Each returns one report: a list grouped by perspective, naming every perspective it covered, including any that found nothing.
+5. **Report only what consolidation can use.** With threshold N, a sub-agent writes a full finding (file and line, category, evidence, impact, fix, confidence 0–100) at confidence ≥ N−10; a one-line near miss (`path:line`, confidence, one sentence) at N−20 to N−11; nothing lower.
+
+Otherwise run all three perspectives directly, in the same order. Deduplicate findings by cause and location, verify them against current code, and remove pre-existing, speculative, or stylistic issues. Near misses are context, not findings: promote one only when another perspective flagged the same issue or your own verification raises it to the threshold.
 
 Confidence:
 

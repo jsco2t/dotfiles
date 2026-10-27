@@ -110,13 +110,24 @@ Review tests for meaningful coverage and determinism. When a dedicated test revi
 
 ### 4. Delegate when useful
 
-If subagents are available and delegation is allowed, assign non-overlapping perspectives in parallel. Supply the full scope, relevant source, project guidance, Go version, confidence threshold, and PR line constraints. Tell each agent to review only, not re-delegate, and return file/line, perspective, concern, evidence, impact, fix, and confidence.
+If subagents are available and delegation is allowed, fan out — but pack the perspectives and share the setup work:
 
-If delegation is unavailable, run the same review directly. Do not omit a perspective solely because no subagent is available.
+1. **Write one review brief first.** In a scratch location outside the repository (or under `$TMPDIR`), save the full diff as `change.diff` and write `brief.md`: the scope and how it was gathered; the changed files; the Go version from `go.mod`; the project guidance (`AGENTS.md` text or its paths); the active threshold; the paths of `change.diff` and `baseline.txt` (next step); and, in PR modes, the diff-visible `(file, line)` set with the anchoring rule. Every sub-agent reads this one brief; no prompt repeats the context.
+2. **Run the baseline checks once, in the background.** When the reviewed code is checked out locally, start `go test` and `go vet` over the changed packages (the project's own targets if it wraps them) once, in the background, writing all output to `baseline.txt` and ending it with the line `== baseline done (exit <code>) ==`. Launch the reviewers without waiting for it; sub-agents read that file instead of each re-running the suite. Skip this when the code is not checked out locally.
+3. **Pack the perspectives into at most 3 sub-agents — never one per perspective.** A sub-agent's cost is set by how much code it explores, not by how many lenses it applies; every extra agent re-explores the same code. Default grouping (instantiate a group only when the change selected at least one of its perspectives; never split a perspective across code areas into extra sub-agents):
+   1. **Correctness & Language** — Systems Correctness Analyst + Language Specialist.
+   2. **Security, Hardening & Design** — Security & Data Protection Reviewer + Infrastructure Hardening Specialist + API Design & Schema Guardian + Architecture & Abstraction Guardian.
+   3. **Operability & Conventions** — Observability & Operability Reviewer + Convention & Documentation Steward + Integration & Deployment Reviewer.
+
+   A caller-supplied agent limit replaces the 3 and packs harder; it never drops a perspective. This caps threads, not coverage: never drop a perspective, blur two into one vaguer pass, or shortchange one inside a shared thread.
+4. **Give each sub-agent the brief plus its perspectives.** Prefer a dedicated read-only review sub-agent when the host defines one. Each sub-agent runs every perspective it owns as its own full pass — co-location shares context; it never blends lenses — and returns one report: a list grouped by perspective, naming every perspective it owned, including any that found nothing (`<perspective>: no issues found`). Tell each to review only, not re-delegate, and to work lean: batch independent reads and searches into one turn, read each file region once rather than re-reading, read `baseline.txt` instead of re-running the suite, and put any targeted throwaway test under `$TMPDIR`, never in the repository.
+5. **Report only what consolidation can use.** With threshold N, a sub-agent writes a full finding (file and line, perspective and concern, evidence and impact, a concrete Go-appropriate fix, confidence 0–100) at confidence ≥ N−10; a one-line near miss (`path:line`, confidence, one sentence) at N−20 to N−11; nothing lower.
+
+If delegation is unavailable, run the same review directly, grouped in the same order. Do not omit a perspective solely because no subagent is available.
 
 ### 5. Validate and consolidate
 
-Verify candidates against current source, tests, generated artifacts, and project rules. Remove pre-existing, speculative, stylistic, and irrelevant issues. Merge duplicates.
+Verify candidates against current source, tests, generated artifacts, and project rules. Remove pre-existing, speculative, stylistic, and irrelevant issues. Merge duplicates. Near misses are context, not findings: promote one only when another perspective flagged the same issue or your own verification raises it to the threshold.
 
 Confidence:
 

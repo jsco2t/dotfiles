@@ -155,14 +155,22 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     elif rb:
         if len(str(research.get("why", "")).strip()) < 12:
             errs.append("research.why must say what is unknown enough to need research.")
-        lanes = limit("max_in_flight")
-        if isinstance(budget, int) and math.ceil(rb / lanes) >= budget:
-            errs.append(f"a research budget of {rb} agent-min takes {math.ceil(rb / lanes)} of the {budget}-min "
-                        "budget on its own — shrink it or raise the budget.")
     for t in scope.get("terms", []):
         if not t.get("term") or not t.get("means"):
             errs.append("each term needs `term` and `means` (and ideally `not`).")
     return errs
+
+
+def warnings(scope: Dict[str, Any]) -> List[str]:
+    """What the scope check reports but never refuses: budgets are estimates, not gates."""
+    out = []
+    budget, rb = scope.get("budget_minutes"), research_budget(scope)
+    lanes = limit("max_in_flight")
+    if rb and isinstance(budget, int) and math.ceil(rb / lanes) >= budget:
+        out.append(f"the research estimate ({rb} agent-min, about {math.ceil(rb / lanes)} min on {lanes} lanes) takes "
+                   f"the whole {budget}-min budget on its own. Both are estimates: raise budget_minutes if that is "
+                   "the honest forecast; never shrink the research to fit.")
+    return out
 
 
 def render(scope: Dict[str, Any]) -> str:
@@ -204,7 +212,8 @@ def cmd_check(wf: Workflow) -> str:
     state["budget_minutes"] = scope.get("budget_minutes")
     wf.save(state)
     wf.event("scope_check")
-    return (f"scope ok — rendered {wf.root / 'scope.md'}.\n"
+    return ("".join(f"WARN: {w}\n" for w in warnings(scope))
+            + f"scope ok — rendered {wf.root / 'scope.md'}.\n"
             "Present it to the human (including the research budget, or that there is none) and ask them to "
             "confirm (AskUserQuestion). On yes: `tp scope confirm --answer \"<their words>\"`.")
 

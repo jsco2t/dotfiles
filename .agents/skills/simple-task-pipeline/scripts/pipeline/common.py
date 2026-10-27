@@ -108,6 +108,15 @@ def words(text: str) -> int:
     return len(str(text).split())
 
 
+_LINE_REF = re.compile(r":\d+(?:-\d+)?")
+
+
+def noticed_key(text: str) -> str:
+    """What makes two noticed items the same: their words, with line numbers left out. Later fix
+    rounds re-notice a gap after the lines moved (`LICENSING.md:329` becomes `:340`)."""
+    return " ".join(_LINE_REF.sub(":N", str(text)).lower().split())
+
+
 class Workflow:
     """A workflow directory. Only tp.py writes `.tp/`, `decisions.md`, and `noticed.md`."""
 
@@ -196,8 +205,9 @@ class Workflow:
                 continue
             # Merge repeats: each later fix round re-notices the same gap, and a pile of
             # duplicates hides the real decisions (184 lines once carried 173 unique items).
+            # Line numbers are left out of the comparison: a re-noticed gap cites moved lines.
             marker, seen = ln[2:].split(") ", 1)
-            if " ".join(seen.split()) == clean:
+            if noticed_key(seen) == noticed_key(clean):
                 m = re.search(r", ×(\d+)$", marker)
                 count = int(m.group(1)) + 1 if m else 2
                 lines[i] = f"- ({re.sub(r', ×\d+$', '', marker)}, ×{count}) {seen}"

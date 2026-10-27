@@ -113,9 +113,18 @@ Do not assume a universal frontmatter schema; derive requirements from the proje
 
 ### 4. Delegate and consolidate
 
-If subagents are available and delegation is allowed, run one agent per perspective in parallel. Give each agent the documentation scope, relevant source, sibling samples, project guidance, threshold, and PR line constraints. Tell each to review only, not re-delegate, and return file/line, category, evidence, reader impact, exact fix when possible, and confidence.
+If subagents are available and delegation is allowed, fan out — but share the setup work and keep the sub-agent count at 3 or fewer:
 
-Otherwise perform all perspectives directly. Verify findings, remove pre-existing or preference-only issues, and merge duplicates.
+1. **Write one review brief first.** In a scratch location outside the repository (or under `$TMPDIR`), save the documentation diff (doc files only) as `change.diff` and write `brief.md`: the scope and how it was gathered; the changed doc files; the project guidance (`AGENTS.md` text or its paths); the sibling files and the conventions they establish; the active threshold; the path of `change.diff`; and, in PR modes, the diff-visible `(file, line)` set with the anchoring rule. Every sub-agent reads this one brief; no prompt repeats the context.
+2. **Pack the three perspectives into at most 3 sub-agents — two by default.** Never split one perspective across documents into extra sub-agents. Default grouping (instantiate a reviewer only when the change touches its dimension):
+   1. **A — Technical Accuracy** on its own: it verifies claims against the source code, the heaviest work in a doc review.
+   2. **B + C — Readability, Language, Structure & Consistency** together: both read the same prose and the same sibling files. Use the third slot to give B and C their own sub-agents only when the change is mostly new prose across several pages.
+
+   A caller-supplied agent limit packs harder; it never drops a perspective. This caps threads, not coverage: each perspective still runs as its own full pass, never blended or shortchanged.
+3. **Give each sub-agent the brief plus its perspectives.** Prefer a dedicated read-only review sub-agent when the host defines one. Tell each to review only, not re-delegate, to batch independent reads and searches into one turn, and to read each file or sibling once rather than re-reading. Each returns one report: a list grouped by perspective, naming every perspective it covered, including any that found nothing.
+4. **Report only what consolidation can use.** With threshold N, a sub-agent writes a full finding (file and line, category, evidence, reader impact, exact fix when possible, confidence 0–100) at confidence ≥ N−10; a one-line near miss (`path:line`, confidence, one sentence) at N−20 to N−11; nothing lower.
+
+Otherwise perform all perspectives directly, grouped in the same order. Verify findings, remove pre-existing or preference-only issues, and merge duplicates. Near misses are context, not findings: promote one only when another perspective flagged the same issue or your own verification raises it to the threshold.
 
 Confidence:
 

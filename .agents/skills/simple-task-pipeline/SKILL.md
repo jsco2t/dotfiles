@@ -107,8 +107,14 @@ are elapsed step time, subject to idle/stall corrections, not measured model bil
    it with a reason. Reuse saved results rather than surveying or researching them again.
 5. Write `plan.json` using `tp schema plan`: coherent tasks, actual dependencies, deliverable
    coverage, objective acceptance criteria, precise relative write paths, sources, estimates,
-   and named checks. List shared instruction files in plan `conventions` as `wf:<file>` or
-   `<workspace>:<file>`; they freeze with the plan and reach every brief. `research:R1` cites a recorded research result. Paths must stay inside
+   and named checks. Route each kind of work to the role built for it, even though you
+   perform every role yourself: code, comments included, is code work; a document task never
+   edits source files; a transport (liaison) role only moves content — it drafts nothing, and
+   what it posts comes verbatim from a reviewed draft the plan names in its sources. Text for
+   Jira or GitHub is authored as a draft file first and posted by a separate step after
+   review; integration runs after review. List shared instruction files in plan `conventions`
+   as `wf:<file>` or `<workspace>:<file>`; they freeze with the plan and reach every brief.
+   `research:R1` cites a recorded research result. Paths must stay inside
    write workspaces; avoid whole-workspace catch-alls and generated trees. Sequential tasks
    may share files; add dependencies when one task actually requires another's output.
    `docs` is a built-in task check; `docs-all` is a built-in final check. Define repository
@@ -144,11 +150,16 @@ Loop on `tp next`, completing each local step before starting another:
   into fix rounds. Time alone cannot reject or complete work.
 - **Triage:** inspect `tp show <review-id> --part blocking`, verify findings against source,
   then `tp triage <review-id> --accept-all` or dismiss/assign specific findings. Fixes go to
-  owning tasks, followed by verification of the fixes. Reviews do not edit deliverables.
+  owning tasks, followed by verification of the fixes: assign test-file findings to the task
+  that owns the tests, and let a behaviour bug's fix round start with a failing test. A done
+  session's dropped or wrongly dismissed findings: `tp resolve --review <review-id> --action
+  reopen --findings F1,F2`. Reviews do not edit deliverables.
 - **Human decision:** preserve partial work and ask the specific unresolved question. Use
   `tp exception --summary <question>` for a workflow blocker, adding `--task <id>` for a task
-  blocker. Record the response with the appropriate `tp resolve` action. Consult saved scope,
-  plan, and decisions first; do not repeat settled questions. Use `tp revise --scope` when
+  blocker. Record the response with the appropriate `tp resolve` action and `--by human`; a
+  question that scope, plan, or saved decisions already settle, answer yourself with
+  `--by manager`. Consult saved scope, plan, and decisions first; do not repeat settled
+  questions. Use `tp revise --scope` when
   confirmed scope changes, and present the changed contract for approval.
 - **Mechanical correction:** `tp widen` grows a task's write set and `tp amend` records allowed
   plan corrections; see the helper reference. These cannot silently change deliverables or
@@ -170,8 +181,9 @@ untracked files and pre-existing edits. Identify this honestly as self-review. C
 correctness, test quality, and documentation claims. Route blocking findings through triage,
 fixes, verification, and acceptance before completion.
 
-When `tp next` says closeout, `tp closeout` lists noticed items. Classify each using
-`--item N --class deferred|followup|observation --note <issue-and-consequence>`. Render the
+When `tp next` says closeout, `tp closeout` lists noticed items; plain notes about an agent's
+own work are classified for you, and the rest classify several at a time using
+`--items 1,3-5 --class deferred|followup|observation --note <issue-and-consequence>`. Render the
 batched decision with `tp closeout --ask`, ask the human, and record it with `tp closeout
 --decide --answer <response>`. Required criteria cannot be deferred without an approved
 contract change. If no noticed items require a decision, follow the helper directly to final.

@@ -92,8 +92,14 @@ def actions(state: Dict[str, Any], free: int) -> List[Dict[str, Any]]:
     return acts
 
 
+DIFF_CAP = 2_000_000
+
+
 def _changes(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], tasks: List[Dict[str, Any]],
              bid: str) -> Dict[str, Any]:
+    """The change under review twice over: the structured file (files, and each workspace's diff
+    command) and one plain-text diff — tracked changes against the approval baseline, then new
+    files in full — so no reviewer runs git, and none re-reads what another listed."""
     files: List[str] = []
     abs_paths: Dict[str, List[str]] = {}
     pathspecs: Dict[str, List[str]] = {}
@@ -104,6 +110,7 @@ def _changes(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], tasks: 
         abs_paths[t["id"]] = [str(ws / r) for r in found] or [str(ws / p) for p in t["paths"]]
         pathspecs.setdefault(t["workspace"], []).extend(t["paths"])
     diff, untracked = {}, {}
+    text: List[str] = []
     for name, specs in pathspecs.items():
         base = state.get("write_baseline", {}).get(name)
         if not base:
@@ -114,10 +121,19 @@ def _changes(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], tasks: 
         listed = subprocess.run(["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "--",
                                  *sorted(set(specs))], capture_output=True, text=True)
         untracked[name] = [ln for ln in listed.stdout.splitlines() if ln]
+        shown = subprocess.run(["git", "-C", str(root), "diff", base, "--", *sorted(set(specs))],
+                               capture_output=True, text=True, errors="replace")
+        text += [f"=== {name}: {diff[name]}", shown.stdout]
+        text += [f"=== {name}: new file {rel}\n" + (root / rel).read_text(errors="replace")
+                 for rel in untracked[name] if (root / rel).is_file()]
     data = {"batch": bid, "files": sorted(set(files)), "diff": diff, "untracked": untracked}
     out = wf.run_dir(bid) / "changes.json"
     out.write_text(json.dumps(data, indent=1))
-    return {"changes": str(out), "paths": abs_paths}
+    diff_file = wf.run_dir(bid) / "change.diff"
+    body = "\n".join(text)
+    diff_file.write_text(body[:DIFF_CAP]
+                         + ("\n[... cut at 2 MB: read the remaining files directly]" if len(body) > DIFF_CAP else ""))
+    return {"changes": str(out), "paths": abs_paths, "diff_file": str(diff_file)}
 
 
 def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
@@ -140,8 +156,12 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
     rdir = wf.run_dir(s["batch"])
     rdir.mkdir(parents=True, exist_ok=True)
     ctx = _changes(wf, state, scope, tasks, s["batch"])
-    ctx["sources"] = [w["path"] for w in scopemod.workspaces(scope).values() if w["mode"] == "read"] or ["the deliverables' own sources"]
+    ctx["sources"] = [w["path"] for w in scopemod.workspaces(scope).values()] or ["the deliverables' own sources"]
     ctx["decisions"] = run.decision_lines(state, [t["id"] for t in tasks])  # so the reviewer does not re-flag them
+    # The logs tp wrote when it ran each task's own tests and checks: reviewers read them instead
+    # of re-running the suite.
+    ctx["logs"] = [log for t in (tasks if n == 1 else [x for x in tasks if x["id"] in s["fix_tasks"]])
+                   for log in run.task_logs(wf, t["id"])]
     brief, result = rdir / f"brief-{s['reviewer']}-{n}.md", rdir / f"{s['reviewer']}-{n}.json"
     if result.exists():
         result.unlink()

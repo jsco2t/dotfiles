@@ -53,10 +53,12 @@ def new_task_state() -> Dict[str, Any]:
             "tests_hash": None, "note": None}
 
 
-def readonly_baseline(wf: Workflow, scope: Dict[str, Any]) -> Dict[str, Any]:
-    base: Dict[str, Any] = {}
+def readonly_baseline(wf: Workflow, scope: Dict[str, Any], keep: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """keep: baselines already recorded, kept as they are (a re-approval adds only the
+    workspaces that have none)."""
+    base: Dict[str, Any] = dict(keep or {})
     for name, ws in scopemod.workspaces(scope).items():
-        if ws["mode"] != "read":
+        if ws["mode"] != "read" or name in base:
             continue
         root = Path(ws["path"])
         porcelain = snapshot.git_porcelain(root)
@@ -224,8 +226,9 @@ GUIDE = {
     "halted": "Halted. Tell the human where work stopped (`halt.json`), then stop. `tp resume --answer \"...\"` "
               "continues.",
     "final": "`tp final` — package checks and the report.",
-    "closeout": "Classify the noticed items (`tp closeout --item N --class ... --note \"...\"` — the note "
-                "names the issue and its consequence in plain language), render the decision with "
+    "closeout": "Classify the noticed items (`tp closeout --items 1,3-5 --class ... --note \"...\"` — the note "
+                "names the issue and its consequence in plain language; plain notes about an agent's own work "
+                "are classified for you), render the decision with "
                 "`tp closeout --ask`, ask it once, record the answer (`tp closeout --decide --answer \"...\"`), "
                 "then `tp final`.",
     "done": "Report to the human from report.md.",
@@ -451,16 +454,20 @@ def _context(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Di
             sources.append(str(wf.root / rel))
         else:
             sources.append(str(Path(wss[name]["path"]) / rel) if name in wss else s)
+    writable = {str(Path(w["path"]).resolve()) for w in wss.values() if w["mode"] == "write"}
     return {
         "serves": "; ".join(f"{d} — {deliverables[d]['what']}" for d in task["serves"] if d in deliverables),
         "scope_md": wf.root / "scope.md",
         "write_paths": [str(ws / p) for p in task["paths"]],
-        "readonly": [w["path"] for w in wss.values() if w["mode"] == "read"],
+        # A read alias of a write workspace is not read-only: the task writes its own paths there.
+        "readonly": [w["path"] for w in wss.values() if w["mode"] == "read"
+                     and str(Path(w["path"]).resolve()) not in writable],
         "sources": sources or [str(ws)],
         "checks": checks,
         "tests_paths": [str(ws / p) for p in task.get("tests_paths", task["paths"])],
         "decisions": decision_lines(state or wf.load(), [task["id"]]),
         "conventions": [str(p) for p in planmod.conventions(plan, scope, wf.root)],
+        "logs": [log for d in task.get("depends_on", []) for log in task_logs(wf, d)] + task_logs(wf, task["id"]),
     }
 
 
@@ -588,7 +595,9 @@ def _run_cmd(cmd: str, cwd: Path, log: Path) -> Tuple[bool, str]:
 
 
 def _repos(scope: Dict[str, Any]) -> Dict[str, Path]:
-    return {n: Path(w["path"]) for n, w in scopemod.workspaces(scope).items() if w["mode"] == "read"}
+    """Where citations resolve: every workspace. Documents describe the code the run is
+    changing, which lives in a write workspace."""
+    return {n: Path(w["path"]) for n, w in scopemod.workspaces(scope).items()}
 
 
 def _expand_cmd(cmd: str, task: Optional[Dict[str, Any]], scope: Dict[str, Any]) -> str:
@@ -600,6 +609,16 @@ def _expand_cmd(cmd: str, task: Optional[Dict[str, Any]], scope: Dict[str, Any])
         files = _expand(_ws(scope, task["workspace"]), task["paths"])
         out = out.replace("{paths}", " ".join(shlex.quote(str(f)) for f in files))
     return out
+
+
+def task_logs(wf: Workflow, tid: str) -> List[str]:
+    """The latest test log and the latest log of each check a task's steps produced, so a brief
+    can point at them instead of the work re-running the suite."""
+    latest: Dict[str, Path] = {}
+    for log in sorted(wf.run_dir(tid).glob("*.log"), key=lambda p: p.stat().st_mtime):
+        kind = re.sub(r"-(tests|impl|author|fix)-\d+$", "", log.stem)
+        latest[kind] = log
+    return [str(p) for p in latest.values()]
 
 
 def _task_checks(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Dict[str, Any],
@@ -1326,13 +1345,28 @@ def _noticed_text(raw: str) -> str:
     return " ".join((m.group(1) if m else raw).split())
 
 
+# Notes left about an agent's own work, which never need the human: classified by the script.
+_CHATTER = re.compile(r"^\s*implementation note\b|\bsibling task\b.*\b(left|untouched|unstaged|not mine)\b|"
+                      r"\bleft (it |them )?untouched\b|^\s*(fyi|for the record)\b", re.I)
+
+
+def _closeout_marks(state: Dict[str, Any], wf: Optional[Workflow] = None) -> Dict[str, Dict[str, Any]]:
+    """The class of each noticed item: the manager's, else the script's for plain chatter."""
+    marks = dict(state.get("closeout", {}).get("items", {}))
+    if wf is not None:
+        for raw in wf.noticed_items():
+            text = _noticed_text(raw)
+            if text not in marks and _CHATTER.search(text):
+                marks[text] = {"class": "observation", "auto": True}
+    return marks
+
+
 def _closeout_unclassified(wf: Workflow, state: Dict[str, Any]) -> int:
     """How many open noticed items have no classification yet."""
     items = wf.noticed_items()
     if not items:
         return 0
-    cls = state.get("closeout", {}).get("items", {})
-    return len(items) - len({_noticed_text(r) for r in items} & set(cls))
+    return len({_noticed_text(r) for r in items} - set(_closeout_marks(state, wf)))
 
 
 def _closeout_pending(wf: Workflow, state: Dict[str, Any]) -> Optional[str]:
@@ -1344,15 +1378,33 @@ def _closeout_pending(wf: Workflow, state: Dict[str, Any]) -> Optional[str]:
     unclassified = _closeout_unclassified(wf, state)
     if unclassified:
         return f"{unclassified} noticed item(s) unclassified"
-    if any(v.get("class") in ("deferred", "followup") for v in state.get("closeout", {}).get("items", {}).values()) \
+    open_ = {_noticed_text(r) for r in items}
+    if any(v.get("class") in ("deferred", "followup") for k, v in _closeout_marks(state, wf).items() if k in open_) \
             and not state.get("closeout", {}).get("decision"):
         return "deferred or follow-up work awaits the human's decision"
     return None
 
 
+def _item_numbers(spec: str, count: int) -> List[int]:
+    """`1,3,5-7` → [1, 3, 5, 6, 7]."""
+    out: List[int] = []
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lo, _, hi = part.partition("-")
+        if not lo.isdigit() or (hi and not hi.isdigit()):
+            raise TPError(f"--items {spec!r}: give numbers and ranges, e.g. 1,3,5-7.")
+        out += list(range(int(lo), int(hi or lo) + 1))
+    bad = [n for n in out if not 1 <= n <= count]
+    if bad:
+        raise TPError(f"there is no noticed item #{bad[0]} ({count} open) — `tp closeout` lists them.")
+    return sorted(set(out))
+
+
 def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = None,
                  note: Optional[str] = None, decide: bool = False, answer: Optional[str] = None,
-                 ask: bool = False) -> str:
+                 ask: bool = False, items_spec: Optional[str] = None, show_all: bool = False) -> str:
     """The closeout gate between the last accept and the report: classify every noticed item,
     and put the deferred or follow-up work to the human once, verbatim recorded. A real run
     silently deferred 20 ticket-scope gaps this way; this makes the deferral a decision. The
@@ -1364,7 +1416,7 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
             raise TPError(f"closeout applies while EXECUTING; the workflow is {state['phase']}.")
         items = wf.noticed_items()
         if ask:
-            marks = state.get("closeout", {}).get("items", {})
+            marks = _closeout_marks(state, wf)
             if state.get("closeout", {}).get("decision"):
                 raise TPError("the human's decision is already recorded — `tp final` writes the report.")
             unclassified = _closeout_unclassified(wf, state)
@@ -1376,8 +1428,8 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
             if not chosen:
                 raise TPError("nothing is deferred or a follow-up, so no human decision is needed — `tp final`.")
             out = [f"DEFERRAL DECISION — {len(chosen)} noticed item(s) are ticket-scope work this run did not "
-                   "do. How should they be handled — accept the deferral, file follow-up tasks, or extend "
-                   "the run?", ""]
+                   "do. How should they be handled — accept the deferral, file follow-up tasks, or fix "
+                   "them now (reopen the owning task)?", ""]
             for i, (text, e) in enumerate(chosen, 1):
                 out.append(f"{i}. {text}")
                 out.append(f"   Why it matters: {e.get('note')}")
@@ -1399,41 +1451,51 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
             wf.decision("closeout: deferred and follow-up work", answer, who="human")
             wf.event("closeout_decision")
             return "human decision recorded. `tp final` writes the report."
-        if item is not None:
+        if item is not None or items_spec:
             if cls not in CLOSEOUT_CLASSES:
                 raise TPError(f"--class must be one of {', '.join(CLOSEOUT_CLASSES)}.")
             if cls in ("deferred", "followup") and (not note or len(note.strip()) < 12):
                 raise TPError(f"--class {cls} needs --note in plain language: what the issue is and what "
                               "consequence leaving it has (the note is what the human reads when deciding) — "
                               "never a bare file path or ticket shorthand.")
-            if not 1 <= item <= len(items):
+            numbers = _item_numbers(items_spec, len(items)) if items_spec else [item]
+            if item is not None and not 1 <= item <= len(items):
                 raise TPError(f"no noticed item #{item} ({len(items)} open) — `tp closeout` lists them.")
-            text = _noticed_text(items[item - 1])
             entry = {"class": cls}
             if note:
                 entry["note"] = note
-            state.setdefault("closeout", {}).setdefault("items", {})[text] = entry
+            for n in numbers:
+                state.setdefault("closeout", {}).setdefault("items", {})[_noticed_text(items[n - 1])] = dict(entry)
+            if cls != "observation":
+                state["closeout"].pop("decision", None)  # new deferred work needs its own answer
             wf.save(state)
-            wf.event("closeout_class", cls=cls)
+            wf.event("closeout_class", cls=cls, items=len(numbers))
             pending = _closeout_pending(wf, state)
             tail = ("`tp closeout --ask` renders the decision brief; ask the human, then "
                     "`tp closeout --decide --answer \"<the human's words>\"`."
                     if pending == "deferred or follow-up work awaits the human's decision"
                     else ("`tp final` writes the report." if pending is None else "`tp closeout` continues."))
-            return f"item #{item} classified {cls}" + (f" — {note}" if note else "") + f". {tail}"
+            which = f"item #{numbers[0]}" if len(numbers) == 1 else f"items {', '.join(f'#{n}' for n in numbers)}"
+            return f"{which} classified {cls}" + (f" — {note}" if note else "") + f". {tail}"
         if not items:
             return "nothing was noticed outside the plan — `tp final` writes the report."
-        marks = state.get("closeout", {}).get("items", {})
-        out = [f"CLOSEOUT — {len(items)} noticed item(s), "
-               f"{sum(1 for r in items if _noticed_text(r) in marks)} classified:"]
+        marks = _closeout_marks(state, wf)
+        auto = sum(1 for r in items if marks.get(_noticed_text(r), {}).get("auto"))
+        done = sum(_noticed_text(r) in marks for r in items)
+        out = [f"CLOSEOUT — {len(items)} noticed item(s), {done} classified"
+               + (f" ({auto} automatically as observations: notes about an agent's own work)"
+                  if auto else "")
+               + ("" if show_all else "; unclassified ones below (`--all` lists every item)") + ":"]
         for n, raw in enumerate(items, 1):
-            text = _noticed_text(raw)
-            c = marks.get(text, {}).get("class", "UNCLASSIFIED")
-            extra = marks.get(text, {}).get("note")
-            out.append(f"  {n}. [{c}]" + (f" ({extra})" if extra and c != "UNCLASSIFIED" else "") + f" {raw}")
-        out += ["Classify each: tp closeout --item N --class deferred|followup|observation [--note \"...\"]",
+            e = marks.get(_noticed_text(raw), {})
+            if show_all or not e:
+                extra = e.get("note")
+                out.append(f"  {n}. [{e.get('class', 'UNCLASSIFIED')}]"
+                           + (f" ({extra})" if extra and e.get("class") != "UNCLASSIFIED" else "") + f" {raw}")
+        out += ["Classify them, several at a time: tp closeout --items 1,3,5-7 --class "
+                "deferred|followup|observation [--note \"...\"]",
                 "Then, if anything is deferred or a follow-up, ask the human once (accept the deferral, file "
-                "follow-up tasks, or extend the run) and record it:",
+                "follow-up tasks, or fix them now) and record it:",
                 "  tp closeout --decide --answer \"<the human's words>\""]
         return "\n".join(out)
 
@@ -1455,7 +1517,7 @@ def cmd_final(wf: Workflow) -> str:
         pending = _closeout_pending(wf, state)
         if pending:
             raise TPError(f"the closeout gate is open: {pending} — classify the noticed items "
-                          "(`tp closeout --item N --class deferred|followup|observation --note \"...\"`), "
+                          "(`tp closeout --items 1,3-5 --class deferred|followup|observation --note \"...\"`), "
                           "render the decision (`tp closeout --ask`), and record the human's answer "
                           "(`tp closeout --decide --answer \"...\"`).")
         baseline = set(state.get("final_baseline", []))
@@ -1523,7 +1585,7 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
     out += ["", "## Final checks", ""] + ([f"- {r}" for r in results] or ["- none planned"])
     noticed = wf.noticed_items()
     if noticed:
-        marks = state.get("closeout", {}).get("items", {})
+        marks = _closeout_marks(state, wf)
         groups: Dict[str, List[str]] = {"deferred": [], "followup": [], "observation": [], "unclassified": []}
         for raw in noticed:
             m = re.match(r"\(([^)]*)\) (.*)$", raw, re.S)

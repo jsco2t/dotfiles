@@ -24,18 +24,21 @@ complete for the reader's task, and easy to navigate.
 1. Identify the reader and what they must be able to do after reading. Study neighbouring
    documents: structure, tone, terminology, formatting, index files.
 2. Gather the truth first. For code-backed claims, read the code (use `/code-sleuth` for deep
-   "how does this really work" questions, only for that question); for commands, run them safely
-   (read-only, or against scratch data under `$TMPDIR`) and capture real output; for external
-   facts, use the research findings or the primary source. For Jira or Confluence use
+   "how does this really work" questions, only for that question); for commands, read the logs
+   your brief names first and never re-run a build or suite it says already ran; run the rest
+   safely (read-only, or against scratch data under `$TMPDIR`) and capture real output; for
+   external facts, use the research findings or the primary source. For Jira or Confluence use
    `/atlassian-toolkit`; for GitHub use `/github-toolkit`.
 3. Write: lead with what the reader needs; introduce terms before using them; one idea per
    paragraph; tables for reference data; examples that actually work; prerequisites, caveats,
    and failure modes stated. Cite code as repo-relative `path:line`.
-4. Update the document set's navigation (index, table of contents, links) only when your task
+4. Text meant for Jira or GitHub is a document like any other: write it to the draft file your
+   task names; you never post it.
+5. Update the document set's navigation (index, table of contents, links) only when your task
    includes it.
-5. For research write-ups: every conclusion traces to the findings or a source you checked;
+6. For research write-ups: every conclusion traces to the findings or a source you checked;
    uncertainty is stated, not smoothed over.
-6. **Fix rounds:** address every finding — fixed, or disputed with evidence.
+7. **Fix rounds:** address every finding — fixed, or disputed with evidence.
 
 ## Quality gates
 

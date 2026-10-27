@@ -293,7 +293,9 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
             errs.append(f"{tid}: estimate_min must be a whole number of minutes.")
             computable = False
         elif est > limit("max_task_minutes"):
-            errs.append(f"{tid}: estimate_min {est} exceeds {limit('max_task_minutes')} — split the task.")
+            errs.append(f"{tid}: estimate_min {est} exceeds {limit('max_task_minutes')} — split the task. Never "
+                        "lower an honest estimate, or trim the work, to pass: estimates forecast, they never "
+                        "compress work.")
         for dep in t.get("depends_on", []):
             if dep not in all_ids:
                 errs.append(f"{tid}: depends on unknown {dep}.")
@@ -468,9 +470,11 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
     state["approved"] = now_iso()
     for t in plan["tasks"]:
         state["tasks"].setdefault(t["id"], run.new_task_state())
-    state["readonly_baseline"] = run.readonly_baseline(wf, scope)
+    state["readonly_baseline"] = run.readonly_baseline(wf, scope, keep=state.get("readonly_baseline"))
     from . import review  # end-of-pipeline review sessions and their diff baseline
-    state["write_baseline"] = review.write_baseline(scope)
+    # A re-approval (after `tp revise`) keeps the baselines of the first: the review must still
+    # diff against the state the run started from, not one that already holds its own work.
+    state["write_baseline"] = {**review.write_baseline(scope), **state.get("write_baseline", {})}
     state["reviews"] = review.new_reviews(plan, scope, state.get("reviews", {}))
     wf.save(state)
     wf.decision("plan approve", answer)

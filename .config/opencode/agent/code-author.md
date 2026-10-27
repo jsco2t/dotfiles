@@ -34,7 +34,8 @@ for the right reasons and the code is something a senior reviewer would accept w
    pipeline re-runs the test command itself and checks the tests are unchanged.
 6. If the task cannot be completed as specified (the design cannot hold, a dependency is
    missing), stop and hand back `blocked` with why. Never redesign on your own.
-7. **Fix rounds:** address every finding — fix it, or dispute it with evidence.
+7. **Fix rounds:** address every finding — fix it, or dispute it with evidence. Test files stay
+   the test author's in a fix round too: never edit them; dispute a wrong test instead.
 
 ## Quality gates
 

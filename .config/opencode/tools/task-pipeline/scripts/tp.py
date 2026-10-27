@@ -103,6 +103,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("closeout", help="the gate before the report: classify every noticed item and record "
                                         "the human's deferral decision; `tp final` refuses while this is open")
     s.add_argument("--item", type=int, help="the noticed item number, as `tp closeout` lists them")
+    s.add_argument("--items", help="classify several at once: numbers and ranges, e.g. 1,3,5-7")
     s.add_argument("--class", dest="cls", choices=None,
                    help="deferred (work left undone) | followup (own task to file) | observation (no action)")
     s.add_argument("--note", help="one or two plain sentences: the issue and its consequence (required for "
@@ -110,6 +111,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--decide", action="store_true", help="record the human's answer to the batched deferral question")
     s.add_argument("--answer", help="the human's words, verbatim")
     s.add_argument("--ask", action="store_true", help="render the answer-first decision brief to put to the human")
+    s.add_argument("--all", dest="show_all", action="store_true",
+                   help="list every noticed item, not only the unclassified ones")
 
     s = sub.add_parser("survey", help="deterministic structure map of a repository")
     s.add_argument("path")
@@ -308,7 +311,8 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "digest":
         return run.cmd_digest(wf)
     if c == "closeout":
-        return run.cmd_closeout(wf, args.item, args.cls, args.note, args.decide, args.answer, args.ask)
+        return run.cmd_closeout(wf, args.item, args.cls, args.note, args.decide, args.answer, args.ask,
+                                getattr(args, "items", None), getattr(args, "show_all", False))
     if c == "survey":
         return cmd_survey(wf, args)
     if c == "scope":

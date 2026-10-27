@@ -17,21 +17,22 @@ is next.
 python3 ~/.config/opencode/tools/task-pipeline/scripts/tp.py -w <workflow dir> <command>
 ```
 
-`tp <command>` below means exactly that line; spell it out in every Bash call (zsh does not
-word-split a variable). **`tp next` always says what to do next** — run it after every step.
+`tp <command>` means exactly that line; spell it out in every Bash call (zsh does not
+word-split a variable). **`tp next` always says what to do next.**
 
 ## Messaging: fresh dispatch, resume, record
 
 Every `task` call is synchronous: when it returns, that agent is done.
 
 - **Fresh dispatch** — send the literal `task(subagent_type=…, prompt=…)` line tp.py printed,
-  with the brief path from the same line. One call per agent, all in one message.
+  with the brief path from the same line — one call per agent, all in one message.
 - **Resume** — to tell a finished agent something, send a new `task` call with `task_id` set to
   the earlier call's id and the message as `prompt`: the same agent session continues with its
-  context intact. tp.py prints resume lines in exactly this shape when needed.
+  context intact. tp.py prints resume lines in exactly this shape when needed. `task_id` resume
+  works only in the same OpenCode session.
 - **Record with `--agent-id` every time** — `tp record <id> --agent-id <the task call's id>`.
-  tp.py stores it and echoes it back in every later resume line; if the call's id is unavailable,
-  say so in the resume prompt instead of leaving the instruction undone.
+  tp.py stores it and echoes it in every later resume line; if the id is unavailable, say so
+  in the resume prompt.
 
 ## Parse the arguments: `$ARGUMENTS`
 
@@ -39,8 +40,8 @@ The first word selects the mode; the rest are positional arguments.
 
 - **`resume`** — the workflow directory ($1). Skip to _Resume_ at the end.
 - **`halt`** (or `hault`) — no arguments. Skip to _Halt_ at the end.
-- **`status`** — the workflow directory ($1). Run `tp status`, present it answer-first, and stop:
-  for looking at a workflow from outside without driving it (mid-run "status?" is not this mode).
+- **`status`** — the workflow directory ($1). Run `tp status`, present it answer-first, and stop —
+  a look from outside without driving the run (mid-run "status?" is not this mode).
 - **Anything else** — a new pipeline: **$1 is the location** for the planning documents (ask if
   missing); **everything after it is the request**, verbatim including quoting (ask if missing).
 
@@ -50,9 +51,8 @@ Then run the manager loop below from Stage 1.
 
 1. **Only the human decides** scope, participants, plan approval, and anything off the
    plan. Ask with the `question` tool; record their words verbatim (`--answer` / `--feedback`).
-2. **At most 3 subagents in flight**, only agents confirmed in scope.json (script-enforced).
-   Dispatch with the `task` tool, one call per agent, by roster name. Never ad-hoc agents outside
-   the roster.
+2. **At most 3 subagents in flight**, only agents confirmed in scope.json (script-enforced):
+   one `task` call per agent, by roster name; never ad-hoc agents.
 3. **Structured files, not messages.** Agents read a brief file and write JSON; their reply is
    one line. Read only the part you need: `tp show <id> --part …`, `tp schema <name>`.
 4. **The approved plan is the contract.** Outside it: `tp note "<one line>"`; blocking:
@@ -67,30 +67,29 @@ Then run the manager loop below from Stage 1.
 `tp research add` enforces hard caps: at most **3 questions per item**, each **under 40 words**
 (whitespace-split — every absolute path eats the count), and `map`/`requirements` questions may not
 ask for content (`all/every files|lines|…`, `exhaustive`, `end-to-end`). It fails with all problems
-at once, so fix every question before re-running. When the questions will not fit:
+at once, so fix every question before re-running. When they will not fit:
 
 - **Split into more items, never into compound questions** — more `R<n>` items, each with its own
   agent and time box.
-- **Move detail into a referenced file.** Stay under 40 words by pointing at a file you wrote in
-  the workflow dir, e.g. `Group the notes per the rules in <wf>/research/R1-q1.md; output each
-  batch's name and dominant repo paths.` The agent reads files its questions reference; writing
-  them breaks no manager rule.
+- **Move detail into a referenced file** — stay under 40 words by pointing at a workflow-dir
+  file you wrote, e.g. `Group the notes per <wf>/research/R1-q1.md; output each batch's name
+  and dominant repo paths.` The agent reads files its questions reference.
 - **Cut words honestly.** Drop articles and hedging, prefer repo-relative paths, and split
   two-clause questions in two.
 
 ## Stage 1 — Scope and budget metadata (one round with the human)
 
 1. Save the request verbatim to a file, then run `tp init <location> --title "<title>"
-   --request-file <file> [--budget <minutes>]`. It creates the workflow's own
-   `<location>/<date>-<slug>/` folder and prints it: that is `-w` from then on.
-2. **Size it yourself first**, in ten minutes or less and with no agents: `tp survey <repo> --name
-   <ws>` per repository; `tp survey-issue jira:KEY` or `gh:owner/repo#N` for a named issue. It
-   prints children, thin issues, links, and a starting-point research estimate.
+   --request-file <file> [--budget <minutes>]`. It creates `<location>/<date>-<slug>/` and
+   prints it: that is `-w` from then on.
+2. **Size it yourself first**, ten minutes or less, no agents: `tp survey <repo> --name <ws>`
+   per repository; `tp survey-issue jira:KEY` or `gh:owner/repo#N` for a named issue — children,
+   thin issues, links, and a starting-point research estimate.
 3. **Judge the research.** A clear, bounded ask needs none — plan directly. Research earns its
    cost when details are missing or the work is large; if unsure how much, ask.
 4. **Choose participants critically.** `tp roster suggest --kinds <kinds>`. Keep an agent only
    when it has a direct bearing on the output; prefer specific reviewers (correctness, security,
-   api-compat, test) over broad ones; if unsure whether one takes part, ask.
+   api-compat, test) over broad ones; if unsure, ask.
 5. **One `question` call** (at most 4 questions) covering the output (kind, format, where),
    participants (multiple choice, several allowed), review (`none` or `final`), and any
    conventions/policies the work must honor (a workflow-dir file listed in `conventions`: they
@@ -101,22 +100,26 @@ at once, so fix every question before re-running. When the questions will not fi
 
 ## Stage 2 — Research (only inside the agreed budget)
 
-- Each item is one agent, at most 3 narrow questions, a box of 15 minutes or less, and a purpose:
-  `map`, `requirements`, or `investigate`. Many small items beat one big one:
+- Each item is one agent, at most 3 narrow questions, a ≤15-min box, and a purpose: `map`,
+  `requirements`, or `investigate` — many small items beat one big one:
   `tp research add R1 --agent <a> --purpose <p> --questions-file <f> --done-when "..." [--minutes N]`
   (rejected questions: see _When tp.py rejects research questions_).
 - `tp dispatch R1 R2 R3`, then one `task` call per id with the brief file it printed, and
   `tp record <id> --agent-id <the task call's id>` as each returns. Fact-check one answer per item.
 - **Followups** come back in the result; decide each: `tp research add … --from R1.F2`, or
   `tp research dismiss R1.F2 --reason "..."`. Submit refuses while any is undecided.
-- Out of budget is not a stop: add items freely; each keeps its ≤15-min box. `tp research extend
-  --minutes N --note "..."` grows the reporting budget.
+- Out of budget is not a stop: add items freely; each keeps its ≤15-min box
+  (`tp research extend --minutes N --note "..."` grows the reporting budget).
 
 ## Stage 3 — Plan (you write it)
 
 - **Planning maps the work; it never does the work.** One task per area, article, or unit, about
   15 minutes (30 at most), 1–6 objective acceptance criteria, a brief of 150 words or less.
   Tasks cite findings as sources: `research:R3`.
+- **Route each kind of work to the agent built for it.** Code, comments included, is a code
+  task; a doc author never owns source files; a liaison only transports — it drafts nothing, and
+  what it posts comes verbatim from a reviewed draft the task's sources name. Text for Jira or
+  GitHub is a doc-author draft, posted after review by the liaison task citing it.
 - **Paths name the repo files the task writes.** Never `.` or a bare `**` — plan check refuses
   catch-alls and >200-file expansions (real runs blew up git argvs on `.git` and `node_modules`).
   Name each file, optional ones too; a directory path only when its files exist at plan time.
@@ -129,7 +132,7 @@ at once, so fix every question before re-running. When the questions will not fi
 ## Stage 4 — Approval
 
 Give the human ten lines or fewer: tasks, time against the budget, review sessions, questions,
-and noticed items, with the path to `plan.md`. `question`: Approve / Revise. Then
+and noticed items, with `plan.md`'s path. `question`: Approve / Revise. Then
 `tp approve --answer "..."` or `tp revise --feedback "..."` — never approve without their answer.
 
 ## Stage 5 — Execute (autonomous)
@@ -139,66 +142,65 @@ after approval: `tp final` reports those failures as pre-existing instead of blo
 
 Loop on `tp next`:
 
-- **dispatch / fix / review** → `tp dispatch <id> [<id> …]` (every ready id in one call, never
-  chained), then one `task` call per printed brief, all in one message.
+- **dispatch / fix / review** → `tp dispatch <id> [<id> …]` (every ready id in one call), then
+  one `task` call per printed brief, all in one message.
 - **An agent's `task` call returns** → fact-check what it wrote, then
-  `tp record <id> --agent-id <the task call's id>`; if the hand-back sat stalled (backend
-  silent), add `--dead-minutes N` (`tp clock <id> --dead-minutes N --note "..."` corrects one
-  already recorded).
+  `tp record <id> --agent-id <the task call's id>`; a stalled hand-back (backend silent) takes
+  `--dead-minutes N` (`tp clock <id> --dead-minutes N --note "..."` corrects a recorded one).
 - **Time reports, never gates.** The meter (net of dead clock) shows in `tp next`, `tp digest`,
   and the report; nothing is refused for being over budget and no work is compressed to fit one.
 - **Present a digest at a reasonable interval** — after each dispatch wave settles: `tp digest`,
-  shown answer-first. Narrate decisions and results; let the digest carry the status.
-- **Mechanical corrections batch.** Widen a write set (`tp widen <id> --path <file> --reason
-  "..."` — allowed even after acceptance; refuses paths a live task owns) and fix checks
-  (`tp amend --reason "..."`) in one call per round; ask the human **once per round** if at all.
+  shown answer-first; let the digest carry the status.
+- **Mechanical corrections batch.** `tp widen <id> --path <file> --reason "..."` (allowed even
+  after acceptance; refuses paths a live task owns) and `tp amend --reason "..."` in one call
+  per round; ask the human **once per round** if at all.
 - **check** → fact-check the printed sample (does each cited line say what the sentence claims?
   for code, read the diff), then `tp accept <id> --note "..."` or `tp reject <id> --reason "..."`.
   A rejected task is a fix round: `tp dispatch <id>` prints a resume line — send it, record again.
-- **A noticed item the task's own acceptance depends on routes, it does not rest** — at the next
-  `tp next`, widen the task, amend the plan, or record a follow-up. Fence gaps that only rest as
-  noticed lines are how ticket scope silently goes undone.
+- **A noticed item the task's own acceptance depends on routes, it does not rest** — widen the
+  task, amend the plan, or record a follow-up at the next `tp next`. Gaps that rest as noticed
+  lines are how ticket scope silently goes undone.
 - **triage** (after the end-of-pipeline review) → `tp show <id> --part blocking`, verify each
   against the source, then `tp triage <id> --accept-all`, or `--dismiss F# --reason "..."` and
-  `--assign F#=T##`. When triage points at a parked patch (`runs/<id>/*.patch`), prefer having
-  the fix round verify and adopt it.
+  `--assign F#=T##`. Assign test-file findings to the task that owns the tests; a behaviour
+  bug's fix round starts with a failing test. Dropped or wrongly dismissed findings on a done
+  session: `tp resolve --review <id> --action reopen --findings F1,F2`. A parked patch
+  (`runs/<id>/*.patch`): have the fix round verify and adopt it.
 - **human** → stop, ask with `question`, then
-  `tp resolve [--task <id> | --review <id>] --action … --answer "..."`. A needs_input question
-  that scope, plan, or decisions already settle, answer yourself.
-- **wait** → end your turn only when `tp next` itself says to wait for in-flight agents; their
-  hand-backs arrive in this conversation and re-invoke you.
-- **A status question mid-run** ("status?", "how's it going?") → `tp digest`, present it
-  answer-first, then `tp next` and **keep working in the same turn** — a status answer never ends
-  the turn. Work stops only for `human`, `halt`, or `wait` actions.
+  `tp resolve [--task <id> | --review <id>] --action … --answer "..." --by human`. A needs_input
+  question that scope, plan, or decisions already settle, answer yourself (`--by manager`).
+- **wait** → end your turn only when `tp next` says to wait for in-flight agents; their
+  hand-backs arrive here and re-invoke you.
+- **A status question mid-run** → `tp digest`, present it answer-first, then `tp next` and
+  **keep working in the same turn** — work stops only for `human`, `halt`, or `wait`.
 - **A dispatch dies** (harness interrupt, restart, host loss; resume returns "Task cancelled") →
   check the workspace for stranded edits, then `tp lost <id> --summary "..."` (freezes the dead
-  clock, blocks the task), resolve, and dispatch fresh. `task_id` resume works only in the same
-  OpenCode session.
+  clock, blocks the task), resolve, and dispatch fresh.
 - **An agent far past its estimate** → a running `task` call cannot be stopped: note it, raise
-  `tp exception --task <id> --summary "..."` when needed, and keep agent commands short-returning
-  (the supervisor kills ~35 min of silence): the task's package tests, not the suite.
+  `tp exception --task <id> --summary "..."` when needed, and keep agent commands
+  short-returning (the supervisor kills ~35 min of silence).
 
 ## Stage 6 — Closeout, then final
 
-When `tp next` says **closeout** (all tasks and reviews done): `tp closeout` lists every noticed
-item; classify each — `tp closeout --item N --class deferred|followup|observation --note "..."`.
-A deferred or follow-up note is required and is what the human reads: plain language naming the
-issue and its consequence ("admission-webhook.yaml keeps a non-atomic write path; a crash mid-write
-tears the file the apiserver reads") — never a bare file path. Then `tp closeout --ask` renders the
-decision brief; put it in one `question` (accept the deferral / file follow-up tasks / extend the
-run) and `tp closeout --decide --answer "<their words>"`. `tp final` then runs the checks (baseline
-failures report as pre-existing) and writes `report.md` with honest Deferred / Follow-ups /
-Observations lists; present it answer-first. Committing and pushing are the human's call.
+When `tp next` says **closeout** (all tasks and reviews done): `tp closeout` lists the noticed
+items — plain notes about an agent's own work are classified for you; classify the rest several
+at a time: `tp closeout --items 1,3-5 --class deferred|followup|observation --note "..."` (the
+note, required for deferred/follow-up, names the issue and its consequence in plain words —
+never a bare file path; it is what the human reads). `tp closeout --ask` then renders the
+decision brief; put it in one `question` (accept the deferral / file follow-up tasks / fix them
+now by reopening the owning task) and `tp closeout --decide --answer "<their words>"`. `tp final`
+runs the checks (baseline failures report as pre-existing), writes `report.md` with honest
+Deferred / Follow-ups / Observations lists; present it answer-first. Committing and pushing are
+the human's call.
 
 ## Halt, resume, status
 
 - **Halt mode** (`/task-pipeline halt`, or `hault`) → `tp halt --reason "<their words>"`. Nothing
-  new starts; in-flight agents finish and are recorded; then `halt.json` records where work
-  stopped and what runs next. Tell the human, stop.
+  new starts; in-flight agents finish and are recorded; `halt.json` then records where work
+  stopped. Tell the human, stop.
 - **Resume mode** (`/task-pipeline resume <dir>`) → `tp status`; if halted,
   `tp resume --answer "<their words>"`; then `tp next`. An agent lost mid-run: check the workspace
-  for stranded edits, then `tp lost <id> --summary "..."`, resolve, re-dispatch fresh (`task_id`
-  resume works only in the same session).
+  for stranded edits, then `tp lost <id> --summary "..."`, resolve, re-dispatch fresh.
 - **Unattended runs** need no permission prompts: sandbox-writable workflow and write workspaces,
   and `Bash(python3 ~/.config/opencode/tools/task-pipeline/scripts/tp.py:*)` allowed in
   `permission`.

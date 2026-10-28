@@ -162,8 +162,10 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("triage", help="decide a review session's blocking findings")
     s.add_argument("id", help="review session, e.g. B1/doc-reviewer")
     s.add_argument("--accept-all", action="store_true")
-    s.add_argument("--dismiss", default="", help="comma-separated finding ids that are not real problems")
-    s.add_argument("--reason", help="why the dismissed findings are not real problems")
+    s.add_argument("--dismiss", action="append", default=[],
+                   help="finding ids that are not real problems (comma-separated, or repeat the flag)")
+    s.add_argument("--reason", action="append", default=[],
+                   help="why: one reason for every --dismiss, or one per --dismiss flag, in the same order")
     s.add_argument("--assign", action="append", default=[], help="F#=T## for a finding no task path matched")
 
     s = sub.add_parser("halt", aliases=["hault"], help="stop at the next clean point and record where")
@@ -187,6 +189,11 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--path", action="append", required=True, help="one file to add (repeatable)")
     s.add_argument("--reason", required=True, help="the finding or correction that needs it")
     s.add_argument("--answer", help="the human's words, verbatim: needed past two files for the task")
+    s = sub.add_parser("rebaseline-tests", help="accept a code task's tests as they are now, on the human's say-so "
+                                                "(a test change made outside the test step that the human approved)")
+    s.add_argument("id")
+    s.add_argument("--answer", required=True, help="the human's words, verbatim")
+    s.add_argument("--by", choices=["human", "manager"], required=True, help="only the human may move a test baseline")
     s = sub.add_parser("budget", help="the time budget: reporting metadata that gates nothing")
     bs = s.add_subparsers(dest="what", required=True)
     be = bs.add_parser("extend", help="raise the whole-job budget (your re-estimate; no human approval needed)")
@@ -220,6 +227,8 @@ def parser() -> argparse.ArgumentParser:
                                        "with the human's words, the post itself, then a read-back")
     s.add_argument("id")
     s.add_argument("--answer", help="the human's OK, verbatim, given after they saw the dry run")
+    s = sub.add_parser("recheck", help="rerun a sibling-waiting task's tests and checks once its siblings land")
+    s.add_argument("id")
     s = sub.add_parser("accept", help="accept a task after your fact check")
     s.add_argument("id")
     s.add_argument("--note", required=True)
@@ -232,7 +241,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("resolve", help="record a decision on a blocked task, review session, or workflow")
     s.add_argument("--task")
     s.add_argument("--review", help="a review session, e.g. B1/doc-reviewer")
-    s.add_argument("--action", required=True, choices=["answer", "retry", "skip", "reopen", "accept", "clear"])
+    s.add_argument("--action", required=True, choices=["answer", "retry", "skip", "reopen", "tests", "accept", "clear"],
+                   help="tests: route a test change to the test author (a code task's tests are the test author's)")
     s.add_argument("--answer", required=True)
     s.add_argument("--by", choices=["human", "manager"], required=True,
                    help="who decided; recorded in decisions.md and the report")
@@ -311,6 +321,8 @@ def dispatch(args: argparse.Namespace) -> str:
                                 args.items, args.all)
     if c == "widen":
         return planmod.cmd_widen(wf, args.id, args.path, args.reason, args.answer)
+    if c == "rebaseline-tests":
+        return run.cmd_rebaseline_tests(wf, args.id, args.answer, args.by)
     if c == "budget":
         return scopemod.cmd_budget_extend(wf, args.minutes, args.answer, args.note)
     if c == "lost":
@@ -341,8 +353,7 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "show":
         return cmd_show(wf, args.id, args.part)
     if c == "triage":
-        return review.cmd_triage(wf, args.id, args.accept_all, [x for x in args.dismiss.split(",") if x],
-                                 args.reason, args.assign)
+        return review.cmd_triage(wf, args.id, args.accept_all, args.dismiss, args.reason, args.assign)
     if c in ("halt", "hault"):
         return run.cmd_halt(wf, args.reason)
     if c == "resume":
@@ -373,6 +384,8 @@ def dispatch(args: argparse.Namespace) -> str:
         return publish.cmd_publish(wf, args.id, args.answer)
     if c == "sample":
         return run.cmd_sample(wf, args.id)
+    if c == "recheck":
+        return run.cmd_recheck(wf, args.id)
     if c == "accept":
         return run.cmd_accept(wf, args.id, args.note)
     if c == "reject":

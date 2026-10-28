@@ -42,6 +42,8 @@ will display literally. Use plain text, or supply a real Atlassian Document Form
   multiline shell arguments.
 - Comment edits use `--id <comment-id>`. Worklog writes use
   `jira issue worklog <KEY> "2h" [--started <ISO-time>]`.
+- Issue links: `jira issue link-delete <KEY> <OTHER> [--type Blocks] --dry-run`
+  shows the link joining two issues; drop `--dry-run` to delete it (permanent).
 
 ADF document shape:
 

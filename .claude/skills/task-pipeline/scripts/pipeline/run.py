@@ -48,15 +48,37 @@ def _take(wf: Workflow, root: Path, only: Optional[List[str]] = None) -> snapsho
     re-hash costs seconds every dispatch, record, and digest."""
     root = Path(root).resolve()
     cache = wf.meta / "statcache" / (hashlib.sha1(str(root).encode()).hexdigest()[:16] + ".json")
-    return snapshot.take(root, [wf.root], cache=cache, only=only)
+    return snapshot.take(root, [wf.root], cache=cache, only=only, ignore=_ignored(wf))
+
+
+def _ignored(wf: Workflow) -> List[str]:
+    """scope.json `ignore`: workspace-relative patterns for files no task writes (a sandbox's
+    per-command mount points), left out of every snapshot and read-only check."""
+    if not wf.scope_json.exists():
+        return []
+    try:
+        data = json.loads(wf.scope_json.read_text())
+    except ValueError:
+        return []
+    pats = data.get("ignore") if isinstance(data, dict) else None
+    return [str(p) for p in pats] if isinstance(pats, list) else []
+
+
+def _write_aliases(scope: Dict[str, Any]) -> set:
+    """Read workspaces that are the same directory as a write workspace: a reference alias for
+    citations, written by the run's own tasks, so never read-only."""
+    writable = {str(Path(w["path"]).resolve()) for w in scopemod.workspaces(scope).values() if w["mode"] == "write"}
+    return {name for name, w in scopemod.workspaces(scope).items()
+            if w["mode"] == "read" and str(Path(w["path"]).resolve()) in writable}
 
 
 def readonly_baseline(wf: Workflow, scope: Dict[str, Any], keep: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """keep: baselines already recorded, kept as they are (a re-approval or scope amendment adds
     only the workspaces that have none)."""
     base: Dict[str, Any] = dict(keep or {})
+    aliases = _write_aliases(scope)
     for name, ws in scopemod.workspaces(scope).items():
-        if ws["mode"] != "read" or name in base:
+        if ws["mode"] != "read" or name in base or name in aliases:
             continue
         root = Path(ws["path"])
         porcelain = snapshot.git_porcelain(root)
@@ -71,7 +93,11 @@ def readonly_baseline(wf: Workflow, scope: Dict[str, Any], keep: Optional[Dict[s
 
 def _readonly_changes(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
     out = []
+    aliases = _write_aliases(scope)
+    ignore = _ignored(wf)
     for name, base in state.get("readonly_baseline", {}).items():
+        if name in aliases:
+            continue
         root = Path(scopemod.workspaces(scope)[name]["path"])
         if "git" in base:
             now = snapshot.git_porcelain(root) or ""
@@ -79,6 +105,7 @@ def _readonly_changes(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any]
             changed = [ln[3:] for ln in now.splitlines() if ln not in before]
         else:
             changed = snapshot.diff(snapshot.load(Path(base["snap"])), _take(wf, root))
+        changed = [c for c in changed if not (ignore and snapshot.matches(c, ignore))]
         if changed:
             out.append(f"The read-only workspace {name} changed: {', '.join(changed[:8])} — restore it "
                        "(read-only means no edits, builds, or generated files there).")
@@ -180,6 +207,11 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
     if state.get("blocked"):
         acts.append({"action": "human", "why": state["blocked"]["summary"]})
     for tid, ts in state["tasks"].items():
+        if ts["status"] == "blocked" and ts["blocked"].get("kind") == "sibling":
+            # Waiting on a sibling's red tests, not on the human: re-check once they have all landed.
+            if not _red_siblings(state, ts["blocked"].get("on", [])):
+                acts.append({"action": "recheck", "id": tid})
+            continue
         if ts["status"] == "blocked":
             lost = ts["blocked"].get("lost", 0)  # under the loss breaker, a re-run is the manager's call
             acts.append({"action": "rerun" if 0 < lost < limit("max_lost_retries") else "human", "id": tid,
@@ -219,15 +251,20 @@ GUIDE = {
     "check": "Fact-check {id}: read the sample `tp record` printed (or `tp sample {id}`); then "
              "`tp accept {id} --note \"...\"` or `tp reject {id} --reason \"...\"`.",
     "triage": "Triage {id}: `tp show {id} --part blocking`, check each against the source, then "
-              "`tp triage {id} --accept-all`, or `--dismiss F# --reason \"...\"` and/or `--assign F#=T##`.",
+              "`tp triage {id} --accept-all`, or `--dismiss F# --reason \"...\"` (repeat the pair for a reason "
+              "each) and/or `--assign F#=T##`.",
     "followup": "Decide {id} ({why}): pursue it (`tp research add ... --from {id}`) or "
                 "`tp research dismiss {id} --reason \"...\"`.",
     "human": "Stop and ask the human{about}: {why}. If settling it changes the plan, draft and check the amendment "
              "first (`tp plan amend`) and show its change in this one question; the same answer then goes to `tp "
-             "resolve` and `tp plan amend --answer`. Record the answer with `tp resolve ... --by human`.",
+             "resolve` and `tp plan amend --answer`. Record the answer with `tp resolve ... --by human`. A test "
+             "gate that is the test's fault: `tp resolve --task {id} --action tests` (a test-author round); an "
+             "approved test change: `tp rebaseline-tests {id} --answer \"...\" --by human`.",
     "rerun": "{why}. Check the workspace for stranded edits, then `tp resolve --task {id} --action retry "
              "--answer \"...\" --by manager` and `tp dispatch {id}` (a fresh agent).",
     "wait": "Wait for {ids} to hand back; end your turn if nothing else is actionable.",
+    "recheck": "`tp recheck {id}`: the sibling tasks whose red tests were its only failures have landed, so its "
+               "tests and checks run again (no agent, no fix round).",
     "halting": "Halt requested: record {ids} as they hand back; dispatch nothing new.",
     "halted": "Halted. Tell the human where work stopped (`halt.json`), then stop. `tp resume --answer \"...\"` "
               "continues.",
@@ -649,7 +686,7 @@ def task_logs(wf: Workflow, tid: str) -> List[str]:
     """The latest test log and the latest log of each check a task's steps produced."""
     latest: Dict[str, Path] = {}
     for log in sorted(wf.run_dir(tid).glob("*.log"), key=lambda p: p.stat().st_mtime):
-        kind = re.sub(r"-(tests|impl|author|fix)-\d+$", "", log.stem)
+        kind = re.sub(r"-(tests|impl|author|fix|recheck)-\d+$", "", log.stem)
         latest[kind] = log
     return [str(p) for p in latest.values()]
 
@@ -728,8 +765,17 @@ def _expand_cmd(cmd: str, task: Optional[Dict[str, Any]], scope: Dict[str, Any])
     for name, w in wss.items():
         out = out.replace("{ws:" + name + "}", shlex.quote(w["path"]))
     if task is not None:
-        files = _expand(_ws(scope, task["workspace"]), task["paths"])
+        ws = _ws(scope, task["workspace"])
+        files = _expand(ws, task["paths"])
         out = out.replace("{paths}", " ".join(shlex.quote(str(f)) for f in files))
+        # {dirs}: the task's own package directories, so a per-task check (`go vet {dirs}`) is not
+        # failed by another in-flight task's red tests elsewhere in the repository.
+        rels = [f.relative_to(ws) for f in files] + [
+            Path(p) for p in task["paths"] if planmod.wf_rel(p) is None and not any(ch in p for ch in "*?[")]
+        # A directory the task deleted is no package to check (`go vet ./gone` fails on it).
+        dirs = sorted({"./" + r.parent.as_posix() if r.parent != Path(".") else "." for r in rels
+                       if (ws / r.parent).is_dir()})
+        out = out.replace("{dirs}", " ".join(shlex.quote(d) for d in dirs))
     return out
 
 
@@ -752,6 +798,98 @@ def _task_checks(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan
             if not ok:
                 failures.append(f"Check `{name}` failed (log {log}): {tail}")
     return failures
+
+
+# A failure location in test or build output: `path/file.go:12:3` or `File "/abs/file.py", line 4`.
+_FAIL_LOC = re.compile(r'([^\s"\'():,]+\.[A-Za-z0-9]+)(?::\d+|", line \d+)')
+_STILL_RED = DONE_STATES + ("needs_check", "needs_review")
+
+
+def _verification_failure(finding: str) -> bool:
+    return finding.startswith("The tests are not green") or finding.startswith("Check `")
+
+
+def _red_siblings(state: Dict[str, Any], ids: List[str]) -> List[str]:
+    """The tasks among ids whose tests are still red: recorded, but not yet implemented and checked."""
+    return [o for o in ids if o in state["tasks"] and state["tasks"][o]["status"] not in _STILL_RED]
+
+
+def _sibling_red(wf: Workflow, state: Dict[str, Any], tasks: Dict[str, Dict[str, Any]], tid: str, ws: Path,
+                 label: str) -> List[str]:
+    """The sibling tasks that explain every failure location in this step's test and check logs:
+    their tests share this task's test run or build (one Go package, one test discovery) and are red
+    until their own implementations land. Empty when any location is this task's or nobody's."""
+    logs = [wf.run_dir(tid) / f"tests-{label}.log"] + sorted(wf.run_dir(tid).glob(f"check-*-{label}.log"))
+    root = ws.resolve()
+    locs: set = set()
+    for log in logs:
+        if not log.exists():
+            continue
+        for m in _FAIL_LOC.finditer(log.read_text(errors="replace")):
+            p = Path(m.group(1))
+            if p.is_absolute():
+                try:
+                    p = p.resolve().relative_to(root)
+                except ValueError:
+                    continue  # the toolchain's own frames (stdlib, module cache) belong to no task
+            locs.add(p.as_posix())
+    if not locs:
+        return []
+    owners: Dict[str, List[str]] = {}
+    for other in _red_siblings(state, [o for o in state["tasks"] if o != tid]):
+        ot, ots = tasks.get(other), state["tasks"][other]
+        if not ot or ot.get("workspace") != tasks[tid]["workspace"] or not ot.get("tests_paths") \
+                or not ots.get("tests_hash"):
+            continue
+        if ots["status"] == "blocked" and (ots.get("blocked") or {}).get("kind") == "sibling":
+            continue  # its implementation is in, so its red tests are a real failure, and two waits would deadlock
+        hit = [loc for loc in locs if snapshot.matches(loc, ot["tests_paths"])]
+        if hit:
+            owners[other] = hit
+    explained = {loc for hits in owners.values() for loc in hits}
+    return sorted(owners) if locs <= explained else []
+
+
+def cmd_recheck(wf: Workflow, tid: str) -> str:
+    """Run a sibling-waiting task's tests and checks again once the siblings have landed: a pass
+    moves it on with no fix round spent; a failure of its own opens the fix round it now earns."""
+    with wf.locked():
+        state = wf.load()
+        plan, scope, tasks = _loaded(wf, state)
+        ts, task = state["tasks"].get(tid), tasks.get(tid)
+        if ts is None or ts["status"] != "blocked" or (ts["blocked"] or {}).get("kind") != "sibling":
+            raise TPError(f"{tid} is not waiting on sibling tasks.")
+        still = _red_siblings(state, ts["blocked"].get("on", []))
+        if still:
+            raise TPError(f"{tid} still waits on {', '.join(still)}: their tests are red until they land.")
+        effective = ts["blocked"].get("effective") or _authoring_step(task, scope)
+        ws = _ws(scope, task["workspace"])
+        label = f"recheck-{ts['round']}"
+        findings: List[str] = []
+        if effective == "impl":
+            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
+            if not ok:
+                findings.append(f"The tests are not green: `{task['test_cmd']}` failed: {tail}")
+        findings += _task_checks(wf, task, scope, plan, label)
+        _pause(ts, ts["blocked"].get("since"))
+        ts["blocked"] = None
+        waits_on = _sibling_red(wf, state, tasks, tid, ws, label) if findings and all(
+            _verification_failure(f) for f in findings) else []
+        if waits_on:
+            ts["status"] = "blocked"
+            ts["blocked"] = {"kind": "sibling", "on": waits_on, "step": effective, "effective": effective,
+                             "since": now_iso(), "summary": f"{tid} waits on {', '.join(waits_on)}"}
+            out = f"{tid} still fails only in {', '.join(waits_on)}'s red tests; it keeps waiting."
+        elif findings:
+            ts["status"] = "needs_check"
+            out = _fail(wf, ts, tid, findings, fixing=effective, ws=ws)
+        else:
+            ts["status"] = "needs_review" if planmod.reviewer_for(task, scope) else "needs_check"
+            out = f"{tid} passed its checks on recheck (no fix round spent).\n" + (
+                _sample(wf, task, scope) if ts["status"] == "needs_check" else "Next: review.")
+        wf.save(state)
+        wf.event("recheck", id=tid, status=ts["status"])
+        return out
 
 
 def _tests_hash(task: Dict[str, Any], scope: Dict[str, Any]) -> Dict[str, Optional[str]]:
@@ -1108,7 +1246,19 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
         if effective in ("author", "impl"):
             findings += _task_checks(wf, task, scope, plan, label)
         del state["in_flight"][tid]
-        if findings:
+        waits_on = (_sibling_red(wf, state, tasks, tid, ws, label)
+                    if findings and effective in ("author", "impl") and all(_verification_failure(f) for f in findings)
+                    else [])
+        if waits_on:
+            ts["status"] = "blocked"
+            ts["blocked"] = {"kind": "sibling", "on": waits_on, "step": step, "effective": effective,
+                             "since": now_iso(),
+                             "summary": f"{tid} waits on {', '.join(waits_on)}: its only failures are in their "
+                                        "still-red tests"}
+            out = (f"{tid} waits on {', '.join(waits_on)}: every failure is in their tests, which are red until their "
+                   "implementations land — not this task's failure, so no fix round. `tp next` offers "
+                   f"`tp recheck {tid}` once they land. {' '.join(msgs)}".rstrip())
+        elif findings:
             out = _fail(wf, ts, tid, findings, fixing=effective, ws=ws)
         elif effective == "tests" and expect and ts.get("queued"):
             # The failing test is in; the code author fixes the behaviour against it. This round
@@ -1403,6 +1553,33 @@ def decision_lines(state: Dict[str, Any], tids: List[str]) -> List[str]:
     return out
 
 
+def cmd_rebaseline_tests(wf: Workflow, tid: str, answer: str, by: str) -> str:
+    """The human approved a test change made outside the test step (a mechanical rename after an
+    interface moved): the task's tests as they are now become the baseline the impl gate compares
+    against. Only the human moves it — the gate exists so nobody else can loosen a test."""
+    if by != "human":
+        raise TPError("only the human may move a test baseline: ask them, then repeat with --by human and their words.")
+    with wf.locked():
+        state = wf.load()
+        _, scope, tasks = _loaded(wf, state)
+        task, ts = tasks.get(tid), state["tasks"].get(tid)
+        if task is None or ts is None or not planmod.is_code(task, scope) or not task.get("tests_paths"):
+            raise TPError(f"{tid} is not a code task with tests.")
+        if tid in state["in_flight"]:
+            raise TPError(f"{tid} is in flight; rebaseline once it has handed back and been recorded.")
+        if not ts.get("tests_hash"):
+            raise TPError(f"{tid}'s tests are not recorded yet; its test step sets the first baseline.")
+        before, now = ts["tests_hash"], _tests_hash(task, scope)
+        moved = sorted(rel for rel in set(before) | set(now) if before.get(rel) != now.get(rel))
+        ts["tests_hash"] = now
+        _freeze_tests_baseline(wf, task, scope)
+        wf.save(state)
+        wf.decision(f"rebaseline tests {tid}", f"{answer} ({', '.join(moved) or 'no file changed'})", who="human")
+        wf.event("rebaseline_tests", id=tid, files=moved)
+        return (f"{tid}: the tests as they stand are the new baseline ({', '.join(moved) or 'unchanged'}). "
+                "Its next record compares against them. `tp next`.")
+
+
 def cmd_resolve(wf: Workflow, tid: Optional[str], action: str, answer: str, by: Optional[str] = None) -> str:
     """by: who decided (human or manager); left out, the record attributes the decision to nobody."""
     with wf.locked():
@@ -1440,6 +1617,25 @@ def _resolve(wf: Workflow, state: Dict[str, Any], tid: Optional[str], action: st
         state.pop("final_failed", None)
         wf.save(state)
         return f"{tid} reopened. `tp next`.\n{out}"
+    if action == "tests":
+        # A test that must change after the test step goes to the test author as its own round:
+        # the code author may not edit tests, and the impl gate reads any reworded line as weakening.
+        _, scope, tasks = _loaded(wf, state)
+        if not planmod.is_code(tasks[tid], scope) or not tasks[tid].get("tests_paths"):
+            raise TPError(f"{tid} has no tests to route: --action tests applies to code tasks.")
+        if ts["status"] in ("pending", "needs_impl") or not ts.get("tests_hash"):
+            raise TPError(f"{tid}'s tests are not recorded yet; its test step writes them.")
+        implemented = not (ts["status"] == "blocked" and (ts["blocked"] or {}).get("step") == "impl")
+        if ts["status"] == "blocked":
+            _pause(ts, ts["blocked"].get("since"))
+            ts.update(status="needs_check", blocked=None)
+        note = "Test change" + (f" ruled by the {by}" if by else "") + f": {answer}"
+        queued = [] if implemented else [f"Implement against the corrected tests ({answer})."]
+        out = add_fix(wf, state, tid, [note], fixing="tests", expect="green" if implemented else "red",
+                      queued=queued)
+        state.pop("final_failed", None)
+        wf.save(state)
+        return f"{tid}: the test change goes to the test author. `tp next`.\n{out}"
     if ts["status"] != "blocked":
         raise TPError(f"{tid} is not blocked (status {ts['status']}).")
     kind, since = ts["blocked"]["kind"], ts["blocked"].get("since")
@@ -1483,7 +1679,8 @@ def _resolve(wf: Workflow, state: Dict[str, Any], tid: Optional[str], action: st
     else:
         raise TPError(f"action {action!r} does not apply to a {kind} block; use "
                       + {"rounds": "retry or skip", "input": "answer or skip",
-                         "exception": "answer, retry, or skip"}[kind] + ".")
+                         "exception": "answer, retry, or skip",
+                         "sibling": "skip, or `tp recheck` once its siblings land"}.get(kind, "skip") + ".")
     wf.save(state)
     return f"{tid} resolved ({action}). `tp next`."
 
@@ -1756,6 +1953,12 @@ def cmd_final(wf: Workflow) -> str:
         return f"DONE — report: {wf.root / 'report.md'}. Present it to the human (answer-first)."
 
 
+def _published_to(task: Dict[str, Any]) -> str:
+    """What a publish task writes, in place of the files other tasks list."""
+    pub = task.get("publish") or {}
+    return f"{pub.get('to', 'publish')} {pub.get('target', '')}".strip()
+
+
 def _task_rows(wf: Workflow, state: Dict[str, Any], tasks: Dict[str, Dict[str, Any]]) -> List[str]:
     """Active min: first dispatch to acceptance, less waits on the human, halts, and time spent
     finished. Agent min: the agents' own time in flight."""
@@ -1795,7 +1998,7 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
     for d in scope["deliverables"]:
         served = [t for t in tasks.values() if d["id"] in t["serves"]]
         out.append(f"- {d['id']} — {d['what']}: " + ", ".join(
-            f"{t['id']} (`{', '.join(t['paths'])}`)" for t in served))
+            f"{t['id']} (`{', '.join(t.get('paths') or [_published_to(t)])}`)" for t in served))
     out += ["", "## Tasks", ""] + _task_rows(wf, state, tasks)
     notes = [f"- {tid}: {ts['note']}" for tid, ts in state["tasks"].items() if ts.get("note")]
     if notes:

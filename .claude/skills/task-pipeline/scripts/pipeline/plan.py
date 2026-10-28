@@ -20,7 +20,7 @@ BUILTIN_FINAL_CHECKS = {"docs-all": "links, citations, and reachability from ind
                                     "workspace gained or changed since approval (every file when it is not under git)"}
 REVIEW_MINUTES = 8
 # `tp publish` destinations: what the manager posts, from a reviewed `wf:` draft, after the human's OK.
-PUBLISH_TARGETS = ("jira-comment", "jira-description")
+PUBLISH_TARGETS = ("jira-comment", "jira-description", "jira-issue")
 WHEN = ("after_review", "anytime")
 # A transport agent's brief that asks it to write the content itself: content is a document task's.
 _DRAFTING = re.compile(r"(?<![\w:/.-])(draft(s|ing)?|summari[sz](e[sd]?|ing)|write[- ]up|documenting)\b", re.I)
@@ -292,7 +292,13 @@ def _publish_errors(tid: str, t: Dict[str, Any], tasks: Dict[str, Dict[str, Any]
     if pub.get("to") not in PUBLISH_TARGETS:
         errs.append(f"{tid}: publish.to must be one of {', '.join(PUBLISH_TARGETS)}.")
     if not str(pub.get("target", "")).strip():
-        errs.append(f"{tid}: publish.target names the issue key or PR number.")
+        errs.append(f"{tid}: publish.target names the issue key or PR number (for jira-issue: the parent).")
+    if pub.get("to") == "jira-issue":
+        for key in ("project", "type"):
+            if not str(pub.get(key, "")).strip():
+                errs.append(f"{tid}: a jira-issue publish names its {key} (for example project KUB, type Task).")
+        if not isinstance(pub.get("labels", []), list):
+            errs.append(f"{tid}: publish.labels is a list of label names.")
     body = str(pub.get("body", ""))
     writers = [o for o in before if body in [str(p) for p in tasks[o].get("paths", [])]]
     if wf_rel(body) is None or not writers:
@@ -1057,11 +1063,17 @@ def cmd_widen(wf: Workflow, tid: str, paths: List[str], reason: str, answer: Opt
         ancestors = _ancestors({t["id"]: t for t in plan["tasks"]})
         unordered = [o for o in plan["tasks"] if o["id"] != tid and o["workspace"] == task["workspace"]
                      and o["id"] not in ancestors[tid] and tid not in ancestors[o["id"]]]
+        clashes = [(o, p, q) for o in unordered for p in added for q in o.get("paths", []) if paths_overlap(p, q)]
+        # A finished owner is ordered before this task instead: its work is done, so the overlap is
+        # this task building on it (which the plan checks accept once the two are ordered).
+        done = {"accepted", "skipped"}
+        after = sorted({o["id"] for o, _, _ in clashes if state["tasks"].get(o["id"], {}).get("status") in done})
         errs += [f"{p} overlaps {o['id']}'s {q}, and the two tasks are not ordered — route the finding to "
-                 f"{o['id']} (reopen it) or amend the plan." for o in unordered for p in added for q in o.get("paths", [])
-                 if paths_overlap(p, q)]
+                 f"{o['id']} (reopen it) or amend the plan." for o, p, q in clashes if o["id"] not in after]
         if errs:
             raise TPError(*errs)
+        if after:
+            task["depends_on"] = list(dict.fromkeys(list(task.get("depends_on", [])) + after))
         task["paths"] = task["paths"] + added
         wf.plan_json.write_text(json.dumps(plan, indent=2) + "\n")
         draft = wf.root / AMEND_JSON
@@ -1070,12 +1082,14 @@ def cmd_widen(wf: Workflow, tid: str, paths: List[str], reason: str, answer: Opt
             for t in data.get("tasks", []):
                 if t.get("id") == tid:
                     t["paths"] = list(dict.fromkeys(list(t.get("paths", [])) + added))
+                    t["depends_on"] = list(dict.fromkeys(list(t.get("depends_on", [])) + after))
             draft.write_text(json.dumps(data, indent=2) + "\n")
         state["plan_approved_sha"] = state["plan_submitted_sha"] = sha_file(wf.plan_json)
         state["tasks"][tid]["widened"] = widened + added
         wf.save(state)
         (wf.root / "plan.md").write_text(render(plan, scope, wf))
-        wf.decision(f"widen {tid} paths", f"{', '.join(added)} — {reason}" + (f" — {answer}" if answer else ""),
+        wf.decision(f"widen {tid} paths", f"{', '.join(added)} — {reason}" + (f" — {answer}" if answer else "")
+                    + (f" (now after {', '.join(after)}, which already owns it and is finished)" if after else ""),
                     who="human" if answer else "manager")
         wf.event("widen", id=tid, paths=added, reason=reason)
         return (f"widen {tid}: + {', '.join(added)}. The write set grew in plan.json and plan.md; the reason is in "

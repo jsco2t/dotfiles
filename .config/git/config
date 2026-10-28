@@ -28,3 +28,5 @@
 [credential "https://gist.github.com"]
 	helper =
 	helper = !\"$HOME/.local/bin/git-credential-gh\"
+[credential "https://git.binsmith.net"]
+	provider = generic

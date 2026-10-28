@@ -394,17 +394,39 @@ def record(wf: Workflow, state: Dict[str, Any], sid: str, agent_id: Optional[str
     return out
 
 
-def cmd_triage(wf: Workflow, sid: str, accept_all: bool, dismiss: List[str], reason: Optional[str],
+def _dismissals(dismiss: List[str], reasons: List[str]) -> Dict[str, str]:
+    """{finding id: reason}. Each --dismiss flag may name several ids (comma-separated); one
+    --reason covers them all, or one --reason per --dismiss flag pairs them in order."""
+    groups = [[x.strip() for x in str(d).split(",") if x.strip()] for d in dismiss]
+    groups = [g for g in groups if g]
+    reasons = [r for r in reasons if r and str(r).strip()]
+    if not groups:
+        return {}
+    if not reasons:
+        raise TPError("--dismiss needs --reason: why the finding is not a real problem.")
+    if len(reasons) == 1:
+        return {fid: reasons[0] for g in groups for fid in g}
+    if len(reasons) != len(groups):
+        raise TPError(f"{len(groups)} --dismiss flags but {len(reasons)} --reason flags: give one reason for all, "
+                      "or one per --dismiss, in the same order.")
+    return {fid: r for g, r in zip(groups, reasons) for fid in g}
+
+
+def cmd_triage(wf: Workflow, sid: str, accept_all: bool, dismiss_flags: List[str], reasons: Any,
                assign: List[str]) -> str:
+    if isinstance(reasons, str) or reasons is None:  # older callers pass one reason
+        reasons = [reasons] if reasons else []
+    if isinstance(dismiss_flags, str):
+        dismiss_flags = [dismiss_flags]
     with wf.locked():
         state = wf.load()
         s = sessions(state).get(sid)
         if s is None or s["status"] != "needs_triage":
             raise TPError(f"{sid} is not awaiting triage.")
+        reason_of = _dismissals(dismiss_flags, list(reasons))
+        dismiss = list(reason_of)
         if not (accept_all or dismiss or assign):
             raise TPError("Say what you decided: --accept-all, and/or --dismiss F# --reason \"...\", and/or --assign F#=T##.")
-        if dismiss and not reason:
-            raise TPError("--dismiss needs --reason: why the finding is not a real problem.")
         plan, scope, _ = run._loaded(wf, state)
         batch_ids = {t["id"] for t in _batch_tasks(plan, scope, s["batch"])}
         blocking = {f["id"]: f for f in s["findings"] if f["blocking"]}
@@ -421,14 +443,14 @@ def cmd_triage(wf: Workflow, sid: str, accept_all: bool, dismiss: List[str], rea
         if errs:
             raise TPError(*errs)
         for fid in dismiss:
-            s["dismissed"][fid] = reason
+            s["dismissed"][fid] = reason_of[fid]
         by_task = _route(wf, state, plan, scope, s, kept)
         s["accepted"] = sorted(set(s["accepted"]) | {f["id"] for f in kept})
         s["fix_tasks"] = sorted(by_task)
         s["status"] = "waiting_fixes" if kept else "done"
         wf.save(state)
-        if dismiss:
-            wf.decision(f"triage {sid} dismiss {', '.join(dismiss)}", str(reason), who="manager")
+        for fid in dismiss:
+            wf.decision(f"triage {sid} dismiss {fid}", str(reason_of[fid]), who="manager")
         out = list(by_task.values())
         for tid in sorted(by_task):
             # A blocked hand-back may have parked its work as a patch: the fix round can verify and

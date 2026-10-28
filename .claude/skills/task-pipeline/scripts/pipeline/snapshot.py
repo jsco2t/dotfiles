@@ -7,6 +7,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -47,14 +48,17 @@ def _save_cache(cache: Path, entries: Dict[str, list]) -> None:
 
 
 def take(root: Path, exclude: Iterable[Path] = (), cache: Optional[Path] = None,
-         only: Optional[Iterable[str]] = None) -> Snapshot:
+         only: Optional[Iterable[str]] = None, ignore: Iterable[str] = ()) -> Snapshot:
     """{workspace-relative path: content fingerprint}. cache: a stat cache file — a file whose size
     and mtime match its cached entry keeps its cached hash instead of being read again (the same
     trade git's index makes; contents swapped under an unchanged size and mtime go unseen). only:
-    patterns, as `matches` reads them, limiting which files are fingerprinted."""
+    patterns, as `matches` reads them, limiting which files are fingerprinted. ignore: patterns
+    left out entirely. Only regular files count: a sandbox's per-command mount points (character
+    devices over dotfiles) come and go with each command, and reading a FIFO would block."""
     root = root.resolve()
     skip = {p.resolve() for p in exclude}
     patterns = list(only) if only is not None else None
+    ignored = list(ignore)
     known = _load_cache(cache)
     fresh: Dict[str, list] = {}
     started = time.time_ns()
@@ -69,8 +73,12 @@ def take(root: Path, exclude: Iterable[Path] = (), cache: Optional[Path] = None,
             rel = p.relative_to(root).as_posix()
             if patterns is not None and not matches(rel, patterns):
                 continue
+            if ignored and matches(rel, ignored):
+                continue
             try:
                 st = p.stat()
+                if not stat.S_ISREG(st.st_mode):
+                    continue
                 prev = known.get(rel)
                 if prev and len(prev) == 4 and prev[3] and prev[0] == st.st_size and prev[1] == st.st_mtime_ns:
                     fp, trusted = prev[2], True

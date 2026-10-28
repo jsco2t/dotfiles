@@ -152,6 +152,18 @@ def save():
     state_path.write_text(json.dumps(state))
 if args[:2] == ["issue", "comments"]:
     print(json.dumps(state["comments"]))
+elif args[:2] == ["issue", "create"]:
+    def opt(flag):
+        return args[args.index(flag) + 1] if flag in args else None
+    field = opt("--field") or "description=null"
+    key = "KUB-" + str(state.get("next_issue", 900))
+    state["next_issue"] = state.get("next_issue", 900) + 1
+    state.setdefault("issues", {})[key] = {"summary": opt("--summary"), "parent": opt("--parent"),
+                                           "description": json.loads(field.partition("=")[2])}
+    save()
+    print(json.dumps({"key": key}))
+elif args[:2] == ["issue", "get"] and args[2] in state.get("issues", {}):
+    print(json.dumps({"key": args[2], "fields": state["issues"][args[2]]}))
 elif args[:2] == ["issue", "get"] and "--raw" in args:
     print(json.dumps({"key": args[2], "fields": {"description": state.get("description")}}))
 elif args[:2] == ["issue", "edit"]:
@@ -197,7 +209,8 @@ else:
         return [json.loads(ln) for ln in log.read_text().splitlines()] if log.exists() else []
 
     def writes(self) -> List[Dict[str, Any]]:
-        return [c for c in self.calls() if c["args"][:2] in (["issue", "comment"], ["issue", "edit"])]
+        return [c for c in self.calls() if c["args"][:2] in (["issue", "comment"], ["issue", "edit"],
+                                                              ["issue", "create"])]
 
     def description(self) -> Any:
         state = self.path.with_suffix(".state.json")

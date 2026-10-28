@@ -118,7 +118,9 @@ def _waiting_on_human(state: Dict[str, Any]) -> bool:
     if state.get("phase") != "EXECUTING" or state.get("in_flight"):
         return False
     return bool(state.get("halt") or state.get("blocked")
-                or any(t.get("status") == "blocked" for t in state.get("tasks", {}).values())
+                # A task waiting on its siblings' red tests waits on the manager's work, not the human.
+                or any(t.get("status") == "blocked" and (t.get("blocked") or {}).get("kind") != "sibling"
+                       for t in state.get("tasks", {}).values())
                 or any(s.get("status") == "blocked" for s in state.get("reviews", {}).values()))
 
 
@@ -155,7 +157,21 @@ def catalog() -> Dict[str, Any]:
     return _catalog
 
 
+_limit_overrides: Dict[str, int] = {}
+
+
+def set_limit_overrides(overrides: Any) -> None:
+    """scope.json `limits`: the human's per-workflow values, which win over the catalog's."""
+    _limit_overrides.clear()
+    if isinstance(overrides, dict):
+        for name, value in overrides.items():
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                _limit_overrides[str(name)] = value
+
+
 def limit(name: str) -> int:
+    if name in _limit_overrides:
+        return _limit_overrides[name]
     return int(catalog()["limits"][name])
 
 
@@ -198,16 +214,42 @@ class Workflow:
         return self.state_path.exists()
 
     # --- state -----------------------------------------------------------------
+    @property
+    def guard_path(self) -> Path:
+        """Where the last write's sequence number is kept, outside the workflow folder: a copy of
+        the folder restored over itself rolls back state.json and events.jsonl together, so only a
+        record kept elsewhere can tell."""
+        base = os.environ.get("TP_GUARD_DIR") or str(
+            Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "task-pipeline" / "guard")
+        return Path(base) / (hashlib.sha1(str(self.root).encode()).hexdigest()[:16] + ".json")
+
     def load(self) -> Dict[str, Any]:
         if not self.exists():
             raise TPError(f"No /task-pipeline workflow at {self.root} (run `tp.py -w <dir> init`).")
-        return json.loads(self.state_path.read_text())
+        state = json.loads(self.state_path.read_text())
+        try:
+            guard = json.loads(self.guard_path.read_text())
+        except (OSError, ValueError):
+            guard = None
+        if isinstance(guard, dict) and int(guard.get("seq", 0)) > int(state.get("seq", 0)):
+            raise TPError(f"{self.state_path} was rolled back: it holds write {state.get('seq', 0)}, but this "
+                          f"workflow last wrote {guard['seq']} (at {guard.get('ts', '?')}). Something replaced the "
+                          "workflow folder with an older copy — work recorded since then is missing from it. "
+                          "Restore the newer state, or, to continue from this one knowingly, delete "
+                          f"{self.guard_path} and re-record what was lost.")
+        return state
 
     def save(self, state: Dict[str, Any]) -> None:
         _tick_idle(state)  # every state change opens or closes a span of waiting on the human
+        state["seq"] = int(state.get("seq", 0)) + 1
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
         os.replace(tmp, self.state_path)
+        try:
+            self.guard_path.parent.mkdir(parents=True, exist_ok=True)
+            self.guard_path.write_text(json.dumps({"root": str(self.root), "seq": state["seq"], "ts": now_iso()}))
+        except OSError:
+            pass  # a guard that cannot be written only loses the rollback check
 
     @contextlib.contextmanager
     def locked(self) -> Iterator[None]:

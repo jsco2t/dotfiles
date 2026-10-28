@@ -776,6 +776,38 @@ def cmd_issue_comment_delete(args):
     print(f"comment {args.id} deleted from {args.key}")
 
 
+def _issue_links_to(key, other, link_type=None):
+    """The issue links between key and other as (id, "KEY verb OTHER") pairs, optionally of one link type."""
+    issue = api_request("GET", f"/rest/api/{API}/issue/{key}", params={"fields": "issuelinks"})
+    found = []
+    for lk in issue.get("fields", {}).get("issuelinks", []):
+        t = lk.get("type", {})
+        if link_type and t.get("name", "").lower() != link_type.lower():
+            continue
+        if (lk.get("outwardIssue") or {}).get("key", "").upper() == other.upper():
+            found.append((lk["id"], f"{key} {t.get('outward', t.get('name'))} {other}"))
+        elif (lk.get("inwardIssue") or {}).get("key", "").upper() == other.upper():
+            found.append((lk["id"], f"{key} {t.get('inward', t.get('name'))} {other}"))
+    return found
+
+
+def cmd_issue_link_delete(args):
+    # Permanent: Jira has no undo for a deleted issue link (recreate it to restore).
+    matches = _issue_links_to(args.key, args.other, args.type)
+    if not matches:
+        kind = f"{args.type} link" if args.type else "link"
+        die(EX_NOTFOUND, f"no {kind} between {args.key} and {args.other}")
+    if len(matches) > 1:
+        listed = "; ".join(f"{text} (id {lid})" for lid, text in matches)
+        die(EX_USAGE, f"{len(matches)} links between {args.key} and {args.other}: {listed}. Pass --type to pick one")
+    lid, text = matches[0]
+    if args.dry_run:
+        print(f"would delete link {lid}: {text}")
+        return
+    api_request("DELETE", f"/rest/api/{API}/issueLink/{lid}", expect_json=False)
+    print(f"deleted link {lid}: {text}")
+
+
 def cmd_issue_comments(args):
     # Newest --limit from Jira, then shown oldest -> newest.
     res = api_request("GET", f"/rest/api/{API}/issue/{args.key}/comment",
@@ -1174,6 +1206,13 @@ def add_jira_commands(jp):
     icd.add_argument("key")
     icd.add_argument("id", help="comment id (from `issue comments`)")
     icd.set_defaults(func=cmd_issue_comment_delete)
+
+    ild = isub.add_parser("link-delete", help="delete the issue link between two issues (permanent)")
+    ild.add_argument("key")
+    ild.add_argument("other", help="the issue on the other end of the link")
+    ild.add_argument("--type", help="link type name (e.g. Blocks, Relates); required when several links join the two")
+    ild.add_argument("--dry-run", action="store_true", help="show the link that would be deleted and stop")
+    ild.set_defaults(func=cmd_issue_link_delete)
 
     ics = isub.add_parser("comments", help="list comments")
     ics.add_argument("key")

@@ -16,6 +16,7 @@ flags, and auth. Common starting points:
 - `jira search '<JQL>' --limit 20` — search issues
 - `jira issue get <KEY> --description --comments` — one issue
 - `jira issue comment <KEY> "<text>"` — add a comment (`--id <id>` edits an existing one; `jira issue comment-delete <KEY> <id>` removes it)
+- `jira issue link-delete <KEY> <OTHER> --type Blocks --dry-run` — show, then (without `--dry-run`) delete the issue link between two issues
 - `jira issue history <KEY> --field status` — change history, oldest first (omit `--field` for every field)
 - `jira issue worklog <KEY> "2h" [--started <ISO time>]` — log time, default now (`jira issue worklogs <KEY>` lists the newest entries)
 - `confluence page <id|url>` — fetch a page (`--full` for the whole body)

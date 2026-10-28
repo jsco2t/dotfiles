@@ -51,6 +51,7 @@ the file: `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
 | `jira issue worklog <KEY> <time>` | Log time (Jira duration: `1d 4h`, `3h 30m`); `--started` ISO time, default now | `jira issue worklog FUZZ-1234 "1d 4h" --started 2026-09-17T09:00` |
 | `jira issue worklogs <KEY>` | List logged time — the newest 50 (`--limit N`), shown oldest→newest; worklog ids shown here | `jira issue worklogs FUZZ-1234` |
 | `jira issue links <KEY>` | Remote links (e.g. linked Confluence pages) | `jira issue links FUZZ-1234` |
+| `jira issue link-delete <KEY> <OTHER>` | Delete the issue link joining two issues — **permanent**; `--type` picks one when several join them, `--dry-run` shows it first | `jira issue link-delete FUZZ-1234 FUZZ-99 --type Blocks --dry-run` |
 | `jira project list` | List visible projects | `jira project list --search fuzz` |
 | `jira project types <KEY>` | Issue types for a project | `jira project types FUZZ` |
 | `jira user <query>` | Look up a user's accountId | `jira user "jane"` |

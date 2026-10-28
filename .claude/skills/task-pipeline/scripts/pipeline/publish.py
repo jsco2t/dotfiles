@@ -46,8 +46,25 @@ def _description(key: str) -> Any:
     return (data.get("fields") or {}).get("description")
 
 
+def _issue_fields(key: str) -> Dict[str, Any]:
+    data = json.loads(_call(["issue", "get", key, "--raw", "--fields", "summary,description"]) or "{}")
+    return data.get("fields") or {}
+
+
+def _split_issue(text: str) -> Tuple[str, str]:
+    """A jira-issue draft: its first non-blank line is the summary, the rest the description."""
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.strip():
+            return ln.strip().lstrip("#").strip(), "\n".join(lines[i + 1:]).strip() + "\n"
+    return "", ""
+
+
 def _target_state(pub: Dict[str, Any]) -> Dict[str, Any]:
     """What the dry run saw at the target; the post goes ahead only if it is unchanged."""
+    if pub["to"] == "jira-issue":
+        _issue_fields(pub["target"])  # the parent must exist (an unknown key fails the call)
+        return {"parent": pub["target"]}
     if pub["to"] == "jira-comment":
         comments = _comments(pub["target"])
         state: Dict[str, Any] = {"comments": len(comments)}
@@ -61,6 +78,9 @@ def _target_state(pub: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _what(pub: Dict[str, Any]) -> str:
+    if pub["to"] == "jira-issue":
+        return (f"create a {pub.get('type', 'Task')} in {pub.get('project')} under {pub['target']}: "
+                f"{pub.get('_summary', '')!r}")
     if pub["to"] == "jira-comment":
         return (f"edit comment {pub['comment_id']} on {pub['target']}" if pub.get("comment_id")
                 else f"add one comment to {pub['target']}")
@@ -68,6 +88,16 @@ def _what(pub: Dict[str, Any]) -> str:
 
 
 def _post(pub: Dict[str, Any], payload: str) -> str:
+    if pub["to"] == "jira-issue":
+        args = ["issue", "create", "--project", str(pub["project"]), "--type", str(pub["type"]),
+                "--parent", pub["target"], "--summary", pub["_summary"]]
+        for label in pub.get("labels") or []:
+            args += ["--label", str(label)]
+        out = _call(args + ["--field", f"description={payload}", "--json"])
+        try:
+            return str(json.loads(out).get("key") or "")
+        except (json.JSONDecodeError, AttributeError):
+            return out.strip().split()[0] if out.strip() else ""
     if pub["to"] == "jira-comment":
         args = ["issue", "comment", pub["target"], "-", "--adf", "--json"]
         if pub.get("comment_id"):
@@ -82,7 +112,14 @@ def _post(pub: Dict[str, Any], payload: str) -> str:
 
 
 def _read_back(pub: Dict[str, Any], posted: str, doc: Dict[str, Any]) -> Tuple[bool, str]:
-    if pub["to"] == "jira-comment":
+    if pub["to"] == "jira-issue":
+        if not posted:
+            return False, "the create call returned no issue key"
+        fields = _issue_fields(posted)
+        if fields.get("summary") != pub["_summary"]:
+            return False, f"{posted}'s summary differs from what was sent"
+        stored = fields.get("description")
+    elif pub["to"] == "jira-comment":
         stored = next((c.get("body") for c in _comments(pub["target"]) if str(c.get("id")) == posted), None)
     else:
         stored = _description(pub["target"])
@@ -112,13 +149,20 @@ def cmd_publish(wf: Workflow, tid: str, answer: Optional[str]) -> str:
         if not act or act.get("action") != "publish":
             raise TPError(f"{tid} is not ready to publish: it waits on its dependencies, and on every other task and "
                           "the final review — the external system is written once, with reviewed content.")
-        pub = task["publish"]
+        pub = dict(task["publish"])
         body = wf.root / planmod.wf_rel(pub["body"])
         if not body.is_file():
             raise TPError(f"{body} does not exist; the task that writes it must be accepted first.")
-        doc = adf.to_adf(body.read_text())
+        text = body.read_text()
+        if pub["to"] == "jira-issue":
+            pub["_summary"], text = _split_issue(text)
+            if not pub["_summary"]:
+                raise TPError(f"{body} is empty: a jira-issue draft's first line is the issue summary.")
+        doc = adf.to_adf(text)
         payload = json.dumps(doc, separators=(",", ":"), sort_keys=True)
-        sha = hashlib.sha256(payload.encode()).hexdigest()
+        # The summary is part of what the human approves, so a changed summary needs a new dry run.
+        sha = hashlib.sha256(((pub["_summary"] + "\n") if "_summary" in pub else "").encode()
+                             + payload.encode()).hexdigest()
         head = run._git_head(run._ws(scope, task["workspace"]))
         out_file = wf.run_dir(tid) / "payload.json"
 
@@ -179,4 +223,5 @@ def cmd_publish(wf: Workflow, tid: str, answer: Optional[str]) -> str:
         wf.save(state)
         wf.event("publish", id=tid, ok=True)
         wf.event("accept", id=tid, minutes=round(run.task_minutes(state, ts), 1))
-        return f"published {tid}: {_what(pub)}; read back: {detail}. `tp next`."
+        return (f"published {tid}: {_what(pub)}" + (f" → {posted}" if pub["to"] == "jira-issue" and posted else "")
+                + f"; read back: {detail}. `tp next`.")

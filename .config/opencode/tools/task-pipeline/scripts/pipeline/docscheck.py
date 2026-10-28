@@ -62,10 +62,15 @@ class Citation:
 
 def md_files(paths: Iterable[Path]) -> List[Path]:
     out: List[Path] = []
+    # node_modules is a dependency cache, not documents: a run's dash suite needs
+    # npm install, and the thousands of third-party READMEs it drops carry broken
+    # relative links that are not this pipeline's work (docs-all failed a real run's
+    # final check on them while every real gate was green).
     for p in paths:
         p = Path(p)
         if p.is_dir():
-            out += sorted(x for x in p.rglob("*.md") if not any(part.startswith(".") for part in x.parts))
+            out += sorted(x for x in p.rglob("*.md")
+                          if not any(part.startswith(".") or part == "node_modules" for part in x.parts))
         elif p.suffix == ".md" and p.exists():
             out.append(p)
     return sorted({x.resolve() for x in out})

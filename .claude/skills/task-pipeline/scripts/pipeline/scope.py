@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from .common import TPError, Workflow, catalog, limit, load_json, now_iso, sha_file
+from .common import TPError, Workflow, catalog, limit, load_json, now_iso, set_limit_overrides, sha_file
 
 REVIEW_MODES = ("none", "final", "per-task", "both")
 WORK_ROLES = ("author", "tests", "reviewer")
@@ -20,6 +20,7 @@ def load_scope(wf: Workflow) -> Dict[str, Any]:
     data = load_json(wf.scope_json, "the scope")
     if not isinstance(data, dict):
         raise TPError(f"{wf.scope_json} must hold a JSON object.")
+    set_limit_overrides(data.get("limits"))
     return data
 
 
@@ -229,6 +230,30 @@ def validate(scope: Dict[str, Any], require_fix_tasks: bool = True) -> List[str]
             errs.append("each term needs `term` and `means` (and ideally `not`).")
     if require_fix_tasks or "fix_tasks" in scope:
         errs += _fix_task_errors(scope)
+    errs += _limits_and_ignore_errors(scope)
+    return errs
+
+
+def _limits_and_ignore_errors(scope: Dict[str, Any]) -> List[str]:
+    """`limits`: the human's per-workflow overrides of catalog limits (positive integers, known
+    names). `ignore`: workspace-relative patterns for files no task writes, such as a sandbox's
+    per-command mount points."""
+    errs: List[str] = []
+    known = {k for k in catalog()["limits"] if not k.startswith("_")}
+    limits = scope.get("limits")
+    if limits is not None:
+        if not isinstance(limits, dict):
+            errs.append("limits must be an object of {limit name: positive integer}.")
+        else:
+            for name, value in limits.items():
+                if name not in known:
+                    errs.append(f"limits.{name} is not a known limit; known: {', '.join(sorted(known))}.")
+                elif not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                    errs.append(f"limits.{name} must be a positive integer.")
+    ignore = scope.get("ignore")
+    if ignore is not None and (not isinstance(ignore, list) or not all(isinstance(p, str) and p.strip()
+                                                                       for p in ignore)):
+        errs.append("ignore must be a list of workspace-relative path patterns (for example \"$HOME/**\").")
     return errs
 
 
@@ -264,6 +289,13 @@ def render(scope: Dict[str, Any]) -> str:
     out += [f"- {p['agent']} ({role_of(p)}): {p['why']}" for p in scope["participants"]]
     out += ["", "## Workspaces"]
     out += [f"- {w['name']} ({w['mode']}): `{w['path']}`" for w in scope["workspaces"]]
+    # What the gates enforce differently in this workflow: the human confirms these too.
+    if scope.get("ignore"):
+        out += ["", "**Ignored by the gates:** " + ", ".join(f"`{p}`" for p in scope["ignore"])]
+    if scope.get("limits"):
+        defaults = catalog()["limits"]
+        out += ["", "**Limits changed:** " + ", ".join(f"{k} {v} (default {defaults.get(k)})"
+                                                         for k, v in sorted(scope["limits"].items()))]
     if scope.get("answers"):
         out += ["", "## Human answers"] + [f"- {a['q']} — {a['a']}" for a in scope["answers"]]
     return "\n".join(out) + "\n"

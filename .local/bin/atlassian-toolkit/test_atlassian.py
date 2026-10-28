@@ -193,5 +193,61 @@ class ConfluenceAdfTest(unittest.TestCase):
         self.assertEqual(payload["version"]["number"], 4)
 
 
+LINKS = {"fields": {"issuelinks": [
+    {"id": "100", "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+     "outwardIssue": {"key": "KUB-242"}},
+    {"id": "101", "type": {"name": "Relates", "inward": "relates to", "outward": "relates to"},
+     "inwardIssue": {"key": "KUB-242"}},
+    {"id": "102", "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+     "inwardIssue": {"key": "KUB-248"}},
+]}}
+
+
+class CmdIssueLinkDeleteTest(unittest.TestCase):
+    def run_cmd(self, other, type_=None, dry_run=False):
+        a = SimpleNamespace(key="KUB-252", other=other, type=type_, dry_run=dry_run)
+        out = io.StringIO()
+        with mock.patch.object(at, "api_request", return_value=LINKS) as req, \
+                mock.patch("sys.stdout", out):
+            at.cmd_issue_link_delete(a)
+        return req, out.getvalue()
+
+    def assert_exits_without_delete(self, other, type_=None):
+        a = SimpleNamespace(key="KUB-252", other=other, type=type_, dry_run=False)
+        with mock.patch.object(at, "api_request", return_value=LINKS) as req, \
+                mock.patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                at.cmd_issue_link_delete(a)
+        self.assertEqual([c.args[0] for c in req.call_args_list], ["GET"])
+
+    def test_deletes_the_typed_link_by_id(self):
+        req, out = self.run_cmd("KUB-242", "blocks")
+        self.assertEqual(req.call_args.args, ("DELETE", "/rest/api/3/issueLink/100"))
+        self.assertIn("KUB-252 blocks KUB-242", out)
+
+    def test_inward_link_reads_from_key_side(self):
+        req, out = self.run_cmd("kub-248")
+        self.assertEqual(req.call_args.args, ("DELETE", "/rest/api/3/issueLink/102"))
+        self.assertIn("KUB-252 is blocked by kub-248", out)
+
+    def test_several_links_without_type_exits_without_delete(self):
+        self.assert_exits_without_delete("KUB-242")
+
+    def test_no_match_exits_without_delete(self):
+        self.assert_exits_without_delete("KUB-1")
+        self.assert_exits_without_delete("KUB-248", "Relates")
+
+    def test_dry_run_sends_no_delete(self):
+        req, out = self.run_cmd("KUB-242", "Relates", dry_run=True)
+        self.assertEqual([c.args[0] for c in req.call_args_list], ["GET"])
+        self.assertIn("would delete link 101: KUB-252 relates to KUB-242", out)
+
+    def test_parser_wiring(self):
+        a = at.build_parser().parse_args(["jira", "issue", "link-delete", "KUB-1", "KUB-2", "--type", "Blocks",
+                                          "--dry-run"])
+        self.assertEqual((a.key, a.other, a.type, a.dry_run), ("KUB-1", "KUB-2", "Blocks", True))
+        self.assertIs(a.func, at.cmd_issue_link_delete)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

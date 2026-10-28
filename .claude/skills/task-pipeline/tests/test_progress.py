@@ -649,14 +649,16 @@ class WidenTest(unittest.TestCase):
         h.result("T01", "fix", changed=["architecture/glossary.md"])
         self.assertNotIn("outside this task's paths", h.tp("record", "T01", "--agent-id", "a-1").out)
 
-    def test_widen_refuses_an_unordered_overlap_even_with_finished_work(self) -> None:
-        # Overlapping an accepted sibling would make every later plan check refuse the plan; a
-        # finding about another task's file belongs to that task.
+    def test_widen_onto_finished_work_orders_the_tasks_so_the_plan_still_validates(self) -> None:
+        # An unordered overlap would make every later plan check refuse the plan, so widening onto
+        # a finished sibling's file orders the widened task after it instead.
         h = self.h
         for tid, rel in (("T01", "architecture/overview.md"), ("T02", "build/guide.md")):
             h.author(tid, rel, agent_id=f"a-{tid}")
             h.tp("accept", tid, "--note", "ok")
-        self.assertIn("T02", h.tp("widen", "T01", "--path", "build/guide.md", "--reason", "x", expect=2).text)
+        h.tp("widen", "T01", "--path", "build/guide.md", "--reason", "x")
+        self.assertIn("T02", h.read_json("plan.json")["tasks"][0]["depends_on"])
+        self.assertIn("now after T02", (h.wf / "decisions.md").read_text())
         h.tp("widen", "T03", "--path", "architecture/overview.md", "--reason", "T03 depends on T01: ordered")
         h.tp("plan", "amend")                                # starts a draft
         h.tp("plan", "amend")                                # the widened plan still validates

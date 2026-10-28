@@ -72,7 +72,7 @@ class Harness:
 
     def tp(self, *args: str, expect: Optional[int] = 0, wf: bool = True) -> Result:
         cmd = [PY, str(TP)] + (["-w", str(self.wf)] if wf else []) + list(args)
-        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", TP_GUARD_DIR=str(self.root / "guard"))
         res = Result(subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120))
         if expect is not None and res.code != expect:
             raise AssertionError(f"tp {' '.join(args)} exited {res.code}, expected {expect}:\n{res.text}")

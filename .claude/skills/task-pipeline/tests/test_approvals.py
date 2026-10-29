@@ -112,6 +112,24 @@ class ScopeAmendTest(unittest.TestCase):
         self.assertFalse((h.wf / "scope-amend.json").exists())
         h.tp("next")                                             # the frozen scope matches: no tamper error
 
+    def test_raising_a_limit_and_ignoring_a_path_mid_run_is_one_answer(self) -> None:
+        # A run that outgrows a limit, or meets a new tool artefact, changes only `limits` or
+        # `ignore`: the amendment must see that as a change and apply it.
+        h = self.m.h
+        d = self.scope_draft()
+        d["limits"] = {"max_tasks": 62}
+        d["ignore"] = ["e2e-out/**"]
+        write(h, "scope-amend.json", d)
+        out = h.tp("scope", "amend").out
+        self.assertIn("Ask the human once", out)
+        self.assertIn("limits", out)
+        self.assertIn("ignore", out)
+        h.tp("scope", "amend", "--answer", "Raise the cap and ignore the e2e output.")
+        scope = h.read_json("scope.json")
+        self.assertEqual(scope["limits"], {"max_tasks": 62})
+        self.assertEqual(scope["ignore"], ["e2e-out/**"])
+        h.tp("next")                                             # the frozen scope matches: no tamper error
+
     def test_a_new_deliverable_and_its_task_are_approved_by_the_same_answer(self) -> None:
         m, h = self.m, self.m.h
         d = self.scope_draft()

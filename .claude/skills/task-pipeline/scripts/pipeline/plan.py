@@ -924,7 +924,8 @@ def _scope_diff(old: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
         after_items = [json.dumps(x) if not isinstance(x, str) else x for x in new.get(key) or []]
         out += [f"  + {key}: {x}" for x in after_items if x not in before_items]
         out += [f"  - {key}: {x}" for x in before_items if x not in after_items]
-    for key in ("title", "output", "review", "budget_minutes", "research", "fix_tasks"):
+    # limits and ignore change what the gates enforce, so the human sees them like any other field.
+    for key in ("title", "output", "review", "budget_minutes", "research", "fix_tasks", "limits", "ignore"):
         if old.get(key) != new.get(key):
             out.append(f"  ~ {key}: {json.dumps(new.get(key))[:300]}")
     return out

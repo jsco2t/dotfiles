@@ -443,6 +443,148 @@ class PipelineTest(unittest.TestCase):
         self.cli("check", "unit")
         self.assertIn("pinned tests changed", self.cli("done", "T01", "--result-file", self.result(), expect=2))
 
+    def test_requirements_cannot_point_at_missing_deliverables_or_leave_them_unmapped(self):
+        scope = self.scope()
+        scope["requirements"] = [dict(id="R1", text="Write the overview.", deliverables=["D2"])]
+        self.put("scope.json", scope)
+        self.assertIn("existing deliverables", self.cli("scope", "check", expect=2))
+        scope["requirements"][0]["deliverables"] = ["D1"]
+        scope["deliverables"].append(dict(id="D2", kind="docs", what="Glossary", where="app/b.md"))
+        self.put("scope.json", scope)
+        self.assertIn("trace", self.cli("scope", "check", expect=2))
+
+    def test_review_requires_evidence_for_each_original_requirement_and_report_keeps_it(self):
+        scope = self.scope()
+        scope["requirements"] = [dict(id="R1", text="Write the application overview.", deliverables=["D1"])]
+        plan = self.plan()
+        plan["tasks"][0]["requirements"] = ["R1"]
+        self.approve(plan, scope)
+        self.finish_task()
+        review = dict(method="self", verdict="pass", summary="Checked the full original request.", findings=[])
+        self.assertIn("requirement coverage", self.cli("review", "--file", self.put("review.json", review), expect=2))
+        evidence = dict(id="R1", evidence="request.md and a.md:1: application overview delivered.")
+        for coverage in ([], [dict(evidence, id="R2")], [evidence, evidence]):
+            review["requirements"] = coverage
+            self.assertIn("exactly once", self.cli("review", "--file", self.put("review.json", review), expect=2))
+        review["requirements"] = [evidence]
+        self.cli("review", "--file", self.put("review.json", review))
+        self.cli("final")
+        report = (self.wf / "report.md").read_text()
+        self.assertIn("Write the application overview.", report)
+        self.assertIn(evidence["evidence"], report)
+
+    def test_plan_cannot_lose_a_requirement_even_when_its_deliverable_has_a_task(self):
+        scope = self.scope()
+        scope["requirements"] = [dict(id="R1", text="Write the application overview.", deliverables=["D1"]),
+                                 dict(id="R2", text="Include runnable examples.", deliverables=["D1"])]
+        self.confirm(scope)
+        plan = self.plan()
+        plan["tasks"][0]["requirements"] = ["R1"]
+        self.put("plan.json", plan)
+        self.assertIn("uncovered request requirements: ['R2']", self.cli("plan", "check", expect=2))
+        plan["tasks"][0]["requirements"].append("R2")
+        self.put("plan.json", plan)
+        self.cli("plan", "check")
+
+    def test_widen_preserves_scope_partial_work_and_baselines_without_operator_answer(self):
+        (self.app / "source.md").write_text("existing user source")
+        self.approve()
+        original_scope = self.state()["scope"]
+        original_task = self.state()["plan"]["tasks"][0]
+        self.cli("start", "T01")
+        (self.app / "a.md").write_text("partial overview")
+        self.cli("widen", "T01", "--path", "source.md", "--path", "b.md", "--deliverable", "D1",
+                 "--reason", "Correct the source reference and add the companion section required by D1.")
+        state = self.state()
+        self.assertEqual(state["scope"], original_scope)
+        task = state["plan"]["tasks"][0]
+        self.assertEqual({k: v for k, v in task.items() if k != "paths"},
+                         {k: v for k, v in original_task.items() if k != "paths"})
+        self.assertEqual((self.wf / state["baseline_files"]["app:source.md"]).read_text(), "existing user source")
+        self.assertIsNone(state["baseline_files"]["app:b.md"])
+        self.assertEqual(state["history"][-1]["by"], "manager")
+        (self.app / "source.md").write_text("correct source")
+        (self.app / "b.md").write_text("companion section")
+        self.cli("done", "T01", "--result-file", self.result())
+        self.review()
+        self.cli("final")
+        self.assertIn("widen (manager)", (self.wf / "report.md").read_text())
+
+    def test_widen_refuses_unknown_deliverables_escaping_paths_and_prior_unplanned_edits(self):
+        self.approve()
+        before = self.state()
+        for path, delivery in (("b.md", "D2"), ("../escape", "D1"), ("*.md", "D1")):
+            self.cli("widen", "T01", "--path", path, "--deliverable", delivery, "--reason", "Needed for overview.", expect=2)
+            self.assertEqual(self.state(), before)
+        self.cli("start", "T01")
+        (self.app / "b.md").write_text("unplanned concurrent edit")
+        self.assertIn("outside", self.cli("widen", "T01", "--path", "b.md", "--deliverable", "D1",
+                      "--reason", "Needed for overview.", expect=2))
+        self.assertEqual((self.app / "b.md").read_text(), "unplanned concurrent edit")
+        self.assertEqual(self.state()["plan"], before["plan"])
+
+    def test_widen_does_not_silently_adopt_existing_ignored_contents(self):
+        (self.app / "dist").mkdir()
+        (self.app / "dist" / "overview.md").write_text("contents absent from original checkpoint")
+        self.approve()
+        self.assertIn("previously untracked", self.cli("widen", "T01", "--path", "dist/overview.md",
+                      "--deliverable", "D1", "--reason", "Needed for overview.", expect=2))
+
+    def test_widen_keeps_pinned_tests_and_invalidates_check_results(self):
+        self.approve(self.automated("characterization"))
+        self.cli("start", "T01")
+        (self.app / "test_calc.py").write_text("pinned behavior")
+        self.cli("test", "T01", "--stage", "pin", "--note", "Behavior confirmed.")
+        checkpoint = self.state()["tasks"]["T01"]["test_checkpoint"]
+        self.cli("widen", "T01", "--path", "helper.py", "--deliverable", "D1", "--reason", "Implementation dependency.")
+        self.assertEqual(self.state()["tasks"]["T01"]["test_checkpoint"], checkpoint)
+        self.assertEqual(self.state()["checks"], {})
+        (self.app / "test_calc.py").write_text("weaker assertions")
+        self.cli("check", "unit")
+        self.assertIn("pinned tests changed", self.cli("done", "T01", "--result-file", self.result(), expect=2))
+
+    def test_saved_decision_can_resolve_question_as_manager_with_honest_provenance(self):
+        self.approve()
+        self.cli("block", "--question", "Should this be an overview?")
+        self.assertIn("--evidence", self.cli("resolve", "--by", "manager", "--answer", "Yes.", expect=2))
+        self.assertIsNotNone(self.state()["question"])
+        self.cli("resolve", "--by", "manager", "--answer", "Yes, D1 already requests the overview.",
+                 "--evidence", "scope.json deliverables D1; history scope-confirm.")
+        event = self.state()["history"][-1]
+        self.assertEqual(event["by"], "manager")
+        self.assertIn("scope-confirm", event["evidence"])
+        self.cli("start", "T01")
+
+    def test_opted_in_check_reuse_avoids_execution_but_force_and_changed_contents_rerun(self):
+        counter = self.base / "check-count.txt"
+        script = "from pathlib import Path; p=Path(" + repr(str(counter)) + "); p.write_text(p.read_text()+'x' if p.exists() else 'x')"
+        plan = self.automated(argv=[sys.executable, "-B", "-c", script])
+        plan["checks"]["unit"]["reuse"] = True
+        self.approve(plan)
+        self.cli("start", "T01")
+        self.cli("check", "unit")
+        self.assertIn("reused", self.cli("check", "unit"))
+        self.assertEqual(counter.read_text(), "x")
+        self.cli("check", "unit", "--force")
+        self.assertEqual(counter.read_text(), "xx")
+        (self.app / "a.md").write_text("new contents")
+        self.cli("check", "unit")
+        self.assertEqual(counter.read_text(), "xxx")
+
+    def test_check_reuse_is_opt_in_and_failures_are_never_reused(self):
+        counter = self.base / "check-count.txt"
+        script = "from pathlib import Path; p=Path(" + repr(str(counter)) + "); p.write_text(p.read_text()+'x' if p.exists() else 'x')"
+        self.approve(self.automated(argv=[sys.executable, "-B", "-c", script]))
+        self.cli("check", "unit")
+        self.cli("check", "unit")
+        self.assertEqual(counter.read_text(), "xx")
+        plan = self.state()["plan"]
+        plan["checks"]["unit"].update(reuse=True, argv=[sys.executable, "-B", "-c", script + "; raise SystemExit(1)"])
+        self.cli("amend", "--plan-file", self.put("amend.json", plan), "--answer", "Use the changed check.")
+        self.cli("check", "unit", expect=2)
+        self.cli("check", "unit", expect=2)
+        self.assertEqual(counter.read_text(), "xxxx")
+
     def test_nested_write_workspace_is_excluded_from_read_parent(self):
         docs = self.app / "docs"
         docs.mkdir()

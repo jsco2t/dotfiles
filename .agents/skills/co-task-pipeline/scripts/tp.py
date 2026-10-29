@@ -84,6 +84,22 @@ def validate_scope(scope, root):
         ids.add(did)
         need(delivery.get("kind") in KINDS, f"{did}: unsupported kind")
         need(text(delivery.get("what")) and text(delivery.get("where")), f"{did}: what/where required")
+    # Optional for workflows approved by earlier versions; new scopes use this ledger.
+    if "requirements" in scope:
+        requirements = scope["requirements"]
+        need(isinstance(requirements, list) and requirements, "scope.requirements must be a nonempty list")
+        seen, covered = set(), set()
+        for requirement in requirements:
+            need(isinstance(requirement, dict), "requirements must be objects")
+            rid = requirement.get("id")
+            need(text(rid) and re.fullmatch(r"R[1-9][0-9]*", rid) and rid not in seen,
+                 "requirement ids must be unique R1, R2, ...")
+            seen.add(rid)
+            need(text(requirement.get("text")), f"{rid}: requirement text is required")
+            targets = requirement.get("deliverables")
+            need(strings(targets) and set(targets) <= ids, f"{rid}: map to existing deliverables")
+            covered.update(targets)
+        need(covered == ids, "every deliverable must trace to a request requirement")
     workspaces = scope.get("workspaces")
     need(isinstance(workspaces, list) and workspaces, "scope.workspaces is required")
     names, paths = set(), set()
@@ -147,9 +163,12 @@ def validate_plan(plan, scope, root):
         need(workspaces[check["workspace"]]["mode"] == "write", f"{name}: run checks in a write workspace")
         need(type(check.get("timeout_seconds", 300)) is int and check.get("timeout_seconds", 300) > 0,
              f"{name}: timeout_seconds must be a positive integer")
+        need(type(check.get("reuse", False)) is bool, f"{name}: reuse must be true or false")
     need(strings(plan.get("final_checks"), empty=True), "plan.final_checks must be a list")
     need(all(c in checks for c in plan["final_checks"]), "unknown final check")
     deliveries = {d["id"] for d in scope["deliverables"]}
+    requirements = {r["id"]: set(r["deliverables"]) for r in scope.get("requirements", [])}
+    covered_requirements = set()
     ids, covered = set(), set()
     for task in tasks:
         need(isinstance(task, dict), "tasks must be objects")
@@ -159,6 +178,12 @@ def validate_plan(plan, scope, root):
         need(text(task.get("title")) and task.get("kind") in KINDS, f"{tid}: title/kind required")
         need(strings(task.get("serves")) and set(task["serves"]) <= deliveries, f"{tid}: unknown or missing deliverable")
         covered.update(task["serves"])
+        if requirements:
+            targets = task.get("requirements")
+            need(strings(targets) and set(targets) <= requirements.keys(), f"{tid}: name existing request requirements")
+            need(all(requirements[r] & set(task["serves"]) for r in targets),
+                 f"{tid}: requirement must map to a deliverable this task serves")
+            covered_requirements.update(targets)
         need(strings(task.get("acceptance")), f"{tid}: acceptance criteria required")
         need(strings(task.get("paths"), empty=task["kind"] in ("research", "integration")), f"{tid}: paths required")
         need(len(set(task["paths"])) == len(task["paths"]), f"{tid}: duplicate paths")
@@ -179,6 +204,8 @@ def validate_plan(plan, scope, root):
         if task["kind"] in ("code", "tests"):
             need(scope["review"] != "none", "code and tests require review")
     need(covered == deliveries, f"uncovered deliverables: {sorted(deliveries - covered)}")
+    need(covered_requirements == requirements.keys(),
+         f"uncovered request requirements: {sorted(requirements.keys() - covered_requirements)}")
     by_id = {t["id"]: t for t in tasks}
     visiting, visited = set(), set()
 
@@ -424,7 +451,8 @@ def execute(wf, args):
         return "Operator input required: " + args.question
     if command == "resolve":
         need(state.get("question"), "no question is pending")
-        wf.event("answer", question=state["question"], answer=args.answer)
+        need(args.by != "manager" or text(args.evidence), "manager resolution needs --evidence from saved decisions")
+        wf.event("answer", question=state["question"], answer=args.answer, by=args.by, evidence=args.evidence)
         state["question"] = None
         return "Clarification recorded; contract unchanged. Run next."
     if command == "scope":
@@ -507,6 +535,36 @@ def execute(wf, args):
         return "Amendment recorded; affected work and final verification reopen. Inspect partial edits, then next."
     wf.runnable()
     scope, plan = wf.contract()
+    if command == "widen":
+        _, _, task = wf.task(args.task)
+        entry = wf.tasks()[args.task]
+        need(entry["status"] in ("pending", "running"), "reopen completed work before widening it")
+        need(not any(tid != args.task and t["status"] == "running" for tid, t in wf.tasks().items()),
+             "finish the active task before widening another task")
+        need(args.deliverable in task["serves"], "widen must serve one of this task's approved deliverables")
+        added = [p for p in dict.fromkeys(args.path) if p not in task["paths"]]
+        need(added, "no new paths to add")
+        for relative in added:
+            path_in(scope, task, relative, wf.root)
+        # Widen before editing: do not use it to adopt concurrent or out-of-contract edits.
+        if entry["status"] == "running":
+            snapshot, _ = wf.edits(scope, plan, task, entry["before"])
+        else:
+            snapshot = wf.snapshot(scope, plan)
+            wf.idle_checkpoint(snapshot)
+        updated = copy.deepcopy(plan)
+        new_task = next(t for t in updated["tasks"] if t["id"] == args.task)
+        new_task["paths"] += added
+        validate_plan(updated, scope, wf.root)
+        need(wf.snapshot(scope, updated) == snapshot,
+             "new paths expose previously untracked contents; inspect and use an approved amendment")
+        wf.capture_baseline(scope, updated)
+        state.update(plan=updated, checks={}, review=None)
+        write(wf.root / "plan.json", updated)
+        render(wf.root, "plan", updated)
+        wf.event("widen", task=args.task, paths=added, deliverable=args.deliverable,
+                 reason=args.reason, by="manager")
+        return f"Widened {args.task}: {added}. Criteria and scope unchanged; run required checks again."
     if command == "start":
         _, _, task = wf.task(args.task)
         need(not any(t["status"] == "running" for t in wf.tasks().values()), "only one main-session writer may run")
@@ -519,7 +577,11 @@ def execute(wf, args):
         wf.event("start", task=args.task)
         return f"Started {args.task}: {task['title']}. Main session writes {task['paths']}."
     if command == "check":
-        wf.idle_checkpoint(wf.snapshot(scope, plan))
+        snapshot = wf.snapshot(scope, plan)
+        wf.idle_checkpoint(snapshot)
+        previous = state["checks"].get(args.name)
+        if plan["checks"].get(args.name, {}).get("reuse", False) and not args.force and fresh(previous, snapshot):
+            return f"PASS {args.name} (reused unchanged contents): {previous['log']}"
         result = wf.run_check(args.name, scope, plan)
         need(result["exit_code"] == 0 and result["stable"],
              f"check {args.name} failed or changed source artifacts; inspect {result['log']}")
@@ -604,6 +666,13 @@ def execute(wf, args):
         need(isinstance(result.get("findings"), list), "review.findings must be a list")
         need(bool(result["findings"]) == (result["verdict"] == "changes"), "pass must have no findings; changes must have findings")
         need(scope["review"] != "independent" or text(result.get("agent_id")), "identify the actual independent reviewer")
+        if scope.get("requirements"):
+            coverage = result.get("requirements")
+            need(isinstance(coverage, list) and all(isinstance(r, dict) and text(r.get("id"))
+                 and text(r.get("evidence")) for r in coverage),
+                 "review needs requirement coverage with evidence against the original request")
+            need(sorted(r.get("id", "") for r in coverage) == sorted(r["id"] for r in scope["requirements"]),
+                 "review must cover every request requirement exactly once")
         for finding in result["findings"]:
             need(isinstance(finding, dict) and finding.get("task") in wf.tasks()
                  and text(finding.get("issue")) and text(finding.get("evidence")), "finding needs an owning task, issue, and evidence")
@@ -629,13 +698,23 @@ def execute(wf, args):
             report += [f"  - Criterion {item['criterion']}: {item['evidence']}" for item in entry["result"]["acceptance"]]
             report += [f"  - Check {name}: PASS ({check['log']})" for name, check in entry["checks"].items()]
             report += [f"  - Verification: {task['verification']['mode']} — {task['verification']['reason']}"]
+        report += ["", "## Request coverage"]
+        for requirement in scope.get("requirements", []):
+            owners = [t["id"] for t in plan["tasks"] if requirement["id"] in t.get("requirements", [])]
+            report += [f"- {requirement['id']}: {requirement['text']} — {', '.join(requirement['deliverables'])}; tasks {', '.join(owners)}."]
+        if state["review"]:
+            report += [f"  - {r['id']}: {r['evidence']}" for r in state["review"].get("requirements", [])]
         report += ["", "## Final checks"]
         report += [f"- {c}: PASS ({state['checks'][c]['log']})" for c in plan["final_checks"]] or ["- None required by the approved plan."]
         report += ["", "## Review", "", state["review"]["summary"] + f" ({scope['review']})." if state["review"] else "None required by approved scope.",
                    "", "## Scope decisions"]
         for event in state["history"]:
-            if event["action"] in ("scope-confirm", "approve", "amend", "answer"):
-                report += [f"- {event['action']}: {event['answer']}"]
+            if event["action"] in ("scope-confirm", "approve", "amend", "answer", "widen"):
+                report += [f"- {event['action']} ({event.get('by', 'operator')}): {event.get('answer', event.get('reason'))}"]
+                if event["action"] == "widen":
+                    report += [f"  - {event['task']} for {event['deliverable']}: {', '.join(event['paths'])}"]
+                if event.get("evidence"):
+                    report += [f"  - Decision evidence: {event['evidence']}"]
                 report += [f"  - {change}" for change in event.get("changes", [])]
         report += ["", "## Noticed items"]
         report += [f"- {n['classification']}: {n['text']} — {n['reason']}" for n in state["notes"]] or ["- None."]
@@ -649,16 +728,18 @@ def execute(wf, args):
 
 SCHEMAS = {
     "scope": dict(title="Add multiplication", deliverables=[dict(id="D1", kind="code", what="Add mul(a,b)", where="app/calc.py")],
+                  requirements=[dict(id="R1", text="Add multiplication with zero and negative operand support.", deliverables=["D1"])],
                   workspaces=[dict(name="app", path="/absolute/path/to/app", mode="write")],
                   constraints=["Follow repository instructions; preserve existing edits."], non_goals=["No unrelated cleanup."],
                   review="self", max_agents=0, estimate_minutes=30),
-    "plan": dict(summary="Add and verify multiplication.", tasks=[dict(id="T01", title="Multiply", kind="code", serves=["D1"],
+    "plan": dict(summary="Add and verify multiplication.", tasks=[dict(id="T01", title="Multiply", kind="code", serves=["D1"], requirements=["R1"],
                  workspace="app", paths=["calc.py", "test_calc.py"], depends_on=[], acceptance=["mul(2,3) returns 6; cover zero and negatives."],
                  checks=["unit"], verification=dict(mode="red-green", check="unit", test_paths=["test_calc.py"], reason="New behavior needs regression coverage."))],
                  checks=dict(unit=dict(argv=["python3", "-B", "-m", "unittest", "test_calc"], workspace="app", timeout_seconds=300)), final_checks=["unit"]),
     "result": dict(task="T01", summary="Multiplication handles positive, negative, and zero inputs.",
                    acceptance=[dict(criterion=1, evidence="test_calc.py:8; unit check PASS.")]),
-    "review": dict(method="self", verdict="pass", summary="Verified all criteria, error paths, and test assertions against the diff.", findings=[]),
+    "review": dict(method="self", verdict="pass", summary="Verified all criteria, error paths, and test assertions against the diff.", findings=[],
+                   requirements=[dict(id="R1", evidence="Original request and D1 criteria match; test_calc.py covers zero and negatives.")]),
     "closeout": [dict(id=1, classification="observation", reason="Unrelated finding; no requested criterion depends on it.")],
 }
 
@@ -677,6 +758,9 @@ def parser():
         item = commands.add_parser(name)
         if name in ("approve", "resume", "resolve"):
             item.add_argument("--answer", required=True)
+        if name == "resolve":
+            item.add_argument("--by", choices=("operator", "manager"), default="operator")
+            item.add_argument("--evidence")
         if name == "status":
             item.add_argument("--json", action="store_true")
     item = commands.add_parser("scope")
@@ -704,6 +788,12 @@ def parser():
             item.add_argument("--reason", required=True)
     item = commands.add_parser("check")
     item.add_argument("name")
+    item.add_argument("--force", action="store_true", help="rerun even when a passing check matches current contents")
+    item = commands.add_parser("widen")
+    item.add_argument("task")
+    item.add_argument("--path", action="append", required=True)
+    item.add_argument("--deliverable", required=True)
+    item.add_argument("--reason", required=True)
     item = commands.add_parser("note")
     item.add_argument("text")
     for name in ("review", "closeout"):

@@ -41,8 +41,16 @@ Print `schema scope|plan|result|review|closeout` for complete examples. Essentia
   `max_agents: 0|1|2`, optional `estimate_minutes`. A future write directory may not exist yet.
   Deliverable kinds are code, tests, docs, kb, tutorial, education, research, pm, integration.
   Code/tests always require review. Independent review requires a nonzero agent allowance.
+- New scopes include `requirements`: a nonempty list of `id` (`R1`, `R2`, ...), `text`, and
+  `deliverables` (existing deliverable IDs). Account for every distinct requested outcome and
+  explicit constraint; every deliverable must map back to the request. Existing approved
+  workflows without this field remain compatible. The helper validates links, not whether
+  the ledger faithfully captures the full request; compare it with `request.md` yourself.
 - Plan: `summary`, `tasks`, `checks`, `final_checks`. A task has `id`, `title`, `kind`, `serves`
   (deliverable ids), `workspace`, `paths`, `depends_on`, `acceptance`, `checks`, `verification`.
+  When scope has a requirement ledger, each task also has `requirements` (request requirement
+  IDs); all requirements must have explicit task coverage, even when they share a deliverable.
+  A task may name only requirements mapped to at least one deliverable that task serves.
   Name individual relative files, including expected new files; no directory or glob write sets.
   Only research/integration tasks may have empty paths. Read-only workspaces cannot receive
   deliverables or check output. A file inside a nested workspace belongs to the nested workspace.
@@ -51,9 +59,11 @@ Print `schema scope|plan|result|review|closeout` for complete examples. Essentia
   `test_paths` within task paths. Manual mode requires evidence in the result rather than a
   fabricated test command. Existing mode uses regression coverage without a new test phase.
 - A named check has `argv` (a nonempty list of literal arguments), `workspace` for its working
-  directory, and optional positive `timeout_seconds` (default 300). The helper does not parse
-  shell syntax, expand `$HOME`, or run shell strings. If a repository genuinely requires a shell,
-  explicitly plan `['bash', '-lc', '...']`. Check authorization includes any side effects of
+  directory, optional positive `timeout_seconds` (default 300), and optional `reuse` (default
+  false). Opt in only for checks whose inputs are declared workspace files in a stable
+  environment; leave checks involving external services, time, or untracked inputs uncached.
+  The helper does not parse shell syntax, expand `$HOME`, or run shell strings. If a repository
+  genuinely requires a shell, explicitly plan `['bash', '-lc', '...']`. Check authorization includes any side effects of
   that approved command; do not use external writes or installation as incidental checks.
 
 The helper validates dependency cycles, missing deliverables, evidence coverage, and concrete
@@ -77,7 +87,11 @@ To correct a defective test strategy, ask the operator and amend/restart with a 
 reason; never repeatedly repin weaker tests to make implementation pass.
 
 `check` runs the approved command, records its exit status and source fingerprint, and saves
-output under `checks/`. It does not infer a pre-existing failure or waive one. Missing programs,
+output under `checks/`. With `reuse: true`, an unchanged prior stable pass is returned without
+execution; `check <name> --force` reruns it. A failed, missing, or stale result is never reused.
+Red/pin checkpoints always execute their check. This saves repeated runs at the same contents;
+it cannot observe changes outside declared workspaces or changes to environment state.
+The helper does not infer a pre-existing failure or waive one. Missing programs,
 timeouts, unexpected failures, and commands that change source artifacts cannot count as passes.
 Use short focused commands and the runtime's interrupt controls if a check must stop on halt.
 
@@ -110,14 +124,31 @@ sampling, or prove a command had no external side effects. Observe the contract 
 ```text
 tp -w <workflow-dir> block --question <specific-unknown-and-its-consequence>
 tp -w <workflow-dir> resolve --answer <operator-clarification>
+tp -w <workflow-dir> resolve --by manager --answer <already-settled-answer> --evidence <saved-decision>
+tp -w <workflow-dir> widen T01 --path <file> --deliverable D1 --reason <existing-criterion-and-why-it-needs-this-file>
 tp -w <workflow-dir> amend --scope-file <draft-scope.json> --plan-file <draft-plan.json> --answer <approval>
 tp -w <workflow-dir> reopen T01 --reason <confirmed-defect-and-evidence>
 tp -w <workflow-dir> note <unrelated-discovery>
 ```
 
 `block` preserves partial work and prevents further execution until a decision. `resolve` records
-a clarification and does not change scope. For a changed contract, prepare new draft files,
-validate their implications, show the exact changes, and ask before `amend`. Either draft flag
+a clarification and does not change scope. Default `--by operator` records actual operator
+words. `--by manager` requires `--evidence` pointing to the scope, plan, or saved decision
+that already answers the question; it grants no new approval and keeps that provenance in
+history/report. Consult those sources before blocking or asking a settled question again.
+
+`widen` adds individual files to a pending/running task in its existing writable workspace
+without another operator answer. Name one of its existing `serves` deliverables and explain
+why unchanged criteria need the files. It cannot change scope, acceptance criteria, check
+commands, test strategy, workspace roots, or adopt unexpected edits. Honor constraints and
+non-goals independently. Widen before editing the extra files; existing drift and previously
+untracked contents in ignored trees require inspection and an approved amendment. Reopen
+completed work first, and finish any other running task. The helper preserves original
+baselines, captures newly planned originals, keeps test pins/partial work, invalidates all
+check/review records, and records a manager decision. No heuristic proves the reason true.
+
+For a changed contract, prepare new draft files, validate their implications, show the exact
+changes, and ask before `amend`. Either draft flag
 may be omitted to retain its approved value; during planning there may be no plan yet.
 Amendment decisions and old/new contracts remain in history. Changed tasks and their dependents
 reopen; changed scope reopens all tasks. Partial edits remain for inspection. Final check/review
@@ -137,9 +168,12 @@ impossible, inspect them and ask about a corrected plan rather than bypassing th
 After every task is done, `next` requests final checks, final review, closeout as needed, then
 `final`. Print `schema review` for the review format. `method` must match approved scope; an
 independent result also names the actual `agent_id`. A passing review has an empty `findings`
-list. A `changes` verdict has findings with `task`, `issue`, and `evidence`; these reopen owning
-tasks and completed dependents. Validate findings before recording them. After fixes, run
-required checks and review current artifacts again.
+list. If scope has a requirement ledger, review JSON also needs `requirements` with exactly
+one `id` and concrete `evidence` per requirement, checked against the original request and
+delivered artifacts. The report preserves these links and evidence. Legacy scopes without
+the ledger keep their existing review format. A `changes` verdict has findings with `task`,
+`issue`, and `evidence`; these reopen owning tasks and completed dependents. Validate findings
+before recording them. After fixes, run required checks and review current artifacts again.
 
 Closeout takes a JSON list with `id`, `classification: observation|deferred|followup`, and
 `reason` describing the issue and consequence:

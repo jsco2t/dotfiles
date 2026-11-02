@@ -13,6 +13,9 @@ delivery = "herdr"
 
 [keys]
 prefix = "ctrl+space"
+remove_worktree = "prefix+ctrl+g"
+next_agent = "prefix+down"
+previous_agent = "prefix+up"
 
 [worktrees]
 directory = "~/Developer/sources/trees"

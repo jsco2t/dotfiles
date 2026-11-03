@@ -227,7 +227,8 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("pending", self.cli("start", "T01", expect=2))
         self.cli("resolve", "--answer", "Document the checked-out version.")
         self.cli("start", "T01")
-        self.assertEqual(self.state()["history"][-2]["answer"], "Document the checked-out version.")
+        answer = next(event for event in reversed(self.state()["history"]) if event["action"] == "answer")
+        self.assertEqual(answer["answer"], "Document the checked-out version.")
 
     def test_amendment_records_scope_changes_and_reopens_affected_work(self):
         self.approve()
@@ -597,6 +598,209 @@ class PipelineTest(unittest.TestCase):
         self.cli("start", "T01")
         (docs / "a.md").write_text("overview")
         self.cli("done", "T01", "--result-file", self.result())
+
+    def git_workspace(self):
+        subprocess.run(["git", "init", "-q", str(self.app)], check=True)
+        (self.app / ".gitignore").write_text("sdk/\nbuild/\n")
+        (self.app / "build").mkdir()
+        (self.app / "build/tracked.txt").write_text("tracked generated source")
+        subprocess.run(["git", "-C", str(self.app), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.app), "add", "-f", "build/tracked.txt"], check=True)
+        scope = self.scope()
+        scope["workspaces"][0]["snapshot"] = "git"
+        return scope
+
+    def test_git_snapshot_ignores_cache_churn_but_keeps_tracked_ignored_files(self):
+        self.approve(scope=self.git_workspace())
+        self.cli("start", "T01")
+        (self.app / "sdk").mkdir()
+        os.mkfifo(self.app / "sdk/socket")
+        (self.app / "build/cache.txt").write_text("mutable output")
+        self.cli("done", "T01", "--result-file", self.result())
+        self.assertIn("app:build/tracked.txt", self.state()["checkpoint"])
+        self.assertNotIn("app:build/cache.txt", self.state()["checkpoint"])
+        (self.app / "build/tracked.txt").write_text("unexpected tracked change")
+        self.assertIn("between tasks", self.cli("next", expect=2))
+
+    def test_git_snapshot_catches_untracked_source_and_explicit_ignored_test(self):
+        scope = self.git_workspace()
+        self.approve(self.plan([self.task(path="build/explicit.txt")]), scope)
+        self.cli("start", "T01")
+        (self.app / "build/explicit.txt").write_text("explicit artifact")
+        (self.app / "stray.py").write_text("unplanned source")
+        self.assertIn("stray.py", self.cli("done", "T01", "--result-file", self.result(), expect=2))
+        (self.app / "stray.py").unlink()
+        self.cli("done", "T01", "--result-file", self.result())
+        self.assertIn("app:build/explicit.txt", self.state()["checkpoint"])
+
+    def test_git_snapshot_requires_git_and_walk_remains_legacy_default(self):
+        scope = self.scope()
+        scope["workspaces"][0]["snapshot"] = "git"
+        self.confirm(scope)
+        self.put("plan.json", self.plan())
+        self.assertIn("Git snapshot", self.cli("approve", "--answer", "Approve.", expect=2))
+
+    def test_git_snapshot_keeps_directory_symlinks_and_detects_tracked_deletion(self):
+        scope = self.git_workspace()
+        (self.app / "link").symlink_to(self.base, target_is_directory=True)
+        self.approve(scope=scope)
+        self.assertIn("app:link", self.state()["checkpoint"])
+        (self.app / "build/tracked.txt").unlink()
+        self.assertIn("build/tracked.txt", self.cli("next", expect=2))
+
+    def test_git_snapshot_scopes_nested_workspaces_without_duplicate_paths(self):
+        scope = self.git_workspace()
+        docs = self.app / "docs"
+        docs.mkdir()
+        (docs / "source.md").write_text("source")
+        scope["workspaces"].append(dict(name="docs", path=str(docs), mode="write", snapshot="git"))
+        plan = self.plan()
+        plan["tasks"][0]["workspace"] = "docs"
+        self.approve(plan, scope)
+        snapshot = self.state()["checkpoint"]
+        self.assertIn("docs:source.md", snapshot)
+        self.assertNotIn("app:docs/source.md", snapshot)
+        self.cli("start", "T01")
+        (docs / "a.md").write_text("overview")
+        self.cli("done", "T01", "--result-file", self.result())
+
+    def adaptive_plan(self):
+        plan = self.plan()
+        plan["tasks"][0].update(adaptive=True)
+        return plan
+
+    def refinement(self):
+        return dict(paths=["calc.py", "test_calc.py"], checks=dict(unit=dict(
+            argv=[sys.executable, "-B", "-m", "unittest", "test_calc"], workspace="app")),
+            verification=dict(mode="red-green", check="unit", test_paths=["test_calc.py"],
+                              reason="Reproduce the validated missing multiplication behavior."))
+
+    def test_refine_keeps_outcomes_and_partial_work_without_approval_or_new_tasks(self):
+        (self.app / "calc.py").write_text("def add(a, b): return a + b\n")
+        self.approve(self.adaptive_plan())
+        self.cli("start", "T01")
+        (self.wf / "review-notes.md").write_text("Finding F1: multiplication is missing.")
+        original = self.state()
+        self.cli("refine", "T01", "--file", self.put("refine.json", self.refinement()),
+                 "--reason", "Finding F1 needs a regression and implementation in the approved unit.")
+        state = self.state()
+        self.assertEqual(state["scope"], original["scope"])
+        self.assertEqual(state["tasks"]["T01"]["before"], original["tasks"]["T01"]["before"])
+        self.assertEqual(state["plan"]["tasks"][0]["acceptance"], original["plan"]["tasks"][0]["acceptance"])
+        self.assertEqual(len(state["tasks"]), 1)
+        self.assertEqual(state["history"][-1]["by"], "manager")
+        (self.app / "test_calc.py").write_text("import unittest\nfrom calc import mul\nclass Test(unittest.TestCase):\n def test_mul(self): self.assertEqual(mul(2, 3), 6)\n")
+        self.cli("test", "T01", "--stage", "red", "--note", "The requested mul is missing from the existing module.")
+        (self.app / "calc.py").write_text("def mul(a, b): return a * b\n")
+        self.cli("check", "unit")
+        self.cli("done", "T01", "--result-file", self.result())
+        self.review()
+        self.cli("final")
+
+    def test_refine_refuses_missing_allowance_drift_and_changed_outcomes(self):
+        self.approve()
+        args = ("refine", "T01", "--file", self.put("refine.json", self.refinement()), "--reason", "Needed.")
+        self.assertIn("adaptive", self.cli(*args, expect=2))
+        plan = self.state()["plan"]
+        plan["tasks"][0]["adaptive"] = True
+        self.cli("amend", "--plan-file", self.put("adaptive.json", plan), "--answer", "Permit refinement.")
+        spec = self.refinement()
+        spec["acceptance"] = ["Weaker outcome"]
+        self.assertIn("fields", self.cli("refine", "T01", "--file", self.put("bad-refine.json", spec),
+                                          "--reason", "Needed.", expect=2))
+        (self.app / "calc.py").write_text("unplanned edit")
+        self.assertIn("between tasks", self.cli(*args, expect=2))
+
+    def test_refine_cannot_replace_checks_or_weaken_verification(self):
+        plan = self.automated("characterization")
+        plan["tasks"][0]["adaptive"] = True
+        self.approve(plan)
+        spec = dict(checks=dict(unit=dict(argv=["true"], workspace="app")))
+        self.assertIn("replace", self.cli("refine", "T01", "--file", self.put("replace.json", spec),
+                                           "--reason", "Needed.", expect=2))
+        spec = dict(verification=dict(mode="manual", reason="Skip test-first"))
+        self.assertIn("test-first", self.cli("refine", "T01", "--file", self.put("weaken.json", spec),
+                                              "--reason", "Needed.", expect=2))
+
+    def test_refine_preserves_pins_and_rejects_newly_exposed_ignored_contents(self):
+        plan = self.automated("characterization")
+        plan["tasks"][0]["adaptive"] = True
+        (self.app / "dist").mkdir()
+        (self.app / "dist/hidden.py").write_text("preexisting ignored work")
+        self.approve(plan)
+        self.cli("start", "T01")
+        (self.app / "test_calc.py").write_text("pinned assertions")
+        self.cli("test", "T01", "--stage", "pin", "--note", "Current behavior.")
+        pin = self.state()["tasks"]["T01"]["test_checkpoint"]
+        self.assertIn("previously untracked", self.cli("refine", "T01", "--file", self.put(
+            "hidden.json", dict(paths=["dist/hidden.py"])), "--reason", "Needed.", expect=2))
+        spec = dict(verification=self.refinement()["verification"])
+        self.assertIn("already pinned", self.cli("refine", "T01", "--file", self.put("strategy.json", spec),
+                                                 "--reason", "Needed.", expect=2))
+        self.cli("refine", "T01", "--file", self.put("extra-path.json", dict(paths=["helper.py"])),
+                 "--reason", "The existing behavior needs a helper.")
+        self.assertEqual(self.state()["tasks"]["T01"]["test_checkpoint"], pin)
+        self.assertEqual(self.state()["checks"], {})
+
+    def test_mechanical_test_update_preserves_original_pin_and_requires_current_green(self):
+        plan = self.automated("characterization")
+        plan["tasks"][0]["adaptive"] = True
+        self.approve(plan)
+        self.cli("start", "T01")
+        (self.app / "test_calc.py").write_text("mode = 0\n")
+        self.cli("test", "T01", "--stage", "pin", "--note", "Current behavior pinned.")
+        original = self.state()["tasks"]["T01"]["test_checkpoint"]
+        (self.app / "test_calc.py").write_text("mode = 0o0\n")
+        evidence = self.put("correction.json", dict(kind="mechanical", reason="Correct the octal lint.",
+                            evidence="Only the spelling of the zero literal changed; value, cases and assertions are identical."))
+        args = ("test-update", "T01", "--file", evidence)
+        self.assertIn("current", self.cli(*args, expect=2))
+        self.cli("check", "unit")
+        self.cli(*args)
+        entry = self.state()["tasks"]["T01"]
+        self.assertEqual(entry["test_updates"][0]["previous"], original)
+        self.assertEqual((self.wf / original["files"]["app:test_calc.py"]).read_text(), "mode = 0\n")
+        self.cli("done", "T01", "--result-file", self.result())
+        self.review()
+        self.cli("final")
+        self.assertIn("test-update (manager)", (self.wf / "report.md").read_text())
+
+    def test_test_update_rejects_strategy_change_and_needs_explicit_allowance(self):
+        self.approve(self.automated("characterization"))
+        self.cli("start", "T01")
+        (self.app / "test_calc.py").write_text("assertions")
+        self.cli("test", "T01", "--stage", "pin", "--note", "Pinned.")
+        args = ("test-update", "T01", "--file", self.put("correction.json", dict(
+            kind="mechanical", reason="Lint.", evidence="Equivalent literal.")))
+        self.assertIn("adaptive", self.cli(*args, expect=2))
+
+    def test_test_update_refuses_nonmechanical_changes_and_missing_original_copies(self):
+        plan = self.automated("characterization")
+        plan["tasks"][0]["adaptive"] = True
+        self.approve(plan)
+        self.cli("start", "T01")
+        (self.app / "test_calc.py").write_text("original assertions")
+        self.cli("test", "T01", "--stage", "pin", "--note", "Pinned.")
+        spec = dict(kind="strategy", reason="Weaker expectation.", evidence="Changed assertion.")
+        self.assertIn("mechanical", self.cli("test-update", "T01", "--file", self.put("semantic.json", spec), expect=2))
+        bad = dict(spec, kind="mechanical", previous="Cannot inject checkpoint history")
+        self.assertIn("mechanical", self.cli("test-update", "T01", "--file", self.put("extra-key.json", bad), expect=2))
+        # Simulate a legacy pin written before original copies were retained.
+        state = self.state()
+        del state["tasks"]["T01"]["test_checkpoint"]["files"]
+        (self.wf / ".tp/state.json").write_text(json.dumps(state))
+        spec["kind"] = "mechanical"
+        self.assertIn("copies unavailable", self.cli("test-update", "T01", "--file", self.put("legacy.json", spec), expect=2))
+
+    def test_show_returns_one_task_without_workspace_fingerprints(self):
+        self.approve()
+        self.cli("start", "T01")
+        before = {str(p): p.stat().st_mtime_ns for p in self.wf.rglob("*")}
+        output = json.loads(self.cli("show", "T01"))
+        self.assertEqual(output["task"]["id"], "T01")
+        self.assertEqual(output["status"], "running")
+        self.assertNotIn("before", output)
+        self.assertEqual(before, {str(p): p.stat().st_mtime_ns for p in self.wf.rglob("*")})
 
 
 if __name__ == "__main__":

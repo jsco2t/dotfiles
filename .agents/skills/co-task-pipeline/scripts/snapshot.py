@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 from pathlib import Path
 
 
@@ -39,10 +40,28 @@ def fingerprint(path, cache):
 def take(workspaces, workflow, tasks, cache):
     result = {}
     roots = {w["name"]: Path(w["path"]) for w in workspaces}
+    modes = {w["name"]: w.get("snapshot", "walk") for w in workspaces}
     for name, root in roots.items():
         excluded = [workflow] + [p for p in roots.values() if p != root and root in p.parents]
         paths = set()
-        for directory, dirs, files in os.walk(root, followlinks=False):
+        if modes[name] == "git":
+            # Git performs ignore pruning without opening SDKs, caches or build outputs.
+            # Keep tracked ignored files and ordinary untracked source in the checkpoint.
+            process = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached",
+                                      "--others", "--exclude-standard", "--", "."],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if process.returncode:
+                raise ValueError(f"Git snapshot failed for {root}: {os.fsdecode(process.stderr).strip()}")
+            for raw in process.stdout.split(b"\0"):
+                if raw:
+                    path = root / os.fsdecode(raw)
+                    if any(path == p or p in path.parents for p in excluded):
+                        continue
+                    if path.is_dir() and not path.is_symlink():
+                        raise ValueError(f"Git snapshot needs a separate workspace for submodule {path}")
+                    if path.exists() or path.is_symlink():
+                        paths.add(path)
+        for directory, dirs, files in os.walk(root, followlinks=False) if modes[name] == "walk" else ():
             here = Path(directory)
             # Directory symlinks are artifacts too, but never followed.
             files += [d for d in dirs if (here / d).is_symlink()]
@@ -61,6 +80,8 @@ def take(workspaces, workflow, tasks, cache):
                     if path.exists() or path.is_symlink():
                         paths.add(path)
         for path in sorted(paths):
+            if any(path == p or p in path.parents for p in excluded):
+                continue
             result[f"{name}:{path.relative_to(root).as_posix()}"] = fingerprint(path, cache)
     return result
 

@@ -5,10 +5,12 @@ deliverables, verification, and integration.
 
 ## Decision
 
-Default to no subagents. Keeping connected discovery and implementation in one context avoids
-repeated reading and handoffs. Parallel tool calls are useful even with a single agent.
+Choose from the workload. Keep connected discovery and implementation local; for independent
+component research or reviews, recommend a bounded agent allowance at scope confirmation.
+Do not turn a one-writer restriction into a ban on useful parallel reads. Parallel tool calls
+are useful even with a single agent.
 
-Request one bounded research or review agent only when:
+Use a bounded research or review agent when:
 
 1. Its result answers a distinct question or supplies a valuable independent review.
 2. It can work without waiting for the main session's next edit or duplicating current work.
@@ -16,8 +18,9 @@ Request one bounded research or review agent only when:
 4. The approved scope allows the role and count, and the runtime exposes delegation tools.
 
 Explain the reason briefly and record the assignment and returned agent identity in
-`research.md`. Default to one agent when delegation is justified; at most two may be active,
-within the approved `max_agents` allowance. If delegation has marginal value, keep the work
+`research.md`. Default to one agent when delegation is justified; at most three children may be
+active, within the approved `max_agents` allowance and available runtime slots (which may
+include the parent). If delegation has marginal value, keep the work
 local; ask only if the uncertainty concerns a material user requirement or an agreed independent
 review. Select the model using the routing policy below, respecting explicit operator choices.
 Use a fresh context containing only the brief and necessary artifacts when the runtime permits;
@@ -28,6 +31,15 @@ If the operator explicitly requests parallel implementation, present a revised p
 disjoint write ownership and integration checks and ask to change this workflow before using
 it; this helper deliberately tracks one writer. Do not bypass that limitation silently.
 
+When a named review skill offers its own fanout, choose one owner of delegation: invoke it
+in the parent with the approved remaining child allowance, or delegate the complete bounded
+review with `--max-agents=0` and no children. Never multiply pipeline agents by reviewer agents
+by perspective agents. A named skill's required independent coverage still applies; surface
+a genuine capability/contract conflict rather than silently dropping lenses or independence.
+Independent read-only units can overlap only while their source revision stays fixed. With
+one child slot, the parent can inspect a disjoint lens while the child reviews, then integrate
+before writing; do not run a sibling review against code the parent is actively changing.
+
 No custom global agent configuration is required. Use the runtime's available spawn and
 follow-up tools with a bounded brief. If delegation is unavailable, do the work in the main
 session only when the approved contract permits it. An agreed **independent** review cannot
@@ -35,27 +47,32 @@ silently become self-review: ask to amend the method or wait for the capability.
 
 ## Model and reasoning selection
 
-This skill selects `gpt-6.1-terra` for these bounded roles when the runtime offers that exact
-model and reasoning setting. This is a conservative routing policy, not a claim that every
-task is faster or equally accurate on Terra.
+The core thread chooses a model before each assignment. The operator authorizes up to three
+children and explicitly asks for SOL/TERRA routing. Use the exact supported IDs below;
+record the choice and rationale rather than asking the child to select its own model.
+TERRA is the cost-conscious choice for easier bounded work. Measure actual savings before
+claiming every assignment is faster or cheaper; neither model is a substitute for evidence.
 
 | Assignment | Model / reasoning | Acceptance by the parent |
 | --- | --- | --- |
 | Extract requirements from supplied sources, locate symbols/callers, map files, verify citations, summarize existing check logs | GPT-6.1-Terra / `medium` | Check returned evidence and reconcile all requested items. |
 | Trace one bounded behavior across modules; independently review a coherent diff for correctness, regression coverage, or factual document accuracy | GPT-6.1-Terra / `high` | Validate every reported defect and ensure the requested review coverage was actually examined. |
-| Architecture, security-sensitive or concurrency analysis across subsystems, conflicting requirements, broad final synthesis | Inherit the main session's model and reasoning | Keep scope decisions and integration in the parent; use an independent agent only if it adds value. |
+| Ambiguous behavior, architecture, security-sensitive or concurrency analysis across subsystems, conflicting requirements, broad synthesis | GPT-6.1-SOL / `high` | Validate cross-component reasoning and reconcile conflicts; core thread retains scope/integration decisions. |
 
-In this runtime, pass `fork_turns: "none"`, `model: "gpt-6.1-terra"`, and
-`reasoning_effort: "medium"` or `"high"` to `collaboration.spawn_agent`; put the self-contained
+In this runtime, pass `fork_turns: "none"`, `model: "gpt-6.1-terra"` or `"gpt-6.1-sol"`, and
+the selected `reasoning_effort` to `collaboration.spawn_agent`; put the self-contained
 brief in `message`. A full-history fork inherits the parent's settings and cannot select a
 different model. In another runtime, use only its exposed equivalent; do not invent model
 flags, edit global settings, or launch a nested Codex process. If the exact selection is
-unavailable, inherit the session settings and disclose that fallback.
+unavailable, use SOL for an assignment TERRA cannot handle when SOL is available, otherwise
+inherit session settings and disclose the fallback. Never silently label fallback execution
+as the requested model. A runtime that reports only a requested override leaves actual
+identity unreported.
 
-Start at the listed effort, not medium then high for every task. If medium returns incomplete
-or unsupported evidence, give one focused correction or move that unresolved question to
-high. If high still cannot establish the answer, keep the validated findings and finish the
-uncertain part in the parent or with the inherited model. Do not run both models routinely or
+Start at the listed effort, not medium then high for every task. If TERRA returns incomplete
+or unsupported evidence, give one focused correction or move the unresolved question to SOL.
+If SOL still cannot establish the answer, keep validated findings and investigate the
+uncertain part in the parent or ask about a genuinely missing decision. Do not run both models routinely or
 retry the same failing assignment indefinitely. Unknown facts are not permission to reduce
 scope; material product choices still belong to the operator.
 
@@ -70,6 +87,28 @@ recommends bounded inputs and verifiable results for Terra; its
 [model page](https://developers.openai.com/api/docs/models/gpt-6.1-terra) lists medium and high
 reasoning support. The role split above is this workflow's judgment, subject to evidence from
 actual runs.
+
+## Assignment and return records
+
+Use `tp schema agent` for a brief. It names approved requirement IDs, role, absolute starting
+paths inside approved workspaces, one bounded question, stopping condition, `model: SOL|TERRA`,
+`reasoning: medium|high`, and the core thread's `model_reason`.
+
+1. `tp agent reserve --id A1 --capacity <total-usable-child-slots> --file <brief.json>` checks
+   the approved cap (up to three), counts reserved/running/unknown children and emits a compact
+   packet. Capacity excludes the parent and includes already-assigned children plus free slots.
+2. Spawn with that packet in a fresh context, read-only role and no children. Then
+   `tp agent attach --id A1 --agent-id <actual-id>`; add `--actual-model` and
+   `--actual-reasoning` only when reported by the host.
+3. Read and validate the returned source evidence, then `tp agent finish --id A1 --file
+   <result.json>`. Result needs `accepted`, summary, evidence list and parent `validation`.
+   Changed source invalidates automatic acceptance; review current affected artifacts first.
+4. Interrupt using host controls on halt, then `tp agent cancel --id A1 --evidence <actual-status>`.
+   A missing handoff is unresolved, not a reason to respawn repeatedly. Settle all assignments
+   before final delivery. The helper records authority and provenance; it never launches agents.
+
+Use the helper assignment record as the source of truth; put reusable conclusions in
+research.md once rather than copying the entire brief/report into multiple ledgers.
 
 ## Research brief
 
@@ -107,5 +146,5 @@ task state, record what is known, and resume only missing work. A slow agent is 
 failure; check progress rather than repeatedly respawning it.
 
 The [official Codex subagent documentation](https://learn.chatgpt.com/docs/agent-configuration/subagents)
-describes the additional model work and token cost of delegation. The conservative default
+describes the additional model work and token cost of delegation. The workload-based policy
 above weighs that cost against useful independent review and parallel research.

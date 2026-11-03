@@ -1,0 +1,139 @@
+{
+  "date": "2026-11-03",
+  "tests": {
+    "command": "python3 -B -m unittest discover -s .agents/skills/co-task-pipeline/tests -q",
+    "passed": 92
+  },
+  "execution": "actual-agent",
+  "requested_agent_model": "gpt-6.1-terra",
+  "requested_reasoning_effort": "medium",
+  "actual_model": "unreported",
+  "actual_reasoning_effort": "unreported",
+  "observed_runtime_child_capacity": 1,
+  "source": "Observed collaboration.spawn_agent/followup_task turns and independent held-out grader outputs; evaluator provenance is trusted, not cryptographic.",
+  "runs": [
+    {
+      "scenario": "multi-repair",
+      "quality_pass": true,
+      "failures": [],
+      "helper_revision": "aa76f5b2a75fe76f0383732948d72b08df41e35bbc3de6d02d6c534566cd7207",
+      "agent_id": "/root/eval_final",
+      "changed_files": [
+        "app.py",
+        "test_clamp.py",
+        "test_flag.py",
+        "test_page.py"
+      ],
+      "metrics": {
+        "mutating_helper_calls": 28,
+        "mutating_helper_seconds": 0.9092784398235381,
+        "workflow_wall_seconds": 65.188713,
+        "checks_executed": 6,
+        "checks_reused": 1,
+        "check_seconds": 0.442987,
+        "repair_steps": 3
+      }
+    },
+    {
+      "scenario": "clean-review",
+      "quality_pass": true,
+      "failures": [],
+      "helper_revision": "470df66c509ff35c5a79c083cc2182ab035bf6429e1678c1ddde1ddd10aa4482",
+      "agent_id": "/root/eval_clean",
+      "changed_files": [
+        "review.json"
+      ],
+      "metrics": {
+        "mutating_helper_calls": 16,
+        "mutating_helper_seconds": 0.22753213881514966,
+        "workflow_wall_seconds": 51.216297,
+        "checks_executed": 1,
+        "checks_reused": 2,
+        "check_seconds": 0.07079,
+        "repair_steps": 0
+      }
+    },
+    {
+      "scenario": "research-map",
+      "quality_pass": true,
+      "failures": [],
+      "helper_revision": "470df66c509ff35c5a79c083cc2182ab035bf6429e1678c1ddde1ddd10aa4482",
+      "agent_id": "/root/eval_map",
+      "changed_files": [
+        "map.json"
+      ],
+      "metrics": {
+        "mutating_helper_calls": 11,
+        "mutating_helper_seconds": 0.08531140955165029,
+        "workflow_wall_seconds": 93.303215,
+        "checks_executed": 0,
+        "checks_reused": 0,
+        "check_seconds": 0,
+        "repair_steps": 0
+      }
+    },
+    {
+      "scenario": "unavailable-check",
+      "quality_pass": true,
+      "failures": [],
+      "helper_revision": "62172c64f4e6b21016eb76d7d1055f4a57af72135552ac9a0d191c6658fce2ce",
+      "agent_id": "/root/eval_unavailable_v2",
+      "changed_files": [],
+      "metrics": {
+        "mutating_helper_calls": 8,
+        "mutating_helper_seconds": 0.11618481669574976,
+        "workflow_wall_seconds": null,
+        "checks_executed": 1,
+        "checks_reused": 0,
+        "check_seconds": 0.026519,
+        "repair_steps": 0
+      }
+    },
+    {
+      "scenario": "interruption",
+      "quality_pass": true,
+      "failures": [],
+      "helper_revision": "470df66c509ff35c5a79c083cc2182ab035bf6429e1678c1ddde1ddd10aa4482",
+      "agent_id": "/root/eval_interruption",
+      "changed_files": [
+        "app.py",
+        "test_app.py"
+      ],
+      "metrics": {
+        "mutating_helper_calls": 17,
+        "mutating_helper_seconds": 0.33046192000620067,
+        "workflow_wall_seconds": 215.025939,
+        "checks_executed": 2,
+        "checks_reused": 0,
+        "check_seconds": 0.13958399999999999,
+        "repair_steps": 0
+      }
+    }
+  ],
+  "final_runtime_exactly_matches_evaluated_snapshot": true,
+  "final_run_automatic_phases": {
+    "activities": {
+      "research": 29.764021,
+      "implementation": 5.483010999999999,
+      "verification": 8.010269000000001,
+      "bookkeeping": 21.628239,
+      "waiting": 0.119617
+    },
+    "covered_phase_seconds": 65.005157,
+    "unclassified_wall_seconds": 0.18355600000001004
+  },
+  "unmeasured": [
+    "total_tool_calls",
+    "model_input_tokens",
+    "cached_input_tokens",
+    "model_output_tokens",
+    "model_cost"
+  ],
+  "limitations": [
+    "One small actual-agent run per scenario type; multi-repair additionally rerun after automatic measurement changes.",
+    "Frozen runtime revisions are recorded per case; the final multi-repair snapshot matches current runtime contents and permissions.",
+    "Different scenarios and a small sample do not establish production speedup or model cost savings.",
+    "Workflow wall time includes preparation/idle/approval/halts; helper/check spans overlap phase spans.",
+    "Initial unavailable-check fixture had a contradictory unit-check instruction; the retained corrected run uses the repaired fixture."
+  ]
+}

@@ -4,6 +4,9 @@ Use `python3 "<actual-skill-dir>/scripts/tp.py"` for `tp` below. Do not assume a
 path when working on a repository copy. Python 3.9+ and a macOS/Linux filesystem are sufficient;
 there are no third-party Python packages, custom agent registrations, or network dependencies.
 Run its regression suite with `python3 -B -m unittest discover -s <skill-dir>/tests -v`.
+For incremental repair, measurement, scoped input reuse, operation recovery and compact
+context commands, read [execution.md](execution.md) before using that mechanism. Complete-run
+agent evaluations and independent grading are documented in [../evals/README.md](../evals/README.md).
 
 ## Starting and approving
 
@@ -34,13 +37,23 @@ unanswered question as consent, or use this helper as a sandbox/authorization by
 
 ## Contract format
 
-Print `schema scope|plan|result|review|closeout` for complete examples. Essential fields:
+Print `schema scope|plan|refine|test-update|result|review|closeout` for complete examples. Essential fields:
 
 - Scope: `title`, `deliverables` (`id`, `kind`, `what`, `where`), `workspaces` (`name`, absolute
   resolved `path`, `mode: read|write`), `constraints`, `non_goals`, `review: self|independent|none`,
-  `max_agents: 0|1|2`, optional `estimate_minutes`. A future write directory may not exist yet.
+  `max_agents: 0|1|2|3`, optional `estimate_minutes`. New scopes use the standing allowance
+  of three unless the operator sets a lower limit. A future write directory may not exist yet.
   Deliverable kinds are code, tests, docs, kb, tutorial, education, research, pm, integration.
   Code/tests always require review. Independent review requires a nonzero agent allowance.
+  `max_agents` counts children; runtime capacity may include the parent and reduce available
+  child slots. Final `review: self` does not prohibit delegated task/component reviews.
+  Each workspace optionally selects `snapshot: git|walk` (legacy default `walk`). Select
+  `git` for a Git worktree; it checkpoints tracked files (including tracked ignored outputs)
+  and nonignored untracked files, without walking ignored caches. Explicit task files are
+  included even when ignored. Deleted tracked files disappear from the snapshot and are
+  detected as changes. Use separate workspaces for submodules; Git failure is an error, never
+  a silent fallback. Choose `walk` for non-Git workspaces. Ignored undeclared source is outside
+  a Git checkpoint; inspect meaningful ignored source and declare intended edits explicitly.
 - New scopes include `requirements`: a nonempty list of `id` (`R1`, `R2`, ...), `text`, and
   `deliverables` (existing deliverable IDs). Account for every distinct requested outcome and
   explicit constraint; every deliverable must map back to the request. Existing approved
@@ -52,8 +65,12 @@ Print `schema scope|plan|result|review|closeout` for complete examples. Essentia
   IDs); all requirements must have explicit task coverage, even when they share a deliverable.
   A task may name only requirements mapped to at least one deliverable that task serves.
   Name individual relative files, including expected new files; no directory or glob write sets.
-  Only research/integration tasks may have empty paths. Read-only workspaces cannot receive
+  Research/integration tasks and explicitly adaptive tasks may have empty paths. Read-only workspaces cannot receive
   deliverables or check output. A file inside a nested workspace belongs to the nested workspace.
+  Optional `adaptive: true` grants the manager permission, through plan approval, to add
+  concrete paths/checks and establish test-first verification when findings become known.
+  It also allows documented mechanical test corrections. Default false preserves legacy gates;
+  it never grants new outcomes, roots, weaker tests or permission to adopt concurrent edits.
 - Verification: `mode: red-green|characterization|existing|manual` and a specific `reason`.
   All automated modes require `check` naming one of the task's checks. The first two also require
   `test_paths` within task paths. Manual mode requires evidence in the result rather than a
@@ -65,6 +82,9 @@ Print `schema scope|plan|result|review|closeout` for complete examples. Essentia
   The helper does not parse shell syntax, expand `$HOME`, or run shell strings. If a repository
   genuinely requires a shell, explicitly plan `['bash', '-lc', '...']`. Check authorization includes any side effects of
   that approved command; do not use external writes or installation as incidental checks.
+  Optional `inputs` maps workspace names to file/directory/glob patterns; optional `environment`
+  names variables whose values affect the command. Definitions and these inputs determine
+  freshness; omitted inputs conservatively fingerprint all monitored workspaces. See execution.md.
 
 The helper validates dependency cycles, missing deliverables, evidence coverage, and concrete
 write paths. It freezes scope/plan values on approval; direct edits are rejected. It does not
@@ -84,9 +104,16 @@ Only one task may be running. `start` checkpoints all workspaces. Test-first `re
 failing check; characterization uses `--stage pin` and a passing check. Before that checkpoint,
 only planned test files may have changed. The checkpoint pins test contents through completion.
 To correct a defective test strategy, ask the operator and amend/restart with a documented
-reason; never repeatedly repin weaker tests to make implementation pass.
+reason; never repeatedly repin weaker tests to make implementation pass. For an adaptive
+review/fix task, successive `repair` steps have independent pins against each step's starting
+contents; the entire task need not restart. New pins retain
+the check log and original test copies in `.tp/test-baseline/` so mechanical corrections
+can be inspected without restoring production code.
 
-`check` runs the approved command, records its exit status and source fingerprint, and saves
+`show T01` reads one task's contract, status and recorded result/checks without writing state
+or printing workspace fingerprint maps. Prefer it to `status --json` and full plan dumps.
+
+`check` runs the approved command through a detached cancellable worker, records its exit status and source fingerprint, and saves
 output under `checks/`. With `reuse: true`, an unchanged prior stable pass is returned without
 execution; `check <name> --force` reruns it. A failed, missing, or stale result is never reused.
 Red/pin checkpoints always execute their check. This saves repeated runs at the same contents;
@@ -118,6 +145,49 @@ the workflow directory, and common generated trees (`node_modules`, Python cache
 Stat caching avoids rehashing unchanged files. This is drift detection within declared
 workspaces, not a sandbox: it cannot monitor undeclared paths, transient writes restored before
 sampling, or prove a command had no external side effects. Observe the contract independently.
+The generated-tree exclusions above apply to `walk`; `git` uses Git's tracked/ignore rules
+instead. Neither mode requires relocating caches, modifying ignore files, or changing product
+layout to satisfy bookkeeping. Snapshot mode is part of scope; changing a legacy contract's
+mode needs an approved amendment rather than an automatic migration.
+
+## Adaptive detail and mechanical test corrections
+
+```text
+tp schema refine
+tp -w <workflow-dir> refine T01 --file <refinement.json> --reason <finding-and-need>
+tp schema test-update
+tp -w <workflow-dir> test-update T01 --file <correction.json>
+```
+
+`refine` requires `adaptive: true` in the approved task. Its JSON contains only optional
+`paths` (a list of concrete relative files), `checks` (name → definition), and `verification`.
+Paths/checks append; existing checks must match exactly. New checks run in the task's existing
+writable workspace and must be authorized, focused verification of its existing outcomes,
+not installation or unrelated external mutations. Task IDs, dependencies, acceptance criteria,
+deliverable/requirement mappings, final checks and scope stay unchanged. Verification may
+move from `manual`/`existing` to `red-green`/`characterization` before a pin; it cannot replace
+an approved test-first strategy. Use one coherent regression batch per adaptive review/fix unit.
+
+Refine a pending/running task before editing the added files. The helper rejects unexpected
+edits and newly exposed ignored contents, captures original file baselines, preserves the
+running checkpoint/partial work, and invalidates checks/final review. It records manager
+provenance without an invented operator answer. If only paths are needed, `widen` remains
+available on nonadaptive tasks too. Helper validation cannot decide whether prose justification
+is truthful; the manager must keep every refinement within the approved outcomes.
+
+`test-update` requires a running adaptive task, an existing pin with saved original copies,
+and a fresh passing verification check on the corrected current contents. JSON needs
+`kind: mechanical`, `reason`, and concrete `evidence` explaining why values, cases and assertions
+are unchanged. Inspect the original saved tests and current diff. Use this only for equivalent
+formatting/lint corrections (for example `0` → `0o0`), never assertion removal, new expectations,
+test skipping or strategy changes. Those need operator-approved amendment. New behavior still
+needs genuine pre-fix regression evidence; this command cannot create it retroactively.
+
+The helper retains the previous checkpoint, original test copies and original red/pin log,
+stores corrected copies/hashes, and records the correction in history/report. It does not
+replay production or prove semantic equivalence automatically. It never accepts an ordinary
+`test` call as permission to repin. Old pins without saved copies require an amendment.
+This prevents a routine equivalent lint fix from forcing a rollback and a fresh approval.
 
 ## Questions, amendments, and repairs
 

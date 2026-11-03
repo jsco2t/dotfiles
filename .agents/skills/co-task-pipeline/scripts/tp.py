@@ -11,14 +11,15 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 sys.dont_write_bytecode = True
 from snapshot import changed, digest, take  # noqa: E402
+import checks as check_runtime  # noqa: E402
 
 VERSION = "codex-task-pipeline-v1"
 KINDS = {"code", "tests", "docs", "kb", "tutorial", "education", "research", "pm", "integration"}
@@ -114,6 +115,7 @@ def validate_scope(scope, root):
         need(path not in paths, "workspace roots must be distinct")
         need(path != root and root not in path.parents, "workspaces must be outside the workflow folder")
         need(workspace.get("mode") in ("read", "write"), f"{name}: mode must be read or write")
+        need(workspace.get("snapshot", "walk") in ("walk", "git"), f"{name}: snapshot must be walk or git")
         need(not path.exists() or path.is_dir(), f"{name}: workspace is not a directory")
         need(workspace["mode"] != "read" or path.is_dir(), f"{name}: read workspace must exist")
         names.add(name)
@@ -122,7 +124,7 @@ def validate_scope(scope, root):
     need(scope.get("review") != "none" or not any(d["kind"] in ("code", "tests") for d in deliveries),
          "code and test deliverables require final review")
     count = scope.get("max_agents", 0)
-    need(type(count) is int and 0 <= count <= 2, "max_agents must be 0, 1, or 2")
+    need(type(count) is int and 0 <= count <= 3, "max_agents must be 0, 1, 2, or 3")
     need(scope["review"] != "independent" or count > 0, "independent review requires an agent allowance")
     estimate = scope.get("estimate_minutes")
     need(estimate is None or type(estimate) is int and estimate > 0, "estimate_minutes must be positive or null")
@@ -164,6 +166,15 @@ def validate_plan(plan, scope, root):
         need(type(check.get("timeout_seconds", 300)) is int and check.get("timeout_seconds", 300) > 0,
              f"{name}: timeout_seconds must be a positive integer")
         need(type(check.get("reuse", False)) is bool, f"{name}: reuse must be true or false")
+        if "inputs" in check:
+            inputs = check["inputs"]
+            need(isinstance(inputs, dict) and inputs, f"{name}: inputs must map workspaces to patterns")
+            for workspace_name, patterns in inputs.items():
+                need(workspace_name in workspaces and strings(patterns), f"{name}: unknown input workspace or empty patterns")
+                for pattern in patterns:
+                    need(not PurePosixPath(pattern).is_absolute() and not {"..", ".git", ".tp"}.intersection(PurePosixPath(pattern).parts)
+                         and "\\" not in pattern, f"{name}: input patterns must stay within a workspace")
+        need(strings(check.get("environment", []), empty=True), f"{name}: environment must name variables")
     need(strings(plan.get("final_checks"), empty=True), "plan.final_checks must be a list")
     need(all(c in checks for c in plan["final_checks"]), "unknown final check")
     deliveries = {d["id"] for d in scope["deliverables"]}
@@ -185,7 +196,9 @@ def validate_plan(plan, scope, root):
                  f"{tid}: requirement must map to a deliverable this task serves")
             covered_requirements.update(targets)
         need(strings(task.get("acceptance")), f"{tid}: acceptance criteria required")
-        need(strings(task.get("paths"), empty=task["kind"] in ("research", "integration")), f"{tid}: paths required")
+        need(type(task.get("adaptive", False)) is bool, f"{tid}: adaptive must be true or false")
+        need(strings(task.get("paths"), empty=task["kind"] in ("research", "integration") or task.get("adaptive", False)),
+             f"{tid}: paths required")
         need(len(set(task["paths"])) == len(task["paths"]), f"{tid}: duplicate paths")
         for relative in task["paths"]:
             path_in(scope, task, relative, root)
@@ -225,6 +238,10 @@ def validate_plan(plan, scope, root):
 
 
 class Workflow:
+    timestamp = staticmethod(now)
+    write_json = staticmethod(write)
+    read_json = staticmethod(read)
+
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.meta = self.root / ".tp"
@@ -253,7 +270,13 @@ class Workflow:
     def snapshot(self, scope, plan):
         cache_path = self.meta / "fingerprints.json"
         cache = read(cache_path) if cache_path.exists() else {}
-        result = take(scope["workspaces"], self.root, plan["tasks"], cache)
+        roots = {w["name"]: Path(w["path"]) for w in scope["workspaces"]}
+        explicit_inputs = [dict(workspace=workspace, paths=[pattern])
+                           for check in plan.get("checks", {}).values()
+                           for workspace, patterns in check.get("inputs", {}).items()
+                           for pattern in patterns if not any(c in pattern for c in "*?[]")
+                           and ((roots[workspace] / pattern).is_file() or (roots[workspace] / pattern).is_symlink())]
+        result = take(scope["workspaces"], self.root, plan["tasks"] + explicit_inputs, cache)
         write(cache_path, cache)
         return result
 
@@ -283,6 +306,20 @@ class Workflow:
     def runnable(self):
         need(self.state["phase"] == "EXECUTING", "execution requires approval and a non-halted run")
         need(not self.state.get("question"), "operator input is pending; resolve or amend first")
+
+    def pin_files(self, task, hashes):
+        """Keep each pinned revision for inspection; a correction never erases its evidence."""
+        files = {}
+        for key, value in hashes.items():
+            relative = key.split(":", 1)[1]
+            source = path_in(self.state["scope"], task, relative, self.root)
+            target = self.meta / "test-baseline" / task["id"] / digest([key, value])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                shutil.copyfile(source, target)
+                target.chmod(0o600)
+            files[key] = str(target.relative_to(self.root))
+        return files
 
     def tasks(self):
         return self.state["tasks"]
@@ -321,31 +358,7 @@ class Workflow:
             need(not unexpected, f"workspace changed between tasks: {unexpected}; inspect and ask before adopting edits")
 
     def run_check(self, name, scope, plan):
-        need(name in plan["checks"], f"unknown check {name}")
-        definition = plan["checks"][name]
-        workspace = next(w for w in scope["workspaces"] if w["name"] == definition["workspace"])
-        before = self.snapshot(scope, plan)
-        logdir = self.root / "checks"
-        logdir.mkdir(exist_ok=True)
-        fd, raw_path = tempfile.mkstemp(prefix=name + "-", suffix=".log", dir=logdir)
-        log = Path(raw_path)
-        started = now()
-        with os.fdopen(fd, "wb") as stream:
-            try:
-                process = subprocess.run(definition["argv"], cwd=workspace["path"], stdout=stream,
-                                         stderr=subprocess.STDOUT, timeout=definition.get("timeout_seconds", 300))
-                code = process.returncode
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                stream.write((str(exc) + "\n").encode())
-                code = 124 if isinstance(exc, subprocess.TimeoutExpired) else 127
-        after = self.snapshot(scope, plan)
-        result = dict(check=name, argv=definition["argv"], workspace=definition["workspace"],
-                      started=started, ended=now(), exit_code=code, log=str(log.relative_to(self.root)),
-                      fingerprint=digest(after), stable=before == after)
-        self.state["checks"][name] = result
-        self.event("check", **result)
-        self.save()  # Failed checks must survive the CLI's nonzero exit.
-        return result
+        return check_runtime.run(self, name, scope, plan)
 
 
 def render(root, name, data):
@@ -372,14 +385,23 @@ def initialize(args):
             suffix += 1
             root = location / f"{base}-{suffix}"
     (root / "request.md").write_text(request, encoding="utf-8")
-    write(root / ".tp" / "state.json", dict(version=VERSION, title=args.title, created=now(),
+    created = now()
+    write(root / ".tp" / "state.json", dict(version=VERSION, title=args.title, created=created,
           phase="SCOPING", scope=None, plan=None, tasks={}, checks={}, notes=[], review=None,
-          history=[], question=None))
+          history=[], question=None, active_activity=dict(category="bookkeeping", label="Scope preparation",
+                                                         started=created, automatic=True, task=None)))
+    args.created_workflow = root
     return f"workflow: {root}\nNext: draft scope.json, then scope check and scope confirm."
 
 
-def fresh(check, snapshot):
-    return bool(check and check["exit_code"] == 0 and check["stable"] and check["fingerprint"] == digest(snapshot))
+def fresh(check, snapshot, definition=None):
+    return bool(check and check["exit_code"] == 0 and check["stable"] and
+                check["fingerprint"] == check_runtime.fingerprint(snapshot, definition or {}))
+
+
+def retain_checks(state, snapshot, plan):
+    return {name: result for name, result in state["checks"].items()
+            if "inputs" in plan["checks"].get(name, {}) and fresh(result, snapshot, plan["checks"][name])}
 
 
 def next_action(wf):
@@ -388,6 +410,9 @@ def next_action(wf):
         return "halted: resume only on the operator's instruction"
     if state.get("question"):
         return "human: " + state["question"]
+    unresolved = [op["id"] for op in state.get("operations", {}).values() if op["status"] in ("running", "unknown")]
+    if unresolved:
+        return "recover: inspect operation receipts before advancing: " + ", ".join(unresolved)
     if state["phase"] == "SCOPING":
         return "scope: draft/check scope.json and obtain operator confirmation"
     if state["phase"] == "PLANNING":
@@ -406,8 +431,11 @@ def next_action(wf):
             return f"start: {task['id']} — {task['title']}"
     if any(t["status"] != "done" for t in wf.tasks().values()):
         return "human: no ready task; inspect task/dependency state"
+    active_agents = [a["id"] for a in state.get("agents", {}).values() if a["status"] in ("reserved", "running", "unknown")]
+    if active_agents:
+        return "agents: collect/validate or cancel assignments before final delivery: " + ", ".join(active_agents)
     for name in plan["final_checks"]:
-        if not fresh(state["checks"].get(name), snapshot):
+        if not fresh(state["checks"].get(name), snapshot, plan["checks"][name]):
             return f"check: {name}"
     if scope["review"] != "none" and not (state.get("review") and
             state["review"]["fingerprint"] == digest(snapshot) and state["review"]["verdict"] == "pass"):
@@ -430,28 +458,45 @@ def status(wf):
 
 def execute(wf, args):
     state, command = wf.state, args.command
+    if command == "show":
+        _, _, task = wf.task(args.task)
+        entry = wf.tasks().get(args.task, {"status": "unapproved"})
+        return json.dumps(dict(task=task, status=entry["status"], started=entry.get("started"),
+                               result=entry.get("result"), checks=entry.get("checks", {})), indent=2)
     if command == "next":
         return next_action(wf)
     if command == "halt":
         need(state["phase"] != "COMPLETE", "completed workflow cannot be halted")
         if state["phase"] != "HALTED":
             state["resume_phase"], state["phase"] = state["phase"], "HALTED"
+            check_runtime.cancel(wf)
+            import tracking
+            tracking.pause(wf, "operator halt")
             wf.event("halt", reason=args.reason)
         return "Halted. Partial edits and approval are preserved."
+    import tracking
+    if command in tracking.COMMANDS:
+        return tracking.execute(wf, args, sys.modules[__name__])
+    need(not any(op["status"] in ("running", "unknown") for op in state.get("operations", {}).values()),
+         "an operation is unresolved; inspect/recover it before advancing")
     if command == "resume":
         need(state["phase"] == "HALTED", "workflow is not halted; use next to continue")
         state["phase"] = state.pop("resume_phase")
+        running = next((tid for tid, entry in state["tasks"].items() if entry["status"] == "running"), None)
+        tracking.switch(wf, "implementation" if running else "bookkeeping", "Inspect resumed checkpoint", running)
         wf.event("resume", answer=args.answer)
         return "Resumed. Run next."
     need(state["phase"] not in ("HALTED", "COMPLETE"), "workflow is halted or complete")
     if command == "block":
         need(not state.get("question"), "a question is already pending; resolve or amend it first")
         state["question"] = args.question
+        tracking.switch(wf, "waiting", "Operator decision: " + args.question)
         wf.event("question", question=args.question)
         return "Operator input required: " + args.question
     if command == "resolve":
         need(state.get("question"), "no question is pending")
         need(args.by != "manager" or text(args.evidence), "manager resolution needs --evidence from saved decisions")
+        tracking.switch(wf, "bookkeeping", "Apply settled decision")
         wf.event("answer", question=state["question"], answer=args.answer, by=args.by, evidence=args.evidence)
         state["question"] = None
         return "Clarification recorded; contract unchanged. Run next."
@@ -465,7 +510,10 @@ def execute(wf, args):
             need(not state["question"], "resolve pending questions before confirmation")
             need(text(args.answer), "confirmation needs --answer with the operator's words")
             state["scope"], state["phase"] = scope, "PLANNING"
+            tracking.switch(wf, "research", "Research and plan approved outcomes")
             wf.event("scope-confirm", answer=args.answer, scope=scope)
+        elif state["phase"] == "SCOPING":
+            tracking.switch(wf, "waiting", "Scope confirmation")
         return "scope ok: scope.md"
     if command in ("plan", "approve"):
         need(state["phase"] == "PLANNING", "confirm scope before planning; use amend after approval")
@@ -478,7 +526,10 @@ def execute(wf, args):
             state["baseline"] = wf.snapshot(scope, plan)
             state["checkpoint"] = state["baseline"]
             wf.capture_baseline(scope, plan)
+            tracking.switch(wf, "bookkeeping", "Begin approved plan")
             wf.event("approve", answer=args.answer, scope=scope, plan=plan)
+        else:
+            tracking.switch(wf, "waiting", "Concrete plan approval")
         return "plan ok: plan.md" if command == "plan" else "Approved. Run next."
     if command == "amend":
         need(state["scope"] is not None, "confirm an initial scope first")
@@ -531,10 +582,89 @@ def execute(wf, args):
             render(wf.root, "plan", plan)
             state["checkpoint"] = new_snapshot
             wf.capture_baseline(scope, plan)
+        tracking.switch(wf, "bookkeeping", "Apply approved amendment")
         wf.event("amend", answer=args.answer, changes=changes, scope=scope, plan=plan)
         return "Amendment recorded; affected work and final verification reopen. Inspect partial edits, then next."
     wf.runnable()
     scope, plan = wf.contract()
+    if command == "refine":
+        _, _, task = wf.task(args.task)
+        entry = wf.tasks()[args.task]
+        need(task.get("adaptive", False), "refine requires adaptive: true in the approved task")
+        need(entry["status"] in ("pending", "running"), "reopen completed work before refining it")
+        need(not any(tid != args.task and t["status"] == "running" for tid, t in wf.tasks().items()),
+             "finish the active task before refining another task")
+        spec = read(args.file)
+        need(isinstance(spec, dict) and spec and set(spec) <= {"paths", "checks", "verification"},
+             "refine fields are paths, checks, verification only; outcomes require an amendment")
+        updated = copy.deepcopy(plan)
+        new_task = next(t for t in updated["tasks"] if t["id"] == args.task)
+        added = spec.get("paths", [])
+        need(strings(added, empty=True), "refine paths must be concrete files")
+        for relative in added:
+            path_in(scope, task, relative, wf.root)
+        new_task["paths"] += [p for p in dict.fromkeys(added) if p not in task["paths"]]
+        checks = spec.get("checks", {})
+        need(isinstance(checks, dict), "refine checks must be check definitions")
+        for name, definition in checks.items():
+            need(name not in plan["checks"] or definition == plan["checks"][name], "refine cannot replace an approved check")
+            need(isinstance(definition, dict) and definition.get("workspace") == task["workspace"],
+                 "refined checks must run in the task's existing workspace")
+            updated["checks"][name] = definition
+            if name not in new_task["checks"]:
+                new_task["checks"].append(name)
+        if "verification" in spec:
+            verification = spec["verification"]
+            need(not entry.get("test_checkpoint"), "test-first strategy is already pinned; use an approved amendment")
+            need(task["verification"]["mode"] in ("manual", "existing"),
+                 "refine cannot replace an approved test-first strategy")
+            need(isinstance(verification, dict) and verification.get("mode") in ("red-green", "characterization"),
+                 "refined verification must establish a test-first strategy")
+            new_task["verification"] = verification
+        validate_plan(updated, scope, wf.root)
+        if entry["status"] == "running":
+            snapshot, _ = wf.edits(scope, plan, task, entry["before"])
+        else:
+            snapshot = wf.snapshot(scope, plan)
+            wf.idle_checkpoint(snapshot)
+        need(wf.snapshot(scope, updated) == snapshot,
+             "new paths expose previously untracked contents; inspect and use an approved amendment")
+        need(updated != plan, "refinement changes nothing")
+        wf.capture_baseline(scope, updated)
+        state.update(plan=updated, checks=retain_checks(state, snapshot, updated), review=None)
+        write(wf.root / "plan.json", updated)
+        render(wf.root, "plan", updated)
+        wf.event("refine", task=args.task, detail=spec, reason=args.reason, by="manager")
+        return f"Refined {args.task}; outcomes and checkpoints preserved. Run its test-first phase before production edits."
+    if command == "test-update":
+        _, _, task = wf.task(args.task)
+        entry = wf.tasks()[args.task]
+        need(task.get("adaptive", False), "test-update requires adaptive: true in the approved task")
+        need(entry["status"] == "running", "start and pin this task first")
+        target = entry
+        if args.repair:
+            target = next((r for r in entry.get("repairs", []) if r["id"] == args.repair), None)
+            need(target is not None, "unknown repair step")
+        need(target.get("test_checkpoint"), "start and pin this task/repair first")
+        correction = read(args.file)
+        need(isinstance(correction, dict) and set(correction) == {"kind", "reason", "evidence"}
+             and correction.get("kind") == "mechanical"
+             and text(correction.get("reason")) and text(correction.get("evidence")),
+             "only documented mechanical corrections qualify; changed strategy requires an approved amendment")
+        checkpoint = target["test_checkpoint"]
+        need(checkpoint.get("files"), "original pinned copies unavailable; use an approved amendment")
+        snapshot, _ = wf.edits(scope, plan, task, entry["before"])
+        hashes = {p: snapshot.get(p) for p in checkpoint["hashes"]}
+        need(all(hashes.values()) and hashes != checkpoint["hashes"], "pinned tests must exist and have a correction")
+        verification = target["verification"] if args.repair else task["verification"]
+        need(fresh(state["checks"].get(verification["check"]), snapshot, plan["checks"][verification["check"]]),
+             "run the verification check on current contents before recording a correction")
+        target.setdefault("test_updates", []).append(dict(previous=copy.deepcopy(checkpoint), **correction))
+        target["test_checkpoint"] = dict(checkpoint, hashes=hashes, files=wf.pin_files(task, hashes))
+        state["review"] = None
+        wf.event("test-update", task=args.task, previous=checkpoint["hashes"], current=hashes,
+                 detail=correction, reason=correction["reason"], repair=args.repair, by="manager")
+        return "Mechanical correction recorded; original tests and test-first evidence preserved."
     if command == "widen":
         _, _, task = wf.task(args.task)
         entry = wf.tasks()[args.task]
@@ -559,7 +689,7 @@ def execute(wf, args):
         need(wf.snapshot(scope, updated) == snapshot,
              "new paths expose previously untracked contents; inspect and use an approved amendment")
         wf.capture_baseline(scope, updated)
-        state.update(plan=updated, checks={}, review=None)
+        state.update(plan=updated, checks=retain_checks(state, snapshot, updated), review=None)
         write(wf.root / "plan.json", updated)
         render(wf.root, "plan", updated)
         wf.event("widen", task=args.task, paths=added, deliverable=args.deliverable,
@@ -574,13 +704,16 @@ def execute(wf, args):
         wf.idle_checkpoint(snapshot)
         wf.tasks()[args.task] = dict(status="running", before=snapshot, started=now())
         state["review"] = None
+        category = "research" if task["kind"] == "research" or (task.get("adaptive") and task["verification"]["mode"] == "manual") else "implementation"
+        tracking.switch(wf, category, task["title"], args.task)
         wf.event("start", task=args.task)
         return f"Started {args.task}: {task['title']}. Main session writes {task['paths']}."
     if command == "check":
         snapshot = wf.snapshot(scope, plan)
         wf.idle_checkpoint(snapshot)
         previous = state["checks"].get(args.name)
-        if plan["checks"].get(args.name, {}).get("reuse", False) and not args.force and fresh(previous, snapshot):
+        if plan["checks"].get(args.name, {}).get("reuse", False) and not args.force and fresh(previous, snapshot, plan["checks"][args.name]):
+            wf.event("check-reuse", check=args.name, log=previous["log"])
             return f"PASS {args.name} (reused unchanged contents): {previous['log']}"
         result = wf.run_check(args.name, scope, plan)
         need(result["exit_code"] == 0 and result["stable"],
@@ -600,10 +733,15 @@ def execute(wf, args):
             need(set(changes) <= tests, "production files changed before the test-first checkpoint")
             need(tests <= snapshot.keys(), "all planned test files must exist")
             result = wf.run_check(verification["check"], scope, plan)
+            wf.runnable()
+            state = wf.state
+            entry = wf.tasks()[args.task]
             success = result["exit_code"] > 0 if args.stage == "red" else result["exit_code"] == 0
-            need(success and result["exit_code"] not in (124, 127) and result["stable"],
+            need(success and result["exit_code"] not in (124, 127, 130) and result["stable"],
                  "test stage did not produce the expected stable failure/pass; inspect the log")
-            entry["test_checkpoint"] = dict(stage=args.stage, hashes={p: snapshot[p] for p in tests}, note=args.note)
+            hashes = {p: snapshot[p] for p in tests}
+            entry["test_checkpoint"] = dict(stage=args.stage, hashes=hashes, note=args.note,
+                                           files=wf.pin_files(task, hashes), log=result["log"])
             wf.event("test", task=args.task, stage=args.stage, note=args.note)
             return f"Recorded {args.stage} tests for {args.task}; preserve them during implementation."
         result = read(args.result_file)
@@ -618,7 +756,10 @@ def execute(wf, args):
             criteria.append(item["criterion"])
         need(sorted(criteria) == list(range(1, len(task["acceptance"]) + 1)), "every criterion needs exactly one evidence entry")
         for name in task["checks"]:
-            need(fresh(state["checks"].get(name), snapshot), f"required check {name} is missing, failed, or stale")
+            need(fresh(state["checks"].get(name), snapshot, plan["checks"][name]), f"required check {name} is missing, failed, or stale")
+        if entry.get("repairs"):
+            import repairs
+            repairs.validate_done(wf, task, entry, snapshot, sys.modules[__name__])
         if verification["mode"] in ("red-green", "characterization"):
             checkpoint = entry.get("test_checkpoint")
             need(checkpoint and all(snapshot.get(p) == value for p, value in checkpoint["hashes"].items()),
@@ -627,6 +768,8 @@ def execute(wf, args):
                      checks={c: copy.deepcopy(state["checks"][c]) for c in task["checks"]})
         entry.pop("before", None)
         state["checkpoint"] = snapshot
+        tracking.switch(wf, "verification" if all(t["status"] == "done" for t in wf.tasks().values()) else "bookkeeping",
+                        "Integrate and review delivered outcomes")
         wf.event("done", task=args.task, result=result, changes=changes)
         return f"Accepted {args.task}. Run next."
     if command == "reopen":
@@ -658,7 +801,7 @@ def execute(wf, args):
         need(all(t["status"] == "done" for t in wf.tasks().values()), "finish all tasks before final review")
         snapshot = wf.snapshot(scope, plan)
         wf.idle_checkpoint(snapshot)
-        need(all(fresh(state["checks"].get(c), snapshot) for c in plan["final_checks"]), "run final checks before review")
+        need(all(fresh(state["checks"].get(c), snapshot, plan["checks"][c]) for c in plan["final_checks"]), "run final checks before review")
         result = read(args.file)
         need(isinstance(result, dict) and result.get("method") == scope["review"] and scope["review"] != "none",
              "review method differs from approved scope")
@@ -679,12 +822,14 @@ def execute(wf, args):
         for finding in result["findings"]:
             wf.reopen(finding["task"], finding["issue"])
         state["review"] = dict(result, fingerprint=digest(snapshot), at=now())
+        tracking.switch(wf, "bookkeeping", "Close out review decisions")
         wf.event("review", result=state["review"])
         return "Review recorded. Run next."
     if command == "final":
         action = next_action(wf)
         need(action.startswith("final:"), "completion gate: " + action)
         state["phase"], state["completed"] = "COMPLETE", now()
+        tracking.pause(wf, "workflow complete")
         elapsed = (datetime.fromisoformat(state["completed"]) - datetime.fromisoformat(state["created"])).total_seconds() / 60
         estimate = f"{scope['estimate_minutes']} minutes" if scope.get("estimate_minutes") is not None else "not supplied"
         report = [f"# {state['title']}", "", "All approved tasks and required verification completed.", "",
@@ -698,6 +843,10 @@ def execute(wf, args):
             report += [f"  - Criterion {item['criterion']}: {item['evidence']}" for item in entry["result"]["acceptance"]]
             report += [f"  - Check {name}: PASS ({check['log']})" for name, check in entry["checks"].items()]
             report += [f"  - Verification: {task['verification']['mode']} — {task['verification']['reason']}"]
+            for repair in entry.get("repairs", []):
+                report += [f"  - Repair {repair['id']} (criteria {repair['criteria']}): {repair['result']['summary']}",
+                           f"    - {repair['result']['evidence']}",
+                           f"    - Original {repair['test_checkpoint']['stage']}: {repair['test_checkpoint']['log']}"]
         report += ["", "## Request coverage"]
         for requirement in scope.get("requirements", []):
             owners = [t["id"] for t in plan["tasks"] if requirement["id"] in t.get("requirements", [])]
@@ -709,18 +858,29 @@ def execute(wf, args):
         report += ["", "## Review", "", state["review"]["summary"] + f" ({scope['review']})." if state["review"] else "None required by approved scope.",
                    "", "## Scope decisions"]
         for event in state["history"]:
-            if event["action"] in ("scope-confirm", "approve", "amend", "answer", "widen"):
+            if event["action"] in ("scope-confirm", "approve", "amend", "answer", "widen", "refine", "test-update"):
                 report += [f"- {event['action']} ({event.get('by', 'operator')}): {event.get('answer', event.get('reason'))}"]
+                if event["action"] in ("refine", "test-update"):
+                    report += [f"  - {event['task']}: {json.dumps(event['detail'])}"]
                 if event["action"] == "widen":
                     report += [f"  - {event['task']} for {event['deliverable']}: {', '.join(event['paths'])}"]
                 if event.get("evidence"):
                     report += [f"  - Decision evidence: {event['evidence']}"]
                 report += [f"  - {change}" for change in event.get("changes", [])]
+        report += ["", "## Delegation and effects"]
+        for agent in state.get("agents", {}).values():
+            report += [f"- {agent['id']}: {agent['model']} / {agent['reasoning']}; actual model: {agent.get('actual_model') or 'unreported'}; "
+                       f"{agent['status']}; accepted: {agent.get('accepted', False)}. {agent['model_reason']}"]
+        for operation in state.get("operations", {}).values():
+            if operation["kind"] != "check":
+                report += [f"- {operation['id']} ({operation['kind']}): {operation['status']}; {operation.get('evidence', 'no outcome evidence')}."]
         report += ["", "## Noticed items"]
         report += [f"- {n['classification']}: {n['text']} — {n['reason']}" for n in state["notes"]] or ["- None."]
         report += ["", "Full request: request.md. Approval, check, and revision history: .tp/state.json.",
                    "Original planned file contents: .tp/baseline/ (baseline_files maps each workspace:path; null means it did not exist)."]
         (wf.root / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+        with (wf.root / "report.md").open("a") as stream:
+            stream.write("\nMeasured progress and overhead: metrics.json. Overlapping durations are not additive.\n")
         wf.event("final")
         return "Complete: " + str(wf.root / "report.md")
     raise Gate(f"unknown command {command}")
@@ -731,13 +891,34 @@ SCHEMAS = {
                   requirements=[dict(id="R1", text="Add multiplication with zero and negative operand support.", deliverables=["D1"])],
                   workspaces=[dict(name="app", path="/absolute/path/to/app", mode="write")],
                   constraints=["Follow repository instructions; preserve existing edits."], non_goals=["No unrelated cleanup."],
-                  review="self", max_agents=0, estimate_minutes=30),
+                  review="self", max_agents=3, estimate_minutes=30),
     "plan": dict(summary="Add and verify multiplication.", tasks=[dict(id="T01", title="Multiply", kind="code", serves=["D1"], requirements=["R1"],
                  workspace="app", paths=["calc.py", "test_calc.py"], depends_on=[], acceptance=["mul(2,3) returns 6; cover zero and negatives."],
                  checks=["unit"], verification=dict(mode="red-green", check="unit", test_paths=["test_calc.py"], reason="New behavior needs regression coverage."))],
                  checks=dict(unit=dict(argv=["python3", "-B", "-m", "unittest", "test_calc"], workspace="app", timeout_seconds=300)), final_checks=["unit"]),
     "result": dict(task="T01", summary="Multiplication handles positive, negative, and zero inputs.",
                    acceptance=[dict(criterion=1, evidence="test_calc.py:8; unit check PASS.")]),
+    "refine": dict(paths=["calc.py", "test_calc.py"], checks=dict(unit=dict(
+                   argv=["python3", "-B", "-m", "unittest", "test_calc"], workspace="app", reuse=True)),
+                   verification=dict(mode="red-green", check="unit", test_paths=["test_calc.py"],
+                                     reason="Reproduce the validated bug before changing production.")),
+    "test-update": dict(kind="mechanical", reason="Spell the permission literal in octal for lint.",
+                        evidence="Pinned test diff changes 0 to 0o0 only; values, cases and assertions are identical. Original red log retained."),
+    "repair": dict(id="F1", reason="Reproduced incorrect multiplication, required by criterion 1.", criteria=[1],
+                   paths=["calc.py", "test_mul_regression.py"], checks=dict(unit=dict(
+                       argv=["python3", "-B", "-m", "unittest", "discover"], workspace="app", reuse=True,
+                       inputs={"app": ["calc.py", "test_*.py", "pyproject.toml"]})),
+                   verification=dict(mode="red-green", check="unit", test_paths=["test_mul_regression.py"],
+                                     reason="Reproduce the wrong result before the production edit.")),
+    "repair-result": dict(summary="Multiplication fixed.", evidence="Retained failing checkpoint and current passing unit log; prior regressions remain green."),
+    "agent": dict(role="research", requirements=["R1"], question="Locate multiplication callers and their existing tests.",
+                  paths=["/absolute/path/to/app"], done_when="Return bounded caller/test evidence with paths and lines.",
+                  model="TERRA", reasoning="medium", model_reason="Bounded evidence extraction with simple acceptance."),
+    "agent-result": dict(accepted=True, summary="Callers and tests identified.", evidence=["calc.py:12; test_calc.py:8"],
+                         validation="Parent inspected the cited callers and reconciled all requested evidence."),
+    "usage": dict(id="main-session", source="Host session cumulative counters, exact session id and timestamp.",
+                  measurements=dict(input_tokens=1200, cached_input_tokens=600, output_tokens=100, tool_calls=12)),
+    "operation-result": dict(status="completed", evidence="Read-back confirms exact commit id or published artifact contents; operation was not replayed."),
     "review": dict(method="self", verdict="pass", summary="Verified all criteria, error paths, and test assertions against the diff.", findings=[],
                    requirements=[dict(id="R1", evidence="Original request and D1 criteria match; test_calc.py covers zero and negatives.")]),
     "closeout": [dict(id=1, classification="observation", reason="Unrelated finding; no requested criterion depends on it.")],
@@ -794,6 +975,15 @@ def parser():
     item.add_argument("--path", action="append", required=True)
     item.add_argument("--deliverable", required=True)
     item.add_argument("--reason", required=True)
+    for name in ("show", "refine", "test-update"):
+        item = commands.add_parser(name)
+        item.add_argument("task")
+        if name != "show":
+            item.add_argument("--file", required=True)
+        if name == "refine":
+            item.add_argument("--reason", required=True)
+        if name == "test-update":
+            item.add_argument("--repair")
     item = commands.add_parser("note")
     item.add_argument("text")
     for name in ("review", "closeout"):
@@ -801,17 +991,23 @@ def parser():
         item.add_argument("--file", required=True)
         if name == "closeout":
             item.add_argument("--answer")
+    import tracking
+    tracking.add_parsers(commands)
     return result
 
 
 def main(argv=None):
+    invoked_at = time.monotonic()
     args = parser().parse_args(argv)
     try:
         if args.command == "schema":
             print(json.dumps(SCHEMAS[args.name], indent=2))
             return 0
         if args.command == "init":
-            print(initialize(args))
+            output = initialize(args)
+            import tracking
+            tracking.record_call(Workflow(args.created_workflow), "init", time.monotonic() - invoked_at, True)
+            print(output)
             return 0
         need(args.workflow, "use -w with the workflow directory")
         for key in ("answer", "reason", "question", "note"):
@@ -821,14 +1017,29 @@ def main(argv=None):
         if args.command == "status":
             print(json.dumps(wf.state, indent=2) if args.json else status(wf))
             return 0
-        # Serialize bookkeeping, including checks. Agents never mutate state.
+        if args.command == "show":
+            print(execute(wf, args))
+            return 0
+        import tracking
+        if args.command in tracking.READ_ONLY:
+            print(tracking.execute(wf, args, sys.modules[__name__]))
+            return 0
+        # Serialize state transitions; check workers release this lock during execution.
         with (wf.meta / "lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             wf = Workflow(args.workflow)
+            wf.lock = lock
             if args.command == "hault":
                 args.command = "halt"
-            output = execute(wf, args)
-            wf.save()
+            try:
+                output = execute(wf, args)
+                wf.save()
+            except BaseException:
+                tracking.record_call(wf, args.command, time.monotonic() - invoked_at, False)
+                raise
+            tracking.record_call(wf, args.command, time.monotonic() - invoked_at, True)
+            if args.command == "final":
+                write(wf.root / "metrics.json", tracking.metrics(wf))
         print(output)
         return 0
     except (Gate, OSError, ValueError) as exc:

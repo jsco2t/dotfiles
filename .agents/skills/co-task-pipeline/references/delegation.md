@@ -26,6 +26,18 @@ review. Select the model using the routing policy below, respecting explicit ope
 Use a fresh context containing only the brief and necessary artifacts when the runtime permits;
 do not copy the entire conversation into every agent by habit.
 
+Give each new assignment a `unit` (one coherent component/review cycle or research question)
+and `context: fresh|continue`. Start a **fresh** reviewer at a component boundary. Within the
+same unit, `context: continue` plus `continues: <prior-assignment-id>` can reuse the reviewer
+for bounded repair inspection; carry only unresolved findings and useful coverage forward.
+Reset even within a unit when accumulated irrelevant context or repeated reads outweigh reuse.
+Save the handoff before resetting; preserve coverage without repeating a full review.
+Reconsider model/effort and record a specific rationale for every assignment. A tiny ordinary
+delta does not inherit the model choice of the original broad/security review automatically.
+Changing model/effort requires a fresh host thread; follow-ups inherit that thread's settings.
+The helper checks declared lifecycle and attached identities; it cannot reset host context.
+Older assignments without lifecycle fields remain compatible.
+
 Never delegate implementation by default, create one agent per task, or spawn nested agents.
 If the operator explicitly requests parallel implementation, present a revised plan with
 disjoint write ownership and integration checks and ask to change this workflow before using
@@ -93,16 +105,27 @@ actual runs.
 Use `tp schema agent` for a brief. It names approved requirement IDs, role, absolute starting
 paths inside approved workspaces, one bounded question, stopping condition, `model: SOL|TERRA`,
 `reasoning: medium|high`, and the core thread's `model_reason`.
+Set `task` when execution has an owning task. Optional `inputs` uses the check-input map
+format to declare the complete reviewed source, tests, shared configuration and transitive
+dependencies. Include patterns for newly created source as well as current files. Only these
+inputs determine source freshness; unrelated edits preserve the review. Omission retains
+conservative whole-workspace freshness. Starting `paths` are navigation hints, not a substitute
+for complete dependencies. Name meaningful ignored dependencies with literal input paths.
 
 1. `tp agent reserve --id A1 --capacity <total-usable-child-slots> --file <brief.json>` checks
    the approved cap (up to three), counts reserved/running/unknown children and emits a compact
    packet. Capacity excludes the parent and includes already-assigned children plus free slots.
-2. Spawn with that packet in a fresh context, read-only role and no children. Then
+2. For `context: fresh`, spawn with that packet, read-only role and no children. For
+   `context: continue`, follow up with the recorded host agent in the same unit. Then
    `tp agent attach --id A1 --agent-id <actual-id>`; add `--actual-model` and
    `--actual-reasoning` only when reported by the host.
+   If complete essential context needs a justified larger budget, `agent reserve` accepts
+   `--max-bytes`, just like `packet`; never drop constraints to fit the default limit.
 3. Read and validate the returned source evidence, then `tp agent finish --id A1 --file
    <result.json>`. Result needs `accepted`, summary, evidence list and parent `validation`.
-   Changed source invalidates automatic acceptance; review current affected artifacts first.
+   Changes to declared source inputs invalidate automatic acceptance; review current affected
+   artifacts first. Unrelated operator edits still need separate adoption authority before
+   implementation can continue, even when they do not invalidate this review's coverage.
 4. Interrupt using host controls on halt, then `tp agent cancel --id A1 --evidence <actual-status>`.
    A missing handoff is unresolved, not a reason to respawn repeatedly. Settle all assignments
    before final delivery. The helper records authority and provenance; it never launches agents.

@@ -8,7 +8,7 @@ import checks
 from snapshot import digest
 
 READ_ONLY = {"metrics", "packet"}
-COMMANDS = READ_ONLY | {"activity", "usage", "agent", "operation", "recover", "repair"}
+COMMANDS = READ_ONLY | {"activity", "usage", "agent", "operation", "recover", "repair", "cancel-check"}
 CATEGORIES = ("research", "implementation", "verification", "bookkeeping", "waiting")
 MODELS = {"SOL": "gpt-6.1-sol", "TERRA": "gpt-6.1-terra"}
 
@@ -89,7 +89,7 @@ def metrics(wf):
                 limits="Saved progress is not a fresh artifact audit. Helper/check/agent durations overlap activity spans; do not add them. Tokens/tool totals are imported, missing means unmeasured.")
 
 
-def packet(wf, task_id=None, agent_id=None, limit=16000):
+def packet(wf, task_id=None, agent_id=None, limit=16000, section="context", offset=0, count=10):
     state = wf.state
     scope = state.get("scope")
     if scope is None:
@@ -103,19 +103,45 @@ def packet(wf, task_id=None, agent_id=None, limit=16000):
     wanted = set(task.get("requirements", [])) if task else set((agent or {}).get("requirements", []))
     requirements = [r for r in scope.get("requirements", []) if not wanted or r["id"] in wanted]
     entry = state["tasks"].get(task_id, {})
+    sections = {
+        "checks": [dict(name=name, definition=state["plan"]["checks"][name], result=state["checks"].get(name))
+                   for name in (task or {}).get("checks", [])],
+        "repairs": [{k: v for k, v in r.items() if k != "before"} for r in entry.get("repairs", [])],
+        "decisions": [{k: e[k] for k in ("at", "action", "answer", "reason", "by", "evidence", "changes") if k in e}
+                      for e in state["history"] if e["action"] in ("scope-confirm", "approve", "amend", "answer", "test-superseded")],
+        "evidence": [e for e in state.get("evidence_history", []) if not task_id or e["task"] == task_id],
+    }
+    if limit <= 0 or offset < 0 or count <= 0:
+        raise ValueError("packet limit/count must be positive and offset nonnegative")
+    if section != "context":
+        items = sections[section]
+        end = min(len(items), offset + count)
+        if offset > len(items):
+            raise ValueError("packet offset exceeds section length")
+        while True:
+            page = dict(workflow=str(wf.root), task=task_id, section=section, offset=offset, total=len(items),
+                        items=items[offset:end], next_offset=end if end < len(items) else None)
+            encoded = json.dumps(page, indent=2)
+            if len(encoded.encode()) <= limit:
+                return encoded
+            if end <= offset + 1:
+                raise ValueError("essential packet item exceeds byte limit; use a justified larger --max-bytes")
+            end -= 1
     result = dict(workflow=str(wf.root), phase=state["phase"], request_file=str(wf.root / "request.md"),
                   scope_file=str(wf.root / "scope.json"), plan_file=str(wf.root / "plan.json"),
                   research_file=str(wf.root / "research.md"), requirements=requirements,
                   constraints=scope["constraints"], non_goals=scope["non_goals"], workspaces=scope["workspaces"],
                   task=task, status=entry.get("status"), pending_question=state.get("question"),
-                  repairs=[dict(id=r["id"], status=r["status"], reason=r["reason"],
-                                test_log=r.get("test_checkpoint", {}).get("log")) for r in entry.get("repairs", [])],
-                  checks={name: state["checks"].get(name) for name in (task or {}).get("checks", [])},
+                  active_repairs=[dict(id=r["id"], status=r["status"], reason=r["reason"],
+                                       test_log=r.get("test_checkpoint", {}).get("log"))
+                                  for r in entry.get("repairs", []) if r["status"] == "running"],
+                  details={name: dict(total=len(items), section=name, offset=0,
+                                     command="packet" + (" " + task_id if task_id else "") + " --section " + name + " --offset 0")
+                           for name, items in sections.items()},
                   operations=[{k: v for k, v in op.items() if k not in ("before", "contract")}
                               for op in state.get("operations", {}).values() if op["status"] in ("running", "unknown")],
                   agent=agent,
-                  decisions=[{k: e[k] for k in ("at", "action", "answer", "reason", "by", "evidence") if k in e}
-                             for e in state["history"] if e["action"] in ("scope-confirm", "approve", "amend", "answer")],
+                  evidence_file=str(wf.root / ".tp" / "state.json"),
                   instruction="Read linked authority when needed; no child agents or external mutations in delegated roles. Preserve existing work and prior regressions.")
     encoded = json.dumps(result, indent=2)
     if len(encoded.encode()) > limit:
@@ -128,7 +154,9 @@ def execute(wf, args, api):
     if args.command == "metrics":
         return json.dumps(metrics(wf), indent=2)
     if args.command == "packet":
-        return packet(wf, args.task, args.agent, args.max_bytes)
+        return packet(wf, args.task, args.agent, args.max_bytes, args.section, args.offset, args.count)
+    if args.command == "cancel-check":
+        return checks.cancel_one(wf, args.id, args.reason)
     if args.command == "recover":
         recovered = checks.recover(wf)
         wf.event("recover", operations=recovered)
@@ -186,19 +214,38 @@ def execute(wf, args, api):
             requested = brief.get("requirements", [])
             api.need(api.strings(requested) and set(requested) <= {r["id"] for r in scope.get("requirements", [])},
                      "agent work must serve named approved requirements")
+            if "inputs" in brief:
+                api.validate_inputs(brief["inputs"], {w["name"]: w for w in scope["workspaces"]}, "agent")
+            if "context" in brief:
+                api.need(brief["context"] in ("fresh", "continue") and api.text(brief.get("unit")),
+                         "agent context needs fresh|continue and a coherent unit")
+                if brief["context"] == "continue":
+                    previous = agents.get(brief.get("continues"), {})
+                    api.need(previous.get("status") == "done" and previous.get("agent_id")
+                             and previous.get("unit") == brief["unit"] and previous.get("task") == brief.get("task")
+                             and previous.get("model") == brief["model"] and previous.get("reasoning") == brief["reasoning"],
+                             "continued context requires a completed assignment in the same unit/task and model/effort; otherwise use fresh")
+                else:
+                    api.need(not brief.get("continues"), "fresh context cannot continue another assignment")
             allowance = min(scope.get("max_agents", 0), args.capacity)
             api.need(sum(a["status"] in ("reserved", "running", "unknown") for a in agents.values()) < allowance,
                      "agent allowance/runtime capacity exhausted; do not spawn or nest")
             api.need(not brief.get("task") or brief["task"] in state["tasks"], "unknown agent task")
-            snapshot = wf.snapshot(scope, state.get("plan") or {"tasks": []})
-            agents[args.id] = dict(brief, id=args.id, status="reserved", started=api.now(), source=digest(snapshot),
+            snapshot = wf.snapshot(scope, state.get("plan") or {"tasks": []}, brief.get("inputs"))
+            source = checks.fingerprint(snapshot, {"inputs": brief["inputs"]}) if "inputs" in brief else digest(snapshot)
+            agents[args.id] = dict(brief, id=args.id, status="reserved", started=api.now(), source=source,
                                   requested_model=MODELS[brief["model"]], actual_model=None, actual_reasoning=None, no_children=True)
             wf.event("agent-reserve", id=args.id, model=brief["model"], reason=brief["model_reason"], requirements=requested)
-            return packet(wf, brief.get("task"), args.id)
+            return packet(wf, brief.get("task"), args.id, args.max_bytes)
         agent = agents.get(args.id)
         api.need(agent is not None, "unknown agent assignment")
         if args.action == "attach":
             api.need(agent["status"] == "reserved" and api.text(args.agent_id), "attach actual identity to a reserved assignment")
+            if agent.get("context") == "fresh":
+                api.need(not any(a.get("agent_id") == args.agent_id for a in agents.values()),
+                         "fresh context requires a new host agent identity")
+            elif agent.get("context") == "continue":
+                api.need(args.agent_id == agents[agent["continues"]]["agent_id"], "continue must attach the same host agent identity")
             agent.update(status="running", agent_id=args.agent_id, actual_model=args.actual_model, actual_reasoning=args.actual_reasoning)
         elif args.action == "finish":
             api.need(agent["status"] == "running", "only a running agent can finish")
@@ -208,7 +255,8 @@ def execute(wf, args, api):
                      and api.text(result.get("summary")) and api.text(result.get("validation"))
                      and api.strings(result.get("evidence")), "agent result needs accepted, summary, evidence and parent validation")
             scope = state["scope"]
-            current = digest(wf.snapshot(scope, state.get("plan") or {"tasks": []}))
+            snapshot = wf.snapshot(scope, state.get("plan") or {"tasks": []}, agent.get("inputs"))
+            current = checks.fingerprint(snapshot, {"inputs": agent["inputs"]}) if "inputs" in agent else digest(snapshot)
             api.need(not result["accepted"] or current == agent["source"], "review source changed; validate/review affected changes before accepting")
             agent.update(result, status="done", ended=api.now())
         else:
@@ -256,6 +304,12 @@ def add_parsers(commands):
     item.add_argument("task", nargs="?")
     item.add_argument("--agent")
     item.add_argument("--max-bytes", type=int, default=16000)
+    item.add_argument("--section", choices=("context", "checks", "repairs", "decisions", "evidence"), default="context")
+    item.add_argument("--offset", type=int, default=0)
+    item.add_argument("--count", type=int, default=10)
+    item = commands.add_parser("cancel-check")
+    item.add_argument("--id", required=True)
+    item.add_argument("--reason", required=True)
     item = commands.add_parser("usage")
     item.add_argument("--file", required=True)
     item = commands.add_parser("activity")
@@ -275,6 +329,7 @@ def add_parsers(commands):
             child.add_argument("--file", required=True)
         if action == "reserve":
             child.add_argument("--capacity", type=int, required=True, help="total usable child capacity: assigned children plus free slots, excluding parent")
+            child.add_argument("--max-bytes", type=int, default=16000, help="justified budget for the complete essential context packet")
         if action == "attach":
             child.add_argument("--agent-id", required=True)
             child.add_argument("--actual-model")

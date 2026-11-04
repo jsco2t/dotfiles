@@ -170,7 +170,8 @@ an approved test-first strategy. Use one coherent regression batch per adaptive 
 
 Refine a pending/running task before editing the added files. The helper rejects unexpected
 edits and newly exposed ignored contents, captures original file baselines, preserves the
-running checkpoint/partial work, and invalidates checks/final review. It records manager
+running checkpoint/partial work, retains checks whose definitions and inputs remain current,
+and invalidates final review. It records manager
 provenance without an invented operator answer. If only paths are needed, `widen` remains
 available on nonadaptive tasks too. Helper validation cannot decide whether prose justification
 is truthful; the manager must keep every refinement within the approved outcomes.
@@ -214,15 +215,22 @@ commands, test strategy, workspace roots, or adopt unexpected edits. Honor const
 non-goals independently. Widen before editing the extra files; existing drift and previously
 untracked contents in ignored trees require inspection and an approved amendment. Reopen
 completed work first, and finish any other running task. The helper preserves original
-baselines, captures newly planned originals, keeps test pins/partial work, invalidates all
-check/review records, and records a manager decision. No heuristic proves the reason true.
+baselines, captures newly planned originals, keeps test pins/partial work, retains check records
+whose command and inputs remain current, invalidates final review, and records a manager
+decision. No heuristic proves the reason true.
 
 For a changed contract, prepare new draft files, validate their implications, show the exact
 changes, and ask before `amend`. Either draft flag
 may be omitted to retain its approved value; during planning there may be no plan yet.
 Amendment decisions and old/new contracts remain in history. Changed tasks and their dependents
-reopen; changed scope reopens all tasks. Partial edits remain for inspection. Final check/review
-records invalidate. An amendment may explicitly adopt concurrent edits; never use a made-up
+reopen; changed scope reopens all tasks conservatively. Partial edits remain for inspection.
+Unchanged current check results survive; changed commands/inputs and final review invalidate.
+Task/repair checkpoints, correction history and completed repair results remain attached across
+reopening. Prior attempts and removed tasks are archived separately in `.tp/state.json` under
+`evidence_history`, including original contracts and red/pin copies/log links. Restart an affected
+pending task with `start`; a pinned running repair resumes from the adopted checkpoint without
+manufacturing another red. Earlier pins are checked across task boundaries and at final review.
+An amendment may explicitly adopt concurrent edits; never use a made-up
 answer to reset a failing checkpoint. Adopted edits are named in the decision history, and
 completed tasks owning those files reopen for verification.
 When moving a workspace to a different root, give it a new workspace name and update task/check
@@ -230,8 +238,18 @@ references in the draft; names retain their root identity so original file evide
 
 `reopen` repairs in-scope work and reopens completed dependents without changing the contract.
 On a test-first repair, add the regression test before changing production code, then checkpoint
-it with the same planned test strategy. If existing partial production changes make that
-impossible, inspect them and ask about a corrected plan rather than bypassing the gate.
+it with the planned strategy. On an adaptive reopened task, use a new repair ID and regression
+file while retaining prior repairs. If partial production changes make that impossible,
+inspect them and ask about a corrected plan rather than bypassing the gate.
+
+Replacing a pin requires concrete approval of the corrected test strategy and
+`amend --supersede-tests T01` (task pin) or `--supersede-tests T01:F1` (repair pin); repeat the
+flag for multiple pins. Original evidence is archived with the exact operator answer.
+A superseded repair remains visible but no longer supplies valid verification; register its
+approved replacement with `replaces: ["F1"]` and complete it before claiming the task's criteria.
+An unrelated scope amendment cannot silently adopt changed pinned tests.
+Mechanical equivalent corrections still use `test-update`
+without another approval. Archive records are provenance, not a fresh pass.
 
 ## Review and completion
 

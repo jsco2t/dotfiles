@@ -531,7 +531,7 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("previously untracked", self.cli("widen", "T01", "--path", "dist/overview.md",
                       "--deliverable", "D1", "--reason", "Needed for overview.", expect=2))
 
-    def test_widen_keeps_pinned_tests_and_invalidates_check_results(self):
+    def test_widen_keeps_pinned_tests_and_current_check_results(self):
         self.approve(self.automated("characterization"))
         self.cli("start", "T01")
         (self.app / "test_calc.py").write_text("pinned behavior")
@@ -539,7 +539,7 @@ class PipelineTest(unittest.TestCase):
         checkpoint = self.state()["tasks"]["T01"]["test_checkpoint"]
         self.cli("widen", "T01", "--path", "helper.py", "--deliverable", "D1", "--reason", "Implementation dependency.")
         self.assertEqual(self.state()["tasks"]["T01"]["test_checkpoint"], checkpoint)
-        self.assertEqual(self.state()["checks"], {})
+        self.assertEqual(self.state()["checks"]["unit"]["log"], checkpoint["log"])
         (self.app / "test_calc.py").write_text("weaker assertions")
         self.cli("check", "unit")
         self.assertIn("pinned tests changed", self.cli("done", "T01", "--result-file", self.result(), expect=2))
@@ -740,7 +740,7 @@ class PipelineTest(unittest.TestCase):
         self.cli("refine", "T01", "--file", self.put("extra-path.json", dict(paths=["helper.py"])),
                  "--reason", "The existing behavior needs a helper.")
         self.assertEqual(self.state()["tasks"]["T01"]["test_checkpoint"], pin)
-        self.assertEqual(self.state()["checks"], {})
+        self.assertEqual(self.state()["checks"]["unit"]["log"], pin["log"])
 
     def test_mechanical_test_update_preserves_original_pin_and_requires_current_green(self):
         plan = self.automated("characterization")

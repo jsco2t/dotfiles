@@ -94,6 +94,16 @@ class EvaluationTest(unittest.TestCase):
             again = EVAL.prepare(self.base / (scenario + "-again"), scenario)
             self.assertEqual(EVAL.read(again["oracle"])["fixture_id"], expected)
 
+    def test_recovery_cycle_stages_operator_edit_only_at_saved_checkpoint_without_approval(self):
+        self.prepare("recovery-cycle")
+        self.approve()
+        with self.assertRaisesRegex(ValueError, "halted"):
+            EVAL.stage_recovery(self.oracle)
+        self.cli("halt", "--reason", "Not yet the required repair checkpoint.")
+        with self.assertRaisesRegex(ValueError, "repair"):
+            EVAL.stage_recovery(self.oracle)
+        self.assertFalse((self.workspace / "operator-update.txt").exists())
+
     def test_complete_scripted_run_passes_but_is_not_claimed_as_actual_agent(self):
         report = self.clean_run()
         self.assertTrue(report["quality_pass"], report["failures"])
@@ -197,7 +207,18 @@ class EvaluationTest(unittest.TestCase):
         self.assertIn("expected three recorded incremental repair steps", report["failures"])
 
     def test_complete_incremental_repairs_have_independent_red_green_evidence(self):
-        self.prepare("multi-repair")
+        self.run_incremental_repairs("multi-repair")
+
+    def test_combined_recovery_delivers_all_repairs_and_grader_rejects_lost_archive(self):
+        self.run_incremental_repairs("recovery-cycle")
+        state_path = self.workflow / ".tp/state.json"
+        state = EVAL.read(state_path)
+        state["evidence_history"] = []
+        EVAL.write(state_path, state)
+        self.assertIn("amendment lost the original active repair checkpoint", EVAL.grade(self.oracle)["failures"])
+
+    def run_incremental_repairs(self, scenario):
+        self.prepare(scenario)
         self.approve()
         fixes = [
             ("clamp", "self.assertEqual(clamp(-2, 0, 4), 0)", "min(value, high)", "min(max(value, low), high)"),
@@ -218,6 +239,17 @@ class EvaluationTest(unittest.TestCase):
                 "import unittest\nfrom app import clamp, page, parse_flag\n\n"
                 "class Regression(unittest.TestCase):\n    def test_defect(self):\n        " + assertion + "\n")
             self.cli("repair", "test", "T01", "--id", rid, "--stage", "red", "--note", "New assertion reproduces " + name)
+            if scenario == "recovery-cycle" and index == 0:
+                pin = EVAL.read(self.workflow / ".tp/state.json")["tasks"]["T01"]["repairs"][0]["test_checkpoint"]
+                self.cli("halt", "--reason", "Fixture operator requested the first repair checkpoint.")
+                EVAL.stage_recovery(self.oracle)
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    EVAL.stage_recovery(self.oracle)
+                self.cli("resume", "--answer", self.expected["resume_authority"])
+                self.cli("amend", "--scope-file", str(self.workflow / "scope-amendment.json"),
+                         "--answer", self.expected["resume_authority"])
+                self.cli("start", "T01")
+                self.assertEqual(EVAL.read(self.workflow / ".tp/state.json")["tasks"]["T01"]["repairs"][0]["test_checkpoint"], pin)
             app = self.workspace / "app.py"
             app.write_text(app.read_text().replace(before, after))
             self.cli("check", "unit")

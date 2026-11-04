@@ -299,6 +299,255 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(before, {str(p): p.stat().st_mtime_ns for p in self.wf.rglob("*")})
         self.assertIn("essential packet", self.cli("packet", "T01", "--max-bytes", "10", expect=2))
 
+    def test_amendment_and_reopen_preserve_repairs_and_enforce_prior_pins(self):
+        self.begin_adaptive()
+        self.cli("repair", "start", "T01", "--file", self.put("r1.json", self.repair_spec("F1", "test_inc.py")))
+        (self.app / "test_inc.py").write_text("import unittest\nfrom app import inc\nclass Test(unittest.TestCase):\n def test_inc(self): self.assertEqual(inc(3),4)\n")
+        self.cli("repair", "test", "T01", "--id", "F1", "--stage", "red", "--note", "inc(3) returned 3.")
+        (self.app / "app.py").write_text("def inc(x): return x+1\ndef double(x): return x\n")
+        self.finish_repair("F1")
+        original = self.state()["tasks"]["T01"]["repairs"][0]
+        scope = self.state()["scope"]
+        scope["constraints"].append("Preserve the confirmed arithmetic behavior.")
+        self.cli("amend", "--scope-file", self.put("changed-scope.json", scope), "--answer", "Approve this additional constraint.")
+        self.assertEqual(self.state()["tasks"]["T01"]["repairs"][0], original)
+        self.cli("start", "T01")
+        self.cli("check", "unit")
+        self.cli("done", "T01", "--result-file", self.result())
+        self.cli("reopen", "T01", "--reason", "Inspect an in-scope follow-through.")
+        self.assertEqual(self.state()["tasks"]["T01"]["repairs"][0], original)
+        self.assertTrue(self.state()["evidence_history"])
+        self.cli("start", "T01")
+        (self.app / "test_inc.py").write_text("import unittest\nclass Test(unittest.TestCase):\n def test_weakened(self): self.assertTrue(True)\n")
+        self.cli("check", "unit")
+        self.assertIn("pinned tests changed", self.cli("done", "T01", "--result-file", self.result(), expect=2))
+
+    def test_running_pinned_repair_continues_after_unrelated_adoption(self):
+        self.begin_adaptive()
+        self.cli("repair", "start", "T01", "--file", self.put("r1.json", self.repair_spec("F1", "test_inc.py")))
+        (self.app / "test_inc.py").write_text("import unittest\nfrom app import inc\nclass Test(unittest.TestCase):\n def test_inc(self): self.assertEqual(inc(3),4)\n")
+        self.cli("repair", "test", "T01", "--id", "F1", "--stage", "red", "--note", "inc(3) returned 3.")
+        pin = self.state()["tasks"]["T01"]["repairs"][0]["test_checkpoint"]
+        (self.app / "app.py").write_text("def inc(x): return x+1\ndef double(x): return x\n")
+        (self.app / "operator.md").write_text("Unrelated operator edit.")
+        self.cli("amend", "--answer", "Adopt my operator.md edit; preserve the running repair.")
+        self.cli("start", "T01")
+        self.assertEqual(self.state()["tasks"]["T01"]["repairs"][0]["test_checkpoint"], pin)
+        self.finish_repair("F1")
+        self.cli("done", "T01", "--result-file", self.result())
+
+    def test_amendment_cannot_implicitly_replace_pins_and_explicit_supersession_archives_them(self):
+        plan = self.automated("characterization")
+        self.approve(plan)
+        self.cli("start", "T01")
+        (self.app / "test_calc.py").write_text("original assertions")
+        self.cli("test", "T01", "--stage", "pin", "--note", "Original behavior.")
+        original = self.state()["tasks"]["T01"]["test_checkpoint"]
+        (self.app / "test_calc.py").write_text("corrected strategy needs explicit approval")
+        self.assertIn("pinned tests changed", self.cli("amend", "--answer", "Approve unrelated documentation.", expect=2))
+        self.cli("amend", "--supersede-tests", "T01", "--answer", "Approve this exact corrected test strategy and its replacement checkpoint.")
+        history = self.state()["evidence_history"]
+        self.assertEqual(history[0]["entry"]["test_checkpoint"], original)
+        self.assertTrue((self.wf / original["log"]).is_file())
+        self.cli("start", "T01")
+        self.cli("done", "T01", "--result-file", self.result(), expect=2)
+        self.cli("test", "T01", "--stage", "pin", "--note", "Approved corrected strategy.")
+        self.cli("done", "T01", "--result-file", self.result())
+
+    def test_superseded_repair_requires_a_tested_replacement_before_delivery(self):
+        self.begin_adaptive()
+        spec = self.repair_spec("F1", "test_inc.py")
+        self.cli("repair", "start", "T01", "--file", self.put("original.json", spec))
+        (self.app / "test_inc.py").write_text("import unittest\nfrom app import inc\nclass Test(unittest.TestCase):\n def test_inc(self): self.assertEqual(inc(3),4)\n")
+        self.cli("repair", "test", "T01", "--id", "F1", "--stage", "red", "--note", "Original case fails.")
+        self.cli("amend", "--supersede-tests", "T01:F1", "--answer", "Approve replacing F1 with the explicit negative-input regression, retaining its criterion.")
+        self.cli("start", "T01")
+        (self.app / "app.py").write_text("def inc(x): return x+1\ndef double(x): return x\n")
+        self.cli("check", "unit")
+        self.assertIn("replacement", self.cli("done", "T01", "--result-file", self.result(), expect=2))
+        # Restore the unfixed source so the approved replacement gets a genuine red.
+        (self.app / "app.py").write_text("def inc(x): return x\ndef double(x): return x\n")
+        spec.update(id="F2", replaces=["F1"], paths=["app.py", "test_negative.py"])
+        spec["verification"]["test_paths"] = ["test_negative.py"]
+        self.cli("repair", "start", "T01", "--file", self.put("replacement.json", spec))
+        (self.app / "test_negative.py").write_text("import unittest\nfrom app import inc\nclass Test(unittest.TestCase):\n def test_inc(self): self.assertEqual(inc(-3),-2)\n")
+        self.cli("repair", "test", "T01", "--id", "F2", "--stage", "red", "--note", "Negative input reproduces the defect.")
+        (self.app / "app.py").write_text("def inc(x): return x+1\ndef double(x): return x\n")
+        self.finish_repair("F2")
+        self.cli("done", "T01", "--result-file", self.result())
+        self.review()
+        self.cli("final")
+        self.assertIn("explicitly superseded", (self.wf / "report.md").read_text())
+
+    def test_changed_verification_cannot_relabel_an_existing_characterization_as_red(self):
+        plan = self.automated("characterization")
+        self.approve(plan)
+        self.cli("start", "T01")
+        (self.app / "test_calc.py").write_text("original characterization")
+        self.cli("test", "T01", "--stage", "pin", "--note", "Original passing characterization.")
+        original = self.state()["tasks"]["T01"]["test_checkpoint"]
+        plan["tasks"][0]["verification"]["mode"] = "red-green"
+        self.assertIn("supersede-tests", self.cli("amend", "--plan-file", self.put("red-plan.json", plan),
+                      "--answer", "Approve the red-green replacement strategy.", expect=2))
+        self.assertEqual(self.state()["tasks"]["T01"]["test_checkpoint"], original)
+
+    def test_later_task_cannot_weaken_a_completed_tasks_regression(self):
+        plan = self.automated("characterization")
+        plan["tasks"].append(self.task("T02", "test_calc.py", ["T01"]))
+        self.approve(plan)
+        self.cli("start", "T01")
+        (self.app / "test_calc.py").write_text("original regression cases")
+        self.cli("test", "T01", "--stage", "pin", "--note", "Original behavior characterized.")
+        self.cli("done", "T01", "--result-file", self.result())
+        self.cli("start", "T02")
+        (self.app / "test_calc.py").write_text("accidentally removed earlier cases")
+        self.assertIn("pinned tests changed in T01", self.cli("done", "T02", "--result-file", self.result("T02"), expect=2))
+
+    def test_scoped_review_accepts_unrelated_edits_but_catches_dependencies_and_new_files(self):
+        self.confirm(self.agent_scope())
+        for name in ("source.py", "dependency.lock"):
+            (self.app / name).write_text("original")
+        brief = self.brief()
+        brief.update(role="review", inputs={"app": ["source.py", "dependency.lock", "new_*.py"]})
+        result = self.put("agent-result.json", dict(accepted=True, summary="Reviewed.", evidence=["source.py:1"],
+                                                  validation="Inspected the declared source and dependency inputs."))
+        for index, changed_path in enumerate(("operator.md", "dependency.lock", "new_source.py", "source.py")):
+            aid = "A" + str(index)
+            self.cli("agent", "reserve", "--id", aid, "--capacity", "1", "--file", self.put("brief.json", brief))
+            self.cli("agent", "attach", "--id", aid, "--agent-id", "runtime-" + aid)
+            (self.app / changed_path).write_text("changed " + aid)
+            if index == 0:
+                self.cli("agent", "finish", "--id", aid, "--file", result)
+            else:
+                self.assertIn("source changed", self.cli("agent", "finish", "--id", aid, "--file", result, expect=2))
+                self.cli("agent", "cancel", "--id", aid, "--evidence", "Review is stale; source changed.")
+        brief["inputs"] = {"app": ["../escape"]}
+        self.cli("agent", "reserve", "--id", "bad", "--capacity", "1", "--file", self.put("bad-brief.json", brief), expect=2)
+
+    def test_scoped_review_fingerprints_literal_ignored_dependencies(self):
+        (self.app / "target").mkdir()
+        dependency = self.app / "target/dependency.lock"
+        dependency.write_text("v1")
+        self.confirm(self.agent_scope())
+        brief = dict(self.brief(), inputs={"app": ["target/dependency.lock"]})
+        self.cli("agent", "reserve", "--id", "A1", "--capacity", "1", "--file", self.put("brief.json", brief))
+        self.cli("agent", "attach", "--id", "A1", "--agent-id", "fixture-review")
+        dependency.write_text("v2")
+        result = self.put("review-result.json", dict(accepted=True, summary="Claimed clean.", evidence=["dependency.lock:1"],
+                                                   validation="This stale evidence must not pass."))
+        self.assertIn("source changed", self.cli("agent", "finish", "--id", "A1", "--file", result, expect=2))
+
+    def test_fresh_unscoped_checks_survive_refinement_and_unchanged_amendment(self):
+        plan = self.measured_check("print('ok')")
+        plan["tasks"][0]["adaptive"] = True
+        self.approve(plan)
+        self.cli("start", "T01")
+        self.cli("check", "unit")
+        self.cli("refine", "T01", "--file", self.put("extra.json", dict(paths=["helper.py"])), "--reason", "Needed for the existing criterion.")
+        self.assertIn("reused", self.cli("check", "unit"))
+        self.cli("amend", "--answer", "Confirm the same contract and current work.")
+        self.assertIn("reused", self.cli("check", "unit"))
+        changed = self.state()["plan"]
+        changed["checks"]["unit"]["argv"][-1] = "print('different check')"
+        self.cli("amend", "--plan-file", self.put("changed-check.json", changed), "--answer", "Approve the changed check command.")
+        self.assertNotIn("reused", self.cli("check", "unit"))
+
+    def test_plan_warns_about_unscoped_reuse_without_changing_legacy_contract(self):
+        self.confirm()
+        plan = self.measured_check("print('ok')")
+        self.put("plan.json", plan)
+        self.assertIn("unit: reusable check has no scoped inputs", self.cli("plan", "check"))
+        self.assertEqual(json.loads((self.wf / "plan.json").read_text()), plan)
+
+    def test_explicit_reviewer_lifecycle_prevents_cross_component_context_reuse(self):
+        self.confirm(self.agent_scope())
+        first = dict(self.brief(), unit="storage", context="fresh")
+        self.cli("agent", "reserve", "--id", "A1", "--capacity", "1", "--file", self.put("brief1.json", first))
+        self.cli("agent", "attach", "--id", "A1", "--agent-id", "runtime-storage")
+        self.cli("agent", "finish", "--id", "A1", "--file", self.put("a1.json", dict(
+            accepted=True, summary="Storage inspected.", evidence=["storage.py:1"], validation="Parent verified source.")))
+        continued = dict(first, context="continue", continues="A1")
+        self.cli("agent", "reserve", "--id", "A2", "--capacity", "1", "--file", self.put("brief2.json", continued))
+        self.cli("agent", "attach", "--id", "A2", "--agent-id", "runtime-storage")
+        self.cli("agent", "cancel", "--id", "A2", "--evidence", "Finished bounded follow-through.")
+        other = dict(continued, unit="generation")
+        self.assertIn("same unit", self.cli("agent", "reserve", "--id", "A3", "--capacity", "1",
+                                           "--file", self.put("brief3.json", other), expect=2))
+        fresh = dict(first, unit="generation")
+        self.cli("agent", "reserve", "--id", "A4", "--capacity", "1", "--file", self.put("brief4.json", fresh))
+        self.assertIn("fresh context", self.cli("agent", "attach", "--id", "A4", "--agent-id", "runtime-storage", expect=2))
+        self.cli("agent", "attach", "--id", "A4", "--agent-id", "runtime-generation")
+
+    def test_cancel_single_check_preserves_task_and_allows_retry(self):
+        marker = self.base / "started"
+        script = "from pathlib import Path; import time; p=Path(" + repr(str(marker)) + "); existed=p.exists(); p.touch(); time.sleep(20 if not existed else 0)"
+        self.approve(self.measured_check(script))
+        self.cli("start", "T01")
+        process = self.helper_process("check", "unit")
+        try:
+            self.wait_for(marker.exists)
+            operation = next(iter(self.state()["operations"]))
+            self.cli("cancel-check", "--id", operation, "--reason", "Owned fixture is hung; repair and retry.")
+            process.communicate(timeout=5)
+            self.cli("recover")
+            self.assertEqual(process.returncode, 2)
+            self.assertEqual(self.state()["phase"], "EXECUTING")
+            self.assertEqual(self.state()["tasks"]["T01"]["status"], "running")
+            self.assertEqual(self.state()["checks"]["unit"]["exit_code"], 130)
+            self.cli("check", "unit")
+            self.cli("cancel-check", "--id", operation, "--reason", "Idempotent retry after receipt.")
+            self.cli("cancel-check", "--id", "unknown", "--reason", "Must not target an unknown process.", expect=2)
+        finally:
+            if process.poll() is None:
+                self.cli("halt", "--reason", "Fixture cleanup.")
+                process.communicate(timeout=5)
+
+    def test_cancellation_race_recovers_real_pass_and_cannot_cancel_external_effect(self):
+        marker = self.base / "ran"
+        script = "from pathlib import Path; import time; Path(" + repr(str(marker)) + ").touch(); time.sleep(0.5)"
+        self.approve(self.measured_check(script))
+        self.cli("start", "T01")
+        process = self.helper_process("check", "unit")
+        try:
+            self.wait_for(marker.exists)
+            process.kill()
+            process.communicate(timeout=3)
+            operation = next(iter(self.state()["operations"].values()))
+            self.wait_for((self.wf / operation["receipt"]).exists)
+            self.assertIn("already settled", self.cli("cancel-check", "--id", operation["id"], "--reason", "Late cancellation raced with completion."))
+            self.assertEqual(self.state()["checks"]["unit"]["exit_code"], 0)
+            self.assertIn("reused", self.cli("check", "unit"))
+            self.cli("operation", "begin", "--id", "C1", "--kind", "commit", "--task", "T01",
+                     "--intent", "Fixture receipt only; no actual commit.", "--authority", "Fixture authorization.")
+            self.assertIn("known check", self.cli("cancel-check", "--id", "C1", "--reason", "Must not cancel an external effect.", expect=2))
+            self.assertEqual(self.state()["operations"]["C1"]["status"], "running")
+        finally:
+            if process.poll() is None:
+                self.cli("halt", "--reason", "Fixture cleanup.")
+                process.communicate(timeout=5)
+
+    def test_growing_packet_keeps_authority_and_pages_every_check_without_writes(self):
+        plan = self.plan()
+        plan["checks"] = {"check" + str(i): dict(argv=[sys.executable, "-B", "-c", "#" * 1500], workspace="app") for i in range(24)}
+        plan["tasks"][0]["checks"] = list(plan["checks"])
+        scope = self.scope()
+        scope["constraints"] = ["Keep this complete essential constraint " + "!" * 3000]
+        self.approve(plan, scope)
+        before = {str(p): p.stat().st_mtime_ns for p in self.wf.rglob("*")}
+        packet = json.loads(self.cli("packet", "T01"))
+        self.assertEqual(packet["constraints"], scope["constraints"])
+        self.assertEqual(packet["task"], plan["tasks"][0])
+        self.assertEqual(packet["details"]["checks"]["total"], 24)
+        offset, found = 0, []
+        while offset is not None:
+            output = self.cli("packet", "T01", "--section", "checks", "--offset", str(offset), "--max-bytes", "4000")
+            self.assertLessEqual(len(output.strip().encode()), 4000)
+            page = json.loads(output)
+            found += [item["name"] for item in page["items"]]
+            offset = page["next_offset"]
+        self.assertEqual(found, list(plan["checks"]))
+        self.assertEqual(before, {str(p): p.stat().st_mtime_ns for p in self.wf.rglob("*")})
+
 
 if __name__ == "__main__":
     unittest.main()

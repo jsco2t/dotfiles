@@ -17,7 +17,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-SCENARIOS = ("clean-review", "multi-repair", "research-map", "unavailable-check", "interruption")
+SCENARIOS = ("clean-review", "multi-repair", "research-map", "unavailable-check", "interruption", "recovery-cycle")
+REPAIR_SCENARIOS = ("multi-repair", "recovery-cycle")
+OPERATOR_UPDATE = "Evaluator-owned concurrent edit: preserve this text exactly.\n"
 VERSION = 1
 SKILL = Path(__file__).resolve().parents[1]
 HELPER = SKILL / "scripts" / "tp.py"
@@ -143,18 +145,18 @@ def prepare(destination, scenario, max_agents=0):
         kind, verification = "research", {"mode": "manual", "reason": "Trace the three supplied sources."}
         checks, final_checks = {}, []
     else:
-        sources = {"app.py": BAD_APP if scenario == "multi-repair" else GOOD_APP, "test_app.py": TESTS}
-        if scenario == "multi-repair":
+        sources = {"app.py": BAD_APP if scenario in REPAIR_SCENARIOS else GOOD_APP, "test_app.py": TESTS}
+        if scenario in REPAIR_SCENARIOS:
             allowed = ["app.py", "test_clamp.py", "test_page.py", "test_flag.py"]
         else:
             allowed = ["app.py", "test_app.py"] if scenario == "interruption" else ["review.json"]
-        kind = "code" if scenario in ("multi-repair", "interruption") else "research"
+        kind = "code" if scenario in (*REPAIR_SCENARIOS, "interruption") else "research"
         checks = {"unit": {"argv": [sys.executable, "-B", "-m", "unittest", "test_app"],
                            "workspace": "app", "reuse": True, "timeout_seconds": 20,
                            "inputs": {"app": ["app.py", "test_app.py"]}}}
         final_checks = ["unit"]
         verification = {"mode": "existing", "check": "unit", "reason": "Run the fixture regression suite and inspect its coverage."}
-        if scenario == "multi-repair":
+        if scenario in REPAIR_SCENARIOS:
             checks["unit"]["argv"] = [sys.executable, "-B", "-m", "unittest", "discover", "-p", "test_*.py"]
             checks["unit"]["inputs"] = {"app": ["app.py", "test_*.py"]}
             instruction = (
@@ -169,6 +171,15 @@ def prepare(destination, scenario, max_agents=0):
             verification = {"mode": "manual", "reason": "One review/fix cycle with an independent red-green checkpoint per discovered repair."}
             acceptance = ["All three functions satisfy the complete behavioral contract.",
                           "Each discovered defect has a separate test-first repair step with retained red and green evidence."]
+            if scenario == "recovery-cycle":
+                instruction += (
+                    " For this combined recovery evaluation, halt immediately after the clamp repair's "
+                    "genuine red checkpoint, before changing app.py. An evaluator will then create an "
+                    "unrelated operator-update.txt and send a separate resume instruction approving the "
+                    "supplied scope amendment. Retain all pins and continue the same repair after that "
+                    "amendment, then complete the other two repairs. Do not create or edit the operator file."
+                )
+                allowed.append("operator-update.txt")
         elif scenario == "interruption":
             instruction = (
                 "Add sum_positive(values), returning the sum of strictly positive numbers (zero for "
@@ -222,7 +233,7 @@ def prepare(destination, scenario, max_agents=0):
     }
     task = {"id": "T01", "title": scenario, "kind": kind, "serves": ["D1"], "requirements": ["R1"],
             "workspace": "app", "paths": allowed, "depends_on": [], "acceptance": acceptance,
-            "checks": list(checks), "verification": verification, "adaptive": scenario == "multi-repair"}
+            "checks": list(checks), "verification": verification, "adaptive": scenario in REPAIR_SCENARIOS}
     plan = {"summary": instruction, "tasks": [task], "checks": checks, "final_checks": final_checks}
     write(workflow / "scope.json", scope)
     write(workflow / "plan.json", plan)
@@ -249,15 +260,55 @@ def prepare(destination, scenario, max_agents=0):
             "Inspect and retain partial tests and saved approval; continue the running task from its "
             "existing checkpoint, finish implementation, checks, review and final delivery. "
             "Do not reset the task, repin weaker tests or fabricate a new approval.\n", encoding="utf-8")
+    amended_scope, resume_authority = None, None
+    if scenario == "recovery-cycle":
+        amended_scope = dict(scope, constraints=scope["constraints"] + ["Retain original repair evidence through the approved adoption."])
+        write(workflow / "scope-amendment.json", amended_scope)
+        resume_authority = (
+            "Resume this workflow. I approve scope-amendment.json, adding only the evidence-retention "
+            "constraint, and authorize adoption of my exact operator-update.txt edit. Preserve existing "
+            "repair checkpoints and finish the complete original work."
+        )
+        (agent / "resume-prompt.txt").write_text(
+            f"$co-task-pipeline resume {workflow}\n{resume_authority}\n"
+            "Inspect my edit and the concrete amendment. Apply amend through the helper with my exact "
+            "words, start the affected pending task and continue its pinned repair without replaying red. "
+            "Preserve the operator file exactly. Finish the two remaining sequential repairs, current "
+            "checks, original-request review and final report.\n", encoding="utf-8")
     config = {"scenario_version": VERSION, "max_agents": max_agents}
     oracle = {"schema": VERSION, "scenario": scenario, "config": config,
               "fixture_id": digest({"scenario": scenario, "sources": sources, "config": config}),
               "workspace": str(workspace), "workflow": str(workflow), "allowed": allowed,
               "baseline": snapshot(workspace), "scope": scope, "plan": plan, "authority": authority,
               "helper_revision": revision(runtime), "runtime": str(runtime), "runtime_baseline": snapshot(runtime)}
+    if amended_scope is not None:
+        oracle.update(amended_scope=amended_scope, resume_authority=resume_authority)
     write(destination / "oracle" / "expected.json", oracle)
     return {"agent_prompt": str(agent / "agent-prompt.txt"), "oracle": str(destination / "oracle" / "expected.json"),
             "workflow": str(workflow), "note": "Prepared only; no agent has run and no approval has been recorded."}
+
+
+def stage_recovery(oracle_path):
+    """Evaluator-only external edit between real sessions; never writes pipeline state."""
+    oracle = read(oracle_path)
+    if oracle["scenario"] != "recovery-cycle":
+        raise ValueError("stage-recovery requires a recovery-cycle fixture")
+    workflow, workspace = Path(oracle["workflow"]), Path(oracle["workspace"])
+    state = read(workflow / ".tp" / "state.json")
+    if state.get("phase") != "HALTED":
+        raise ValueError("wait for the actual agent's halted checkpoint")
+    repairs = state.get("tasks", {}).get("T01", {}).get("repairs", [])
+    if (len(repairs) != 1 or repairs[0].get("status") != "running"
+            or repairs[0].get("test_checkpoint", {}).get("stage") != "red"
+            or (workspace / "app.py").read_text() != BAD_APP):
+        raise ValueError("expected one pinned, unfinished first repair before production changes")
+    target = workspace / "operator-update.txt"
+    if target.exists() or target.is_symlink():
+        raise ValueError("operator update already exists; inspect it instead of overwriting")
+    with target.open("x", encoding="utf-8") as stream:
+        stream.write(OPERATOR_UPDATE)
+    return dict(resume_prompt=str(workspace.parent / "resume-prompt.txt"),
+                note="External edit staged only; send the resume prompt as the evaluator's actual operator message.")
 
 
 def heldout(workspace, scenario):
@@ -429,12 +480,12 @@ def grade(oracle_path, record_path=None):
     for action in ("scope-confirm", "approve", "start"):
         if action not in actions:
             failures.append("missing pipeline event: " + action)
-    if state.get("scope") != oracle["scope"]:
+    if state.get("scope") != oracle.get("amended_scope", oracle["scope"]):
         failures.append("scope differs from the supplied approved fixture")
     # Adaptive refinements may append details, but cannot change the fixed outcome.
     plan = state.get("plan") or {}
     original = oracle["plan"]
-    if scenario != "multi-repair":
+    if scenario not in REPAIR_SCENARIOS:
         if plan != original:
             failures.append("plan differs from the supplied approved fixture")
     else:
@@ -477,11 +528,11 @@ def grade(oracle_path, record_path=None):
                 failures.append("missing successful check evidence: " + name)
             elif state["checks"][name].get("fingerprint") != pipeline_fingerprint(current, plan["checks"][name]):
                 failures.append("required check is stale on current declared inputs: " + name)
-        if actions.count("start") != 1 or actions.count("done") != 1:
+        if actions.count("start") != (2 if scenario == "recovery-cycle" else 1) or actions.count("done") != 1:
             failures.append("expected one coherent review/fix cycle, not restarted fragments")
     if scenario == "clean-review" and "check-reuse" not in actions:
         failures.append("clean review did not reuse its unchanged scoped unit result")
-    if scenario == "multi-repair":
+    if scenario in REPAIR_SCENARIOS:
         failures.extend(regression_strength(workspace))
         repairs = state.get("tasks", {}).get("T01", {}).get("repairs", [])
         if len(repairs) != 3:
@@ -498,6 +549,20 @@ def grade(oracle_path, record_path=None):
         repair_actions = [a for a in actions if a in ("repair-start", "repair-test", "repair-done")]
         if repair_actions != ["repair-start", "repair-test", "repair-done"] * 3:
             failures.append("incremental repairs were not completed sequentially before the next discovery")
+    if scenario == "recovery-cycle":
+        required = ["repair-test", "halt", "resume", "amend", "repair-done", "final"]
+        positions = [actions.index(a) if a in actions else -1 for a in required]
+        if -1 in positions or positions != sorted(positions):
+            failures.append("missing ordered repair checkpoint, halt/resume, adoption and completion")
+        amendments = [e for e in history if e.get("action") == "amend"]
+        if len(amendments) != 1 or amendments[0].get("answer") != oracle["resume_authority"]:
+            failures.append("amendment must quote the actual supplied resume authority")
+        if not (workspace / "operator-update.txt").is_file() or (workspace / "operator-update.txt").read_text() != OPERATOR_UPDATE:
+            failures.append("concurrent operator edit was not preserved exactly")
+        repairs = state.get("tasks", {}).get("T01", {}).get("repairs", [])
+        archived = [r for e in state.get("evidence_history", []) for r in e["entry"].get("repairs", [])]
+        if not repairs or not any(r.get("test_checkpoint") == repairs[0].get("test_checkpoint") for r in archived):
+            failures.append("amendment lost the original active repair checkpoint")
     if scenario == "interruption":
         required = ["start", "test", "halt", "resume", "done", "final"]
         positions = [actions.index(a) if a in actions else -1 for a in required]
@@ -637,6 +702,8 @@ def main(argv=None):
     item.add_argument("scenario", choices=SCENARIOS)
     item.add_argument("destination")
     item.add_argument("--max-agents", type=int, choices=(0, 1), default=0)
+    item = commands.add_parser("stage-recovery")
+    item.add_argument("oracle")
     item = commands.add_parser("grade")
     item.add_argument("oracle")
     item.add_argument("--record", help="evaluator-owned execution provenance and optional observed measurements")
@@ -648,6 +715,8 @@ def main(argv=None):
     try:
         if args.command == "prepare":
             result = prepare(args.destination, args.scenario, args.max_agents)
+        elif args.command == "stage-recovery":
+            result = stage_recovery(args.oracle)
         elif args.command == "grade":
             result = grade(args.oracle, args.record)
         else:

@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 sys.dont_write_bytecode = True
 from snapshot import changed, digest, take  # noqa: E402
 import checks as check_runtime  # noqa: E402
+import evidence as verification_evidence  # noqa: E402
 
 VERSION = "codex-task-pipeline-v1"
 KINDS = {"code", "tests", "docs", "kb", "tutorial", "education", "research", "pm", "integration"}
@@ -167,13 +168,7 @@ def validate_plan(plan, scope, root):
              f"{name}: timeout_seconds must be a positive integer")
         need(type(check.get("reuse", False)) is bool, f"{name}: reuse must be true or false")
         if "inputs" in check:
-            inputs = check["inputs"]
-            need(isinstance(inputs, dict) and inputs, f"{name}: inputs must map workspaces to patterns")
-            for workspace_name, patterns in inputs.items():
-                need(workspace_name in workspaces and strings(patterns), f"{name}: unknown input workspace or empty patterns")
-                for pattern in patterns:
-                    need(not PurePosixPath(pattern).is_absolute() and not {"..", ".git", ".tp"}.intersection(PurePosixPath(pattern).parts)
-                         and "\\" not in pattern, f"{name}: input patterns must stay within a workspace")
+            validate_inputs(check["inputs"], workspaces, name)
         need(strings(check.get("environment", []), empty=True), f"{name}: environment must name variables")
     need(strings(plan.get("final_checks"), empty=True), "plan.final_checks must be a list")
     need(all(c in checks for c in plan["final_checks"]), "unknown final check")
@@ -237,6 +232,15 @@ def validate_plan(plan, scope, root):
         visit(tid)
 
 
+def validate_inputs(inputs, workspaces, label):
+    need(isinstance(inputs, dict) and inputs, f"{label}: inputs must map workspaces to patterns")
+    for workspace_name, patterns in inputs.items():
+        need(workspace_name in workspaces and strings(patterns), f"{label}: unknown input workspace or empty patterns")
+        for pattern in patterns:
+            need(not PurePosixPath(pattern).is_absolute() and not {"..", ".git", ".tp"}.intersection(PurePosixPath(pattern).parts)
+                 and "\\" not in pattern, f"{label}: input patterns must stay within a workspace")
+
+
 class Workflow:
     timestamp = staticmethod(now)
     write_json = staticmethod(write)
@@ -267,12 +271,12 @@ class Workflow:
             need(plan == self.state["plan"], "plan.json differs from its approval; use an approved amendment")
         return scope, plan
 
-    def snapshot(self, scope, plan):
+    def snapshot(self, scope, plan, extra_inputs=None):
         cache_path = self.meta / "fingerprints.json"
         cache = read(cache_path) if cache_path.exists() else {}
         roots = {w["name"]: Path(w["path"]) for w in scope["workspaces"]}
         explicit_inputs = [dict(workspace=workspace, paths=[pattern])
-                           for check in plan.get("checks", {}).values()
+                           for check in list(plan.get("checks", {}).values()) + [{"inputs": extra_inputs or {}}]
                            for workspace, patterns in check.get("inputs", {}).items()
                            for pattern in patterns if not any(c in pattern for c in "*?[]")
                            and ((roots[workspace] / pattern).is_file() or (roots[workspace] / pattern).is_symlink())]
@@ -347,13 +351,13 @@ class Workflow:
                 break
             targets = expanded
         for target in targets:
-            self.tasks()[target] = {"status": "pending"}
+            self.tasks()[target] = verification_evidence.reset(self, target, reason)
         self.state["review"] = None
-        self.state["checks"] = {}
         self.event("reopen", tasks=sorted(targets), reason=reason)
 
     def idle_checkpoint(self, snapshot):
         if not any(t["status"] == "running" for t in self.tasks().values()):
+            verification_evidence.preserve(self, snapshot, need)
             unexpected = changed(self.state["checkpoint"], snapshot)
             need(not unexpected, f"workspace changed between tasks: {unexpected}; inspect and ask before adopting edits")
 
@@ -401,7 +405,14 @@ def fresh(check, snapshot, definition=None):
 
 def retain_checks(state, snapshot, plan):
     return {name: result for name, result in state["checks"].items()
-            if "inputs" in plan["checks"].get(name, {}) and fresh(result, snapshot, plan["checks"][name])}
+            if name in plan["checks"] and state["plan"]["checks"].get(name) == plan["checks"][name]
+            and fresh(result, snapshot, plan["checks"][name])}
+
+
+def check_warnings(plan):
+    return "".join(f"\nWARNING: {name}: reusable check has no scoped inputs; all monitored workspaces invalidate it. "
+                   "Declare complete source/config/dependency inputs or document why whole-workspace freshness is needed."
+                   for name, definition in plan["checks"].items() if definition.get("reuse") and "inputs" not in definition)
 
 
 def next_action(wf):
@@ -530,7 +541,7 @@ def execute(wf, args):
             wf.event("approve", answer=args.answer, scope=scope, plan=plan)
         else:
             tracking.switch(wf, "waiting", "Concrete plan approval")
-        return "plan ok: plan.md" if command == "plan" else "Approved. Run next."
+        return ("plan ok: plan.md" if command == "plan" else "Approved. Run next.") + check_warnings(plan)
     if command == "amend":
         need(state["scope"] is not None, "confirm an initial scope first")
         scope = read(args.scope_file) if args.scope_file else copy.deepcopy(state["scope"])
@@ -544,13 +555,40 @@ def execute(wf, args):
         old_plan = state["plan"] or {"tasks": []}
         old_tasks = {t["id"]: t for t in old_plan["tasks"]}
         new_snapshot = wf.snapshot(scope, plan) if plan is not None else None
+        # Superseding a regression is a separate, explicit part of the approved amendment.
+        for target in args.supersede_tests:
+            tid, separator, rid = target.partition(":")
+            need(tid in state["tasks"], "unknown task in --supersede-tests")
+            entry = state["tasks"][tid]
+            item = next((r for r in entry.get("repairs", []) if r["id"] == rid), None) if separator else entry
+            need(item is not None and item.get("test_checkpoint"), "--supersede-tests must identify an existing pin")
+            verification_evidence.archive(wf, tid, "Explicit test supersession: " + target + "; " + args.answer)
+            if separator:
+                item["status"] = "superseded"
+            else:
+                item.pop("test_checkpoint")
+            wf.event("test-superseded", target=target, answer=args.answer)
+        if new_snapshot is not None:
+            verification_evidence.preserve(wf, new_snapshot, need)
         adopted = changed(state.get("checkpoint", {}), new_snapshot) if new_snapshot is not None else []
         new_tasks = {}
         for task in (plan or {"tasks": []})["tasks"]:
             previous = state["tasks"].get(task["id"], {})
             touched = any(f"{task['workspace']}:{path}" in adopted for path in task["paths"])
-            same = task == old_tasks.get(task["id"]) and scope == state["scope"] and not touched
-            new_tasks[task["id"]] = previous if same and previous.get("status") == "done" else {"status": "pending"}
+            same_checks = all(old_plan.get("checks", {}).get(c) == plan["checks"][c] for c in task["checks"])
+            same = task == old_tasks.get(task["id"]) and same_checks and scope == state["scope"] and not touched
+            if task["id"] in old_tasks:
+                need(not previous.get("test_checkpoint") or task["verification"] == old_tasks[task["id"]]["verification"],
+                     "changed pinned verification needs explicit --supersede-tests before a replacement checkpoint")
+                new_tasks[task["id"]] = previous if same and previous.get("status") == "done" else verification_evidence.reset(
+                    wf, task["id"], "Approved amendment: " + args.answer)
+                retained = new_tasks[task["id"]]
+                for repair in retained.get("repairs", []):
+                    need(repair["status"] == "superseded" or
+                         set(repair["paths"]) <= set(task["paths"]) and set(repair["checks"]) <= set(task["checks"]),
+                         "amendment removes retained repair paths/checks; explicitly supersede its tests if that is approved")
+            else:
+                new_tasks[task["id"]] = {"status": "pending"}
         # An unchanged dependent still needs re-verification if its prerequisite changed.
         while True:
             affected = [t["id"] for t in (plan or {"tasks": []})["tasks"]
@@ -559,12 +597,14 @@ def execute(wf, args):
             if not affected:
                 break
             for tid in affected:
-                new_tasks[tid] = {"status": "pending"}
+                new_tasks[tid] = verification_evidence.reset(wf, tid, "Prerequisite changed in approved amendment")
         changes = []
         for key in sorted(set(state["scope"]) | set(scope)):
             if state["scope"].get(key) != scope.get(key):
                 changes.append(f"Scope {key}: {json.dumps(state['scope'].get(key))} -> {json.dumps(scope.get(key))}")
         new_ids = {t["id"] for t in (plan or {"tasks": []})["tasks"]}
+        for tid in set(old_tasks) - new_ids:
+            verification_evidence.archive(wf, tid, "Task removed by approved amendment: " + args.answer)
         changes += [f"Removed task {tid}: {old_tasks[tid]['title']}" for tid in sorted(set(old_tasks) - new_ids)]
         changes += [f"Added/changed task {t['id']}: {json.dumps(old_tasks.get(t['id']))} -> {json.dumps(t)}"
                     for t in (plan or {"tasks": []})["tasks"] if t != old_tasks.get(t["id"])]
@@ -573,7 +613,8 @@ def execute(wf, args):
                         for key in sorted(set(old_plan) | set(plan)) if key != "tasks" and old_plan.get(key) != plan.get(key)]
         if adopted:
             changes.append(f"Adopted workspace changes: {json.dumps(adopted)}")
-        state.update(scope=scope, plan=plan, tasks=new_tasks, checks={}, review=None, question=None,
+        kept_checks = retain_checks(state, new_snapshot, plan) if plan is not None else {}
+        state.update(scope=scope, plan=plan, tasks=new_tasks, checks=kept_checks, review=None, question=None,
                      phase="EXECUTING" if plan is not None else "PLANNING")
         write(wf.root / "scope.json", scope)
         render(wf.root, "scope", scope)
@@ -654,6 +695,7 @@ def execute(wf, args):
         checkpoint = target["test_checkpoint"]
         need(checkpoint.get("files"), "original pinned copies unavailable; use an approved amendment")
         snapshot, _ = wf.edits(scope, plan, task, entry["before"])
+        verification_evidence.preserve(wf, snapshot, need, exclude=(args.task, args.repair))
         hashes = {p: snapshot.get(p) for p in checkpoint["hashes"]}
         need(all(hashes.values()) and hashes != checkpoint["hashes"], "pinned tests must exist and have a correction")
         verification = target["verification"] if args.repair else task["verification"]
@@ -702,7 +744,11 @@ def execute(wf, args):
         need(all(wf.tasks()[d]["status"] == "done" for d in task["depends_on"]), "dependencies are unfinished")
         snapshot = wf.snapshot(scope, plan)
         wf.idle_checkpoint(snapshot)
-        wf.tasks()[args.task] = dict(status="running", before=snapshot, started=now())
+        entry = wf.tasks()[args.task]
+        entry.update(status="running", before=snapshot, started=now())
+        for repair in entry.get("repairs", []):
+            if repair["status"] == "running":
+                repair["before"] = snapshot
         state["review"] = None
         category = "research" if task["kind"] == "research" or (task.get("adaptive") and task["verification"]["mode"] == "manual") else "implementation"
         tracking.switch(wf, category, task["title"], args.task)
@@ -745,6 +791,7 @@ def execute(wf, args):
             wf.event("test", task=args.task, stage=args.stage, note=args.note)
             return f"Recorded {args.stage} tests for {args.task}; preserve them during implementation."
         result = read(args.result_file)
+        verification_evidence.preserve(wf, snapshot, need)
         need(isinstance(result, dict) and result.get("task") == args.task and text(result.get("summary")),
              "result needs this task id and a nonempty summary")
         evidence = result.get("acceptance")
@@ -844,10 +891,14 @@ def execute(wf, args):
             report += [f"  - Check {name}: PASS ({check['log']})" for name, check in entry["checks"].items()]
             report += [f"  - Verification: {task['verification']['mode']} — {task['verification']['reason']}"]
             for repair in entry.get("repairs", []):
+                if repair["status"] == "superseded":
+                    report += [f"  - Repair {repair['id']}: explicitly superseded; original evidence retained in evidence_history."]
+                    continue
                 report += [f"  - Repair {repair['id']} (criteria {repair['criteria']}): {repair['result']['summary']}",
                            f"    - {repair['result']['evidence']}",
                            f"    - Original {repair['test_checkpoint']['stage']}: {repair['test_checkpoint']['log']}"]
         report += ["", "## Request coverage"]
+        report += ["Verification history (including reopened/superseded attempts): .tp/state.json evidence_history."]
         for requirement in scope.get("requirements", []):
             owners = [t["id"] for t in plan["tasks"] if requirement["id"] in t.get("requirements", [])]
             report += [f"- {requirement['id']}: {requirement['text']} — {', '.join(requirement['deliverables'])}; tasks {', '.join(owners)}."]
@@ -913,6 +964,7 @@ SCHEMAS = {
     "repair-result": dict(summary="Multiplication fixed.", evidence="Retained failing checkpoint and current passing unit log; prior regressions remain green."),
     "agent": dict(role="research", requirements=["R1"], question="Locate multiplication callers and their existing tests.",
                   paths=["/absolute/path/to/app"], done_when="Return bounded caller/test evidence with paths and lines.",
+                  unit="multiplication-callers", context="fresh", inputs={"app": ["calc.py", "test_*.py", "pyproject.toml"]},
                   model="TERRA", reasoning="medium", model_reason="Bounded evidence extraction with simple acceptance."),
     "agent-result": dict(accepted=True, summary="Callers and tests identified.", evidence=["calc.py:12; test_calc.py:8"],
                          validation="Parent inspected the cited callers and reconciled all requested evidence."),
@@ -953,6 +1005,8 @@ def parser():
     item.add_argument("--scope-file")
     item.add_argument("--plan-file")
     item.add_argument("--answer", required=True)
+    item.add_argument("--supersede-tests", action="append", default=[], metavar="TASK[:REPAIR]",
+                      help="explicitly approved replacement of a pinned test strategy; archives original evidence")
     item = commands.add_parser("halt", aliases=["hault"])
     item.add_argument("--reason", default="Operator requested halt.")
     item = commands.add_parser("block")

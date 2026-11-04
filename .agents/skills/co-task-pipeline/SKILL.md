@@ -46,6 +46,10 @@ the default; this permission does not enable nested fanout or parallel implement
   serialize: parallel `tp check` processes do not accelerate checks. Avoid concurrent builds
   sharing mutable outputs. Use `show T01` for one task and plain `status` for progress;
   do not dump entire plans, state, or fingerprint maps into context by habit.
+- At plan approval, resolve warnings about reusable checks without scoped `inputs`: declare
+  complete source, runner, configuration, dependency and environment inputs, or explain why
+  whole-workspace freshness is necessary. Retain valid evidence through bookkeeping changes;
+  never narrow inputs simply to avoid a rerun.
 - After the first complete unit, compare actual review, repair, verification, and waiting
   costs with remaining units. If progress stalls or two updates repeat the same blocker,
   diagnose duplicate work, gates, environment, or an oversized unit and adjust execution.
@@ -186,6 +190,10 @@ Loop on `tp next` until completion or an operator decision is needed:
   Load `tp packet T01` instead of the entire history/plan. It contains outcomes, constraints,
   current checks, repair/operation status and authority links. Narrow an oversized assignment;
   do not drop material constraints to fit a context budget.
+  The context packet links paged `checks`, `repairs`, `decisions` and `evidence` sections.
+  Fetch relevant sections with `packet T01 --section repairs --offset 0`, following
+  `next_offset` until the needed evidence is covered. Full constraints and task authority
+  remain in the context packet; read linked decisions before dependent changes.
 - **Incremental repairs:** A running adaptive task can contain successive bounded steps:
   `tp repair start T01 --file <repair.json>`, add its regressions, `tp repair test T01 --id F1
   --stage red --note <observed-failure>`, implement, `tp check <name>`, then `tp repair done T01
@@ -218,11 +226,18 @@ Loop on `tp next` until completion or an operator decision is needed:
   on current contents. An opted-in `reuse` check skips an identical prior pass; use
   `tp check <name> --force` when environment or other untracked inputs changed. Test failures
   and unexpected drift remain unresolved work.
+- **Owned check recovery:** If a check hangs, inspect its operation/log and run
+  `tp cancel-check --id <check-operation-id> --reason <observed-problem>`, then `tp recover`.
+  Cancellation preserves the running task and approval. Inspect the interrupted receipt,
+  repair the in-scope cause, then retry only the missing check. Do not halt the whole workflow
+  for routine recovery or signal arbitrary processes. A dead worker still requires
+  reconciliation; cancellation is a request, never a fabricated failure/pass.
 - **Missing file for existing work:** Before editing it, run `tp widen T01 --path <file>
   --deliverable D1 --reason <why-existing-criteria-need-it>`. Add only concrete files in the
   task's existing writable workspace, honoring constraints and non-goals. Reopen a completed
   task first. This needs no extra approval; it preserves scope, criteria, test pins, and
-  partial work, records manager provenance, and invalidates checks/review. It cannot adopt
+  partial work, records manager provenance, retains current check evidence and invalidates
+  final review. It cannot adopt
   unexpected edits. A new outcome/workspace, a changed existing check command, a new check
   on a nonadaptive task, or a weaker criterion still needs an approved amendment.
 - **Unknown or changed contract:** Use `tp block --question <specific-question>`, ask the
@@ -233,6 +248,11 @@ Loop on `tp next` until completion or an operator decision is needed:
   actual operator clarification that leaves the contract unchanged. For changes, prepare
   draft scope/plan files, show their effects, obtain approval, then use `tp amend` as described
   in the helper reference. Never bypass `refine`/`widen`, weaken criteria, or adopt another actor's edits silently.
+  Amendments and reopening retain repair checkpoints, logs, results and prior attempts;
+  reuse that evidence instead of manufacturing replacement reds or manually editing state.
+  Replacing pinned tests requires an explicitly approved `amend --supersede-tests T01[:F1]`;
+  scope/adoption approval alone does not authorize dropping a regression. Original evidence
+  remains archived and a superseded repair must be replaced with the approved verification.
 - **Unrelated discovery:** Record `tp note <finding-and-consequence>`. Do not fix it in
   passing. If an acceptance criterion depends on it, resolve the dependency now rather
   than parking required work as a follow-up.

@@ -76,6 +76,11 @@ equivalence-only correction gate to a repair pin. It retains original copies and
 Every step must close before task done. Task completion checks every repair's final tests
 on final current contents, so a later repair cannot leave an earlier regression broken.
 Partial work, repair checkpoints, logs and original copies survive halt/resume.
+Amendments and reopening also retain these records; original attempts are archived in
+`evidence_history`. A repair whose tests were explicitly superseded remains visible with
+`status: superseded`. Its approved replacement spec adds `replaces: ["F1"]`, covers all of
+F1's criteria, and must complete its own red/pin and green checks before task completion.
+Supersession cannot by itself satisfy a criterion or remove the original evidence.
 
 ## Check inputs and safe reuse
 
@@ -100,6 +105,10 @@ checkpointed even inside ignored/generated trees. Patterns otherwise select chec
 source: name meaningful ignored dependency files literally rather than relying on a glob to
 walk caches. No .git/.tp or escaping patterns. Missing `inputs` retains legacy whole-workspace
 freshness. `reuse` is still opt-in; unknown external/environment inputs require fresh execution.
+`plan check` and `approve` warn when `reuse: true` lacks scoped inputs. Resolve the warning
+with complete declarations or a recorded reason for conservative whole-workspace freshness;
+the helper does not rewrite approved legacy contracts. Refinement, widening, reopening and
+amendments retain passes only when their definitions and current inputs still match.
 
 Include the command's test runner/scripts, transitive source, build configuration, relevant
 feature flags, dependency manifests and lockfiles. An incorrect declaration can reuse stale
@@ -116,6 +125,14 @@ and writes its receipt atomically. The caller releases the bookkeeping lock whil
 `halt` can therefore save the halt and request cancellation promptly. The worker stops the
 command process group, including ordinary grandchildren, and records an interrupted result.
 Commands that deliberately detach out of that process group need explicit reconciliation.
+
+For a hung owned check, use `tp cancel-check --id <check-operation-id> --reason <observed-hang>`
+and then `tp recover`. IDs are in the context packet's unresolved operations or status detail.
+This requests cancellation through that operation's worker; it never signals a supplied PID,
+changes the contract, halts the workflow or requires another user resume instruction. A completed
+receipt wins a cancellation race and is recovered truthfully. Repeated cancellation of a settled
+check is a no-op. Unknown/dead workers remain unresolved until inspected/reconciled. Retry only
+after the prior operation settles and its cause has been repaired within existing authority.
 
 ```text
 tp -w <workflow> status
@@ -149,9 +166,15 @@ prevent advancing/final completion. Publishing authority is separate from scope 
 
 ## Compact context and delegation
 
-`packet T01` contains the task, requirement text, constraints/non-goals, workspace roots,
-authority links, relevant check records, repair and unresolved-operation status. It avoids
-file-hash maps and duplicated artifacts. `packet --agent A1` includes the reserved brief.
+`packet T01` contains the complete task, requirement text, constraints/non-goals, workspace roots,
+authority links, active repair and unresolved-operation status. It avoids file-hash maps and
+duplicated artifacts. `packet --agent A1` includes the reserved brief. Its explicit `details`
+index links `checks`, `repairs`, `decisions` and archived `evidence` sections with their counts.
+Fetch `packet T01 --section checks --offset 0 --count 10` and follow `next_offset` until the
+needed section is read. Pages automatically fit fewer complete items within the byte budget;
+none are silently dropped. Check pages include definitions and results; repair pages include
+pins/results without workspace snapshot maps. Full authority/constraints remain in the context
+packet. Read linked decisions before dependent work.
 Default limit is 16,000 bytes; `--max-bytes` changes it. Essential context that exceeds the
 limit is an error: narrow the assignment or deliberately use a justified larger packet,
 never silently truncate requirements. Read linked decisions/research on demand.

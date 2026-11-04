@@ -1,5 +1,31 @@
 # Validation results, 2026-11-03
 
+## Repository follow-up, 2026-11-04
+
+The complete regression suite passes **108 tests** (92 before this follow-up), and scoped
+`git diff --check` passes. New behavioral tests reproduced the amendment/pin loss, unrelated
+review invalidation, discarded current checks, unavailable individual cancellation, oversized
+packet retrieval and cross-component context reuse before their corresponding changes.
+
+Coverage now includes retained repair evidence through reopening/amendment, running-repair
+continuation after approved adoption, explicit archived test supersession with mandatory
+replacement verification, pin protection across tasks, scoped review dependencies including
+ignored literal files and newly created sources, safe check reuse, worker cancellation races,
+fresh/continued reviewer identity rules and complete read-only packet pagination.
+
+The new `recovery-cycle` evaluation is covered by scripted helper execution through three
+test-first repairs, a real saved halt/resume, evaluator-owned concurrent edit, approved scope
+amendment and independently graded completion. Its grader rejects lost archived checkpoints.
+This is **scripted regression coverage**, not a new actual-agent performance evaluation.
+
+Read-only reconstruction of the historical November 3 run's T04 context produces a 14,057-byte
+packet (previously 18,879), within the default 16,000-byte limit; details are explicitly paged,
+and complete task/constraints remain in context. No historical workflow was advanced or edited.
+No production speedup or token-cost reduction is claimed. All changes are confined to this
+repository's `co-task-pipeline`; no deployed skill or other agent's files were changed.
+
+## Earlier actual-agent validation
+
 All six follow-up improvements are implemented in this skill. This follows the initial
 61-test Hidlins audit revision; the complete suite now passes **92 tests**.
 

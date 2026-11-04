@@ -149,3 +149,17 @@ def cancel(wf):
             (wf.root / op["receipt"]).with_name("cancel").touch()
         else:
             op["status"] = "unknown"  # An external effect cannot be assumed cancelled.
+
+
+def cancel_one(wf, operation, reason):
+    """Request cancellation through the owning worker, never an arbitrary PID."""
+    op = wf.state.get("operations", {}).get(operation)
+    if not op or op["kind"] != "check":
+        raise ValueError("cancel-check requires a known check operation id")
+    recover(wf)
+    if op["status"] in ("running", "unknown"):
+        (wf.root / op["receipt"]).with_name("cancel").touch()
+        op["cancellation_reason"] = reason
+        wf.event("check-cancel-request", operation=operation, reason=reason)
+        return "Cancellation requested; inspect the worker receipt with recover. Task and approval are preserved."
+    return "Check already settled; no process was signalled. Task and approval are preserved."

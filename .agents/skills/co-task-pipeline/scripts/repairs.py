@@ -6,7 +6,7 @@ from snapshot import changed
 
 def pins(entry):
     for item in [entry] + entry.get("repairs", []):
-        if item.get("test_checkpoint"):
+        if item.get("test_checkpoint") and item.get("status") != "superseded":
             yield item["test_checkpoint"]
 
 
@@ -17,10 +17,15 @@ def preserve(entry, snapshot, need):
 
 
 def validate_done(wf, task, entry, snapshot, api):
-    api.need(all(r["status"] == "done" for r in entry["repairs"]), "finish every repair step before task completion")
+    api.need(all(r["status"] in ("done", "superseded") for r in entry["repairs"]), "finish every repair step before task completion")
+    replaced = {rid for r in entry["repairs"] if r["status"] == "done" for rid in r.get("replaces", [])}
+    api.need(all(r["id"] in replaced for r in entry["repairs"] if r["status"] == "superseded"),
+             "complete an approved replacement repair for every superseded repair")
     preserve(entry, snapshot, api.need)
     # Final task checks cover all repairs on final contents, not just each intermediate green.
     for repair in entry["repairs"]:
+        if repair["status"] == "superseded":
+            continue
         for name in repair["checks"]:
             api.need(api.fresh(wf.state["checks"].get(name), snapshot, wf.state["plan"]["checks"][name]),
                      f"repair check {name} is stale on final contents")
@@ -39,13 +44,21 @@ def execute(wf, args, api):
     if args.action == "start":
         api.need(not any(r["status"] == "running" for r in repairs), "finish the active repair first")
         spec = api.read(args.file)
-        api.need(isinstance(spec, dict) and set(spec) == {"id", "reason", "criteria", "paths", "checks", "verification"},
-                 "repair fields: id, reason, criteria, paths, checks, verification")
+        required = {"id", "reason", "criteria", "paths", "checks", "verification"}
+        api.need(isinstance(spec, dict) and required <= set(spec) <= required | {"replaces"},
+                 "repair fields: id, reason, criteria, paths, checks, verification; optional replaces")
         api.need(api.text(spec["id"]) and api.re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", spec["id"])
                  and spec["id"] not in {r["id"] for r in repairs}, "repair id must be unique and simple")
         api.need(api.text(spec["reason"]) and isinstance(spec["criteria"], list) and spec["criteria"]
                  and all(type(c) is int and 1 <= c <= len(task["acceptance"]) for c in spec["criteria"]),
                  "repair must link a demonstrated finding/blocker to existing acceptance criteria")
+        if "replaces" in spec:
+            api.need(api.strings(spec["replaces"]) and len(set(spec["replaces"])) == len(spec["replaces"]),
+                     "replaces must name superseded repair ids")
+            for rid in spec["replaces"]:
+                old = next((r for r in repairs if r["id"] == rid), {})
+                api.need(old.get("status") == "superseded" and set(old["criteria"]) <= set(spec["criteria"]),
+                         "replacement must cover the superseded repair's criteria")
         api.need(api.strings(spec["paths"]), "repair must name concrete files")
         updated = copy.deepcopy(plan)
         new_task = next(t for t in updated["tasks"] if t["id"] == args.task)

@@ -1,64 +1,74 @@
 ---
 name: atlassian-toolkit
-description: "Use the local Atlassian CLI to search, read, create, and update Jira issues and Confluence pages on ciqinc.atlassian.net, including comments, transitions, history, and worklogs. Load command details only when needed."
+description: Use the local Atlassian CLI for Jira issues, relationships, remote links, parent hierarchy, and Confluence page reads and edits on ciqinc.atlassian.net. Load command details only when needed.
 ---
 
 # Atlassian Toolkit
 
-The local stdlib CLI has three aliases: `jira`, `confluence`, and `atlassian`.
-Use the installed command when available; otherwise invoke
-`python3 "$HOME/.local/bin/atlassian-toolkit/atlassian" <command>` and consult its
-help for routing. Check availability rather than assuming sandbox or network access.
-Read `~/.local/bin/atlassian-toolkit/README.md` only for the commands needed.
-Every command supports `--help`; `atlassian doctor` diagnoses connectivity/auth.
-Do not print credentials. Perform writes only within the user's authorized scope.
+Use `jira`, `confluence`, and `atlassian` for Jira/Confluence activity on
+ciqinc.atlassian.net. They are aliases for one stdlib CLI. Check availability;
+if needed invoke `python3 "$HOME/.local/bin/atlassian-toolkit/atlassian" <group> ...`.
+Load `~/.local/bin/atlassian-toolkit/README.md` only for the operation needed.
+Every command supports `--help`; `atlassian doctor` diagnoses auth/connectivity.
+Never print credentials. Write only within the user's authorized scope.
 
-Common starting points:
+Common reads:
 
 ```bash
-jira me
 jira search '<JQL>' --limit 20
 jira issue get <KEY> --description --comments
-jira issue history <KEY> --field status
-jira issue worklogs <KEY>
 confluence page <id-or-url> --full
 atlassian search '<text>'
 ```
 
-Add `--json` for the toolkit's sanitized schema; `--raw` returns API data.
-Confirm flags with command help before unfamiliar writes.
+Use `--json` for structured output. Jira reads with `--raw` return API data;
+`confluence page <id-or-url> --raw [--body-format storage]` includes the body and
+version needed for editing. The default page view flattens and truncates content.
 
-## Formatting writes
+## Update the page itself
 
-Text descriptions, comments, and Confluence bodies become ADF paragraphs. The CLI
-does not parse Markdown or Jira wiki markup: `h2.`, `{{mono}}`, or Markdown syntax
-will display literally. Use plain text, or supply a real Atlassian Document Format
-(ADF) JSON document for rich text.
+Use `confluence update`, rather than a comment, when asked to edit page content.
+Read the full page first. `--body`/`--body-file` **replace the entire body**;
+retain unrelated content, macros, and formatting in the replacement file.
 
-- Descriptions: `--description -` reads plain text from stdin. For rich text,
-  `--field description='<ADF JSON>'` JSON-decodes the value and overrides text.
-- Comments and Confluence bodies: `--adf` passes raw ADF JSON. Check command help
-  for stdin or file support; keep authored text in a file rather than constructing
-  multiline shell arguments.
-- Comment edits use `--id <comment-id>`. Worklog writes use
-  `jira issue worklog <KEY> "2h" [--started <ISO-time>]`.
-- Issue links: `jira issue link-delete <KEY> <OTHER> [--type Blocks] --dry-run`
-  shows the link joining two issues; drop `--dry-run` to delete it (permanent).
-
-ADF document shape:
-
-```json
-{"type":"doc","version":1,"content":[
-  {"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Overview"}]},
-  {"type":"paragraph","content":[
-    {"type":"text","text":"command","marks":[{"type":"code"}]},
-    {"type":"text","text":" reference","marks":[{"type":"link","attrs":{"href":"https://example.com"}}]}
-  ]}
-]}
+```bash
+confluence page <id-or-url> --raw --body-format storage
+confluence update <id-or-url> --body-file page.xml --storage --version <current-version>
 ```
 
-Lists use `bulletList` → `listItem` → `paragraph`; text marks include `code`,
-`strong`, and `link`. Use `hardBreak` for a line break in a paragraph.
-Verify rich writes against the stored raw nodes, for example
-`jira issue get <KEY> --raw --fields description`. The flattened text view is
-not proof that rich formatting was preserved. Report the affected issue/page link.
+`--storage` sends Confluence storage XHTML; `--adf` sends a real ADF JSON document.
+They are mutually exclusive. Plain text (neither flag) becomes ADF paragraphs;
+Markdown and Jira wiki markup are not parsed. `--body -` reads stdin.
+`--title "New title"` alone preserves the stored body. Re-read the raw body after
+saving to verify the change. On a version conflict, re-read and reconcile before
+retrying. A failed write marked "may already have been applied" needs a read-back
+before another attempt. Comment permission does not imply page-edit permission.
+
+## Jira links and hierarchy
+
+These are distinct operations; check `--help` for write flags:
+
+- Issue relationships: `jira issue link-types` discovers names/IDs and inward/outward
+  labels; `jira issue issue-links <KEY>` lists issue links with IDs and direction.
+  `jira issue link <KEY> <OTHER> --type Blocks --dry-run` previews creation:
+  default outward means KEY blocks OTHER; `--direction inward` reverses it.
+  Drop `--dry-run` to create. To change type/direction, delete the selected link
+  and create its replacement; Jira has no issue-link update endpoint.
+- Delete issue links: `jira issue link-delete <KEY> <OTHER> --type Blocks --dry-run`.
+  Add `--id <link-id>` if several links of that type join them. Drop `--dry-run`
+  to delete. IDs must come from `issue issue-links`, not external links.
+- External URLs/Confluence references: `jira issue links <KEY>` lists remote links.
+  `jira issue remote-link <KEY> <URL> --title "Design"` creates one; `--id <id>`
+  edits it while preserving metadata. `jira issue remote-link-delete <KEY> <id>`
+  deletes one. All support `--dry-run`; deletion is permanent.
+- Parent/epic hierarchy: `jira issue edit <KEY> --parent <PARENT>` or
+  `--clear-parent`, subject to Jira's hierarchy rules. This is separate from links.
+
+## Jira text writes
+
+Descriptions use `--description -` for plain text, or
+`--field description='<ADF JSON>'` for rich formatting. Comments and worklog
+comments take `--adf` with body/stdin JSON. For example:
+`jira issue comment <KEY> - --adf < comment.json`; add `--id <comment-id>` to edit.
+Verify rich descriptions using `jira issue get <KEY> --raw --fields description`.
+Report affected issue/page URLs after writes.

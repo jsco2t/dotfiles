@@ -1,6 +1,6 @@
 # atlassian toolkit
 
-A streamlined CLI for Atlassian Cloud (Jira + Confluence), for humans and Claude skills.
+A streamlined CLI for Atlassian Cloud (Jira + Confluence), for humans and agent skills.
 One self-contained Python script, stdlib-only. Compact output by default to keep token
 cost low. Run `<group> <command> --help` for details on any command.
 
@@ -51,7 +51,12 @@ the file: `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
 | `jira issue worklog <KEY> <time>` | Log time (Jira duration: `1d 4h`, `3h 30m`); `--started` ISO time, default now | `jira issue worklog FUZZ-1234 "1d 4h" --started 2026-09-17T09:00` |
 | `jira issue worklogs <KEY>` | List logged time — the newest 50 (`--limit N`), shown oldest→newest; worklog ids shown here | `jira issue worklogs FUZZ-1234` |
 | `jira issue links <KEY>` | Remote links (e.g. linked Confluence pages) | `jira issue links FUZZ-1234` |
+| `jira issue issue-links <KEY>` | Issue-to-issue relationships, with IDs and direction | `jira issue issue-links FUZZ-1234 --json` |
+| `jira issue link-types` | Available relationship names/IDs and inward/outward labels | `jira issue link-types` |
+| `jira issue link <KEY> <OTHER> --type <TYPE>` | Create a relationship; outward from KEY by default | `jira issue link FUZZ-1234 FUZZ-99 --type Blocks --dry-run` |
 | `jira issue link-delete <KEY> <OTHER>` | Delete the issue link joining two issues — **permanent**; `--type` picks one when several join them, `--dry-run` shows it first | `jira issue link-delete FUZZ-1234 FUZZ-99 --type Blocks --dry-run` |
+| `jira issue remote-link <KEY> <URL> --title <TITLE>` | Create an external URL link; `--id` edits one preserving metadata | `jira issue remote-link FUZZ-1234 https://example.com/design --title Design` |
+| `jira issue remote-link-delete <KEY> <id>` | Delete an external link — **permanent** | `jira issue remote-link-delete FUZZ-1234 123 --dry-run` |
 | `jira project list` | List visible projects | `jira project list --search fuzz` |
 | `jira project types <KEY>` | Issue types for a project | `jira project types FUZZ` |
 | `jira user <query>` | Look up a user's accountId | `jira user "jane"` |
@@ -60,12 +65,71 @@ the file: `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
 
 | Command | Purpose | Example |
 | --- | --- | --- |
-| `confluence page <id\|url>` | Fetch page content (truncated; `--full` for all) | `confluence page 12345`  ·  `confluence page https://…/wiki/…/pages/12345/Title` |
+| `confluence page <id\|url>` | Fetch page content (truncated; `--full` for all; `--raw` for body/version) | `confluence page 12345 --raw --body-format storage` |
 | `confluence descendants <id\|url>` | List child pages (one level) | `confluence descendants 12345` |
 | `confluence search <text>` | Search content (CQL with `--cql`) | `confluence search "storage v4"`  ·  `confluence search 'type=page AND space=ENG' --cql` |
 | `confluence create` | Create a page (`--body -` = stdin) | `confluence create --space ENG --title "Design" --body -` |
-| `confluence update <id>` | Update a page (title and/or body) | `confluence update 12345 --title "Design v2"` |
+| `confluence update <id\|url>` | Update a page (title and/or entire body) | `confluence update 12345 --body-file page.xml --storage --version 7` |
 | `confluence comment <id> <text>` | Add a footer comment (`-` = stdin) | `confluence comment 12345 "Reviewed."` |
+
+### Editing Confluence content
+
+`update` changes the page itself; `comment` only adds a footer comment. Read the full page
+before editing. The default text view is lossy; fetch the raw body to preserve formatting
+and macros. Choose the same representation for reading and writing:
+
+```bash
+confluence page 12345 --raw --body-format storage
+# Save the response's body.storage.value to page.xml and edit it, retaining other content.
+confluence update 12345 --body-file page.xml --storage --version 7
+confluence page 12345 --raw --body-format storage
+```
+
+Use the actual response's `version.number` for `--version`; it is the **current**, not next,
+version. The CLI increments it for the PUT. If the page changed, re-read and reconcile before
+retrying. Versioned PUTs are not replayed after a lost response; read back before retrying a
+write that may already have been applied.
+
+- `--body` (literal or `-` for stdin) and `--body-file` (UTF-8 file) replace the **entire** body.
+  Omitting both allows a title-only change, preserving the existing body exactly; legacy
+  pages fall back to storage XHTML. Missing body/version data causes refusal rather than
+  silently writing an empty page.
+- `--storage` sends native Confluence storage XHTML, including macros. `--adf` sends a JSON
+  ADF document. These flags are mutually exclusive; neither flag means plain text wrapped as
+  ADF paragraphs. Markdown is not parsed. Both formats work for `create` and `update`.
+- ADF round trips: read with `confluence page 12345 --raw` (default `atlas_doc_format`), edit
+  `body.atlas_doc_format.value` as JSON, then `confluence update 12345 --body-file page.json --adf`.
+- IDs and standard page URLs work on `page`, `update`, and `create --parent`.
+- Being able to comment does not prove permission to edit a page. HTTP 401/403 still requires
+  checking account/token permissions; these changes cannot grant missing access.
+
+### Jira relationship management
+
+Jira exposes three separate concepts:
+
+- **Issue links:** `issue issue-links KEY` lists links to other issues. Discover configured
+  types with `issue link-types`; names and IDs are accepted by `link` and `link-delete`.
+  `issue link KEY OTHER --type Blocks` means KEY **blocks** OTHER (outward label from KEY).
+  Use `--direction inward` for KEY **is blocked by** OTHER. `--dry-run` previews the actual
+  configured label without writing. These commands work across Tasks/Bugs/Epics as permitted
+  by Jira. To change a type or direction, delete the old link and create a replacement;
+  Jira exposes no update operation for issue links.
+- **Remote links:** the existing `issue links KEY [--json]` command retains its external-link
+  behavior and JSON array schema. Text now includes IDs. `issue remote-link KEY URL --title T`
+  creates a reference; add `--id ID` to edit while preserving global/application/status metadata.
+  Optional `--global-id` enables server-side upsert by stable identity; when using it without
+  `--id`, Jira clears omitted metadata on an existing match. Prefer `--id` for ordinary edits.
+  `issue remote-link-delete KEY ID` deletes only that external link. Both writes support
+  `--dry-run` (an edit reads and shows its payload; deletion reads the selected link).
+- **Parent/epic hierarchy:** `issue create --parent KEY`, `issue edit CHILD --parent KEY`,
+  and `issue edit CHILD --clear-parent` set or remove `fields.parent`. Jira enforces allowed
+  hierarchy levels; clearing a required parent (e.g. a subtask's) may be rejected. Generic
+  issue links such as Blocks do not change hierarchy.
+
+`link-delete KEY OTHER --type Blocks` refuses ambiguous matches. If opposite-direction links
+of the same type exist, choose `--id ID` from `issue issue-links KEY`. The ID is checked against
+both named issues and the optional type before deletion. Preview with `--dry-run`. Issue-link
+IDs and remote-link IDs are separate; do not interchange them.
 
 ## Cross-product & diagnostics
 
@@ -87,7 +151,7 @@ the file: `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
   create/update/comment`) also take `--adf`: the text/stdin is then a raw ADF JSON document
   (`{"type": "doc", "version": 1, "content": [...]}`) passed through verbatim — for headings,
   bullet lists, and code marks that plain text wrapping cannot express. Plain text (no `--adf`)
-  wraps into ADF paragraphs only, and neither markdown nor Jira wiki markup is parsed, so `h2.`
+  wraps into ADF paragraphs only (except Confluence create/update with `--storage`), and neither markdown nor Jira wiki markup is parsed, so `h2.`
   or `{{…}}` would be stored literally. On `issue create`/`issue edit`, rich descriptions can
   also go through `--field description=<ADF JSON>`.
 - `--field KEY=VALUE` (repeatable, `issue create`/`edit`) sets any raw Jira field; value is
@@ -134,8 +198,9 @@ very high-comment issues; `jira issue comments <KEY> --limit N` lists the newest
 - Confluence reads use REST v2 (`body-format=atlas_doc_format`, reusing the ADF renderer;
   falling back to `storage`/XHTML for legacy pages); search uses v1 `/wiki/rest/api/search` (CQL).
 - Confluence writes use REST v2: create/update `/wiki/api/v2/pages` (update fetches the current
-  version and increments it; title-only edits preserve the existing body) and `/wiki/api/v2/footer-comments`;
-  text is wrapped as ADF like Jira writes.
+  version and increments it; title-only edits preserve the existing body) and `/wiki/api/v2/footer-comments`.
+  Plain text is wrapped as ADF like Jira writes; page create/update also accept storage XHTML.
+  Versioned updates disable automatic replay after uncertain responses.
 - TLS: some Python builds ship an empty CA store (notably the macOS python.org build). The tool
   resolves a CA bundle at runtime — env override → Python's own system store → certifi → cached →
   macOS keychain export / known Linux distro bundles (`/etc/ssl/certs/ca-certificates.crt` on Debian,
@@ -143,3 +208,11 @@ very high-comment issues; `jira issue comments <KEY> --limit N` lists the newest
   has the system store, so it just works; a stripped image without `ca-certificates` needs that package
   installed (or certifi, or `ATLASSIAN_CA_BUNDLE`) — `atlassian doctor` prints the exact fix.
 - One executable (`atlassian-toolkit/atlassian`); `jira` and `confluence` are argv[0] aliases.
+
+Offline regression suite: `PYTHONDONTWRITEBYTECODE=1 python3 .local/bin/atlassian-toolkit/test_atlassian.py`
+from the dotfiles root. API calls are stubbed; no credentials or live writes are needed.
+
+API contracts: [Confluence pages](https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-page/),
+[Jira issue links](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-links/),
+[link direction labels](https://developer.atlassian.com/cloud/jira/platform/issue-linking-model/),
+[Jira remote links](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/).

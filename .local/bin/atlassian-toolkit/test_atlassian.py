@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Tests for the atlassian toolkit, focused on the --adf raw-ADF body input.
+"""Offline regression tests for Atlassian body writes and link management.
 
 Run: python3 test_atlassian.py -v
-Covers the plain-text wrapping contract (text_to_adf), the additive --adf pass-through
-(body_adf), argument wiring for every command that gained --adf, and one end-to-end
-command execution with a stubbed api_request for issue comments and Confluence writes.
+Covers plain text and rich bodies, versioned Confluence updates, legacy content
+preservation, issue links, remote links, and parent hierarchy. API and HTTP calls
+are stubbed; no credentials, network access, or live writes are needed.
 """
 import importlib.util
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -138,7 +140,7 @@ class ParserWiringTest(unittest.TestCase):
 
 class CmdIssueCommentAdfTest(unittest.TestCase):
     def test_plain_body_is_wrapped(self):
-        a = args(SimpleNamespace({"key": "KUB-1", "body": "hello", "adf": False, "id": None,
+        a = args(SimpleNamespace(**{"key": "KUB-1", "body": "hello", "adf": False, "id": None,
                                 "json": False}))
         with mock.patch.object(at, "api_request", return_value={"id": "1"}) as req:
             at.cmd_issue_comment(a)
@@ -147,7 +149,7 @@ class CmdIssueCommentAdfTest(unittest.TestCase):
         self.assertEqual(sent["content"][0]["content"][0]["text"], "hello")
 
     def test_adf_body_is_sent_verbatim(self):
-        a = args(SimpleNamespace({"key": "KUB-1", "body": json.dumps(ADF_DOC), "adf": True,
+        a = args(SimpleNamespace(**{"key": "KUB-1", "body": json.dumps(ADF_DOC), "adf": True,
                                 "id": None, "json": False}))
         with mock.patch.object(at, "api_request", return_value={"id": "1"}) as req:
             at.cmd_issue_comment(a)
@@ -157,7 +159,7 @@ class CmdIssueCommentAdfTest(unittest.TestCase):
         self.assertEqual(len(heads), 1)
 
     def test_adf_body_invalid_json_exits_without_api_call(self):
-        a = args(SimpleNamespace({"key": "KUB-1", "body": "{broken", "adf": True,
+        a = args(SimpleNamespace(**{"key": "KUB-1", "body": "{broken", "adf": True,
                                 "id": None, "json": False}))
         with mock.patch.object(at, "api_request") as req:
             with self.assertRaises(SystemExit):
@@ -167,13 +169,13 @@ class CmdIssueCommentAdfTest(unittest.TestCase):
 
 class ConfluenceAdfTest(unittest.TestCase):
     def test_conf_comment_plain_vs_adf(self):
-        a = args(SimpleNamespace({"page": 42, "body": "hello", "adf": False, "json": False}))
+        a = args(SimpleNamespace(**{"page": 42, "body": "hello", "adf": False, "json": False}))
         with mock.patch.object(at, "api_request", return_value={"id": "9"}) as req:
             at.cmd_conf_comment(a)
         sent = json.loads(req.call_args.kwargs["body"]["body"]["value"])
         self.assertEqual(sent["content"][0]["content"][0]["text"], "hello")
 
-        a = args(SimpleNamespace({"page": 42, "body": json.dumps(ADF_DOC), "adf": True,
+        a = args(SimpleNamespace(**{"page": 42, "body": json.dumps(ADF_DOC), "adf": True,
                                 "json": False}))
         with mock.patch.object(at, "api_request", return_value={"id": "9"}) as req:
             at.cmd_conf_comment(a)
@@ -183,7 +185,7 @@ class ConfluenceAdfTest(unittest.TestCase):
     def test_conf_update_body_adf(self):
         cur = {"version": {"number": 3}, "title": "T",
                "body": {"atlas_doc_format": {"value": json.dumps(ADF_DOC)}}}
-        a = args(SimpleNamespace({"id": 42, "title": None, "body": json.dumps(ADF_DOC),
+        a = args(SimpleNamespace(**{"id": 42, "title": None, "body": json.dumps(ADF_DOC),
                                 "adf": True, "json": False}))
         with mock.patch.object(at, "api_request", return_value=cur) as req:
             at.cmd_conf_update(a)
@@ -247,6 +249,228 @@ class CmdIssueLinkDeleteTest(unittest.TestCase):
                                           "--dry-run"])
         self.assertEqual((a.key, a.other, a.type, a.dry_run), ("KUB-1", "KUB-2", "Blocks", True))
         self.assertIs(a.func, at.cmd_issue_link_delete)
+
+
+class CommandTest(unittest.TestCase):
+    def run_command(self, argv, responses):
+        a = at.build_parser().parse_args(argv)
+        with mock.patch.object(at, "api_request", side_effect=responses) as req, \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            a.func(a)
+        return req.call_args_list, out.getvalue()
+
+    def assert_read_only_failure(self, argv, responses):
+        a = at.build_parser().parse_args(argv)
+        with mock.patch.object(at, "api_request", side_effect=responses) as req, \
+                mock.patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                a.func(a)
+        self.assertTrue(all(c.args[0] == "GET" for c in req.call_args_list))
+
+
+class ConfluenceUpdateTest(CommandTest):
+    def page(self, fmt="atlas_doc_format", value=None, version=7):
+        if value is None:
+            value = json.dumps(ADF_DOC) if fmt == "atlas_doc_format" else '<p>Keep &amp; preserve</p>'
+        return {"id": "42", "title": "Original", "version": {"number": version},
+                "body": {fmt: {"value": value}}}
+
+    def test_url_and_storage_file_replace_body_and_increment_version(self):
+        storage = '<h2>Design</h2><ac:structured-macro ac:name="toc"/>'
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "page.xml"
+            f.write_text(storage, encoding="utf-8")
+            calls, _ = self.run_command([
+                "confluence", "update", "https://ciqinc.atlassian.net/wiki/spaces/ENG/pages/42/Design",
+                "--body-file", str(f), "--storage", "--version", "7"], [self.page("storage"), {}])
+        self.assertEqual(calls[-1].args, ("PUT", "/wiki/api/v2/pages/42"))
+        self.assertEqual(calls[-1].kwargs["body"], {
+            "id": "42", "title": "Original", "status": "current", "version": {"number": 8},
+            "body": {"representation": "storage", "value": storage}})
+        self.assertFalse(calls[-1].kwargs["idempotent"])
+
+    def test_plain_body_stdin(self):
+        with mock.patch("sys.stdin", io.StringIO("new\n\ntext")):
+            calls, _ = self.run_command(["confluence", "update", "42", "--body", "-"], [self.page(), {}])
+        body = calls[-1].kwargs["body"]["body"]
+        self.assertEqual(json.loads(body["value"]), at.text_to_adf("new\n\ntext"))
+
+    def test_title_only_preserves_adf_exactly(self):
+        cur = self.page()
+        calls, _ = self.run_command(["confluence", "update", "42", "--title", "New"], [cur, {}])
+        self.assertEqual(calls[-1].kwargs["body"]["body"]["value"], cur["body"]["atlas_doc_format"]["value"])
+
+    def test_title_only_falls_back_to_storage_without_losing_macros(self):
+        cur = self.page()
+        cur["body"] = {}
+        storage = '<ac:structured-macro ac:name="children"/>'
+        calls, _ = self.run_command(["confluence", "update", "42", "--title", "New"],
+                                    [cur, self.page("storage", storage), {}])
+        self.assertEqual(calls[1].kwargs["params"], {"body-format": "storage"})
+        self.assertEqual(calls[-1].kwargs["body"]["body"], {"representation": "storage", "value": storage})
+
+    def test_empty_adf_on_legacy_page_uses_storage_instead(self):
+        calls, _ = self.run_command(["confluence", "update", "42", "--title", "New"],
+                                    [self.page(value=""), self.page("storage"), {}])
+        self.assertEqual(calls[-1].kwargs["body"]["body"]["representation"], "storage")
+
+    def test_missing_body_or_version_refuses_write(self):
+        cur = self.page()
+        cur["body"] = {}
+        self.assert_read_only_failure(["confluence", "update", "42", "--title", "New"], [cur, cur])
+        cur = self.page()
+        del cur["version"]
+        self.assert_read_only_failure(["confluence", "update", "42", "--body", "new"], [cur])
+
+    def test_stale_authored_version_refuses_write(self):
+        self.assert_read_only_failure(["confluence", "update", "42", "--body", "new", "--version", "6"],
+                                      [self.page()])
+
+    def test_page_changes_during_fallback_refuses_write(self):
+        cur = self.page()
+        cur["body"] = {}
+        self.assert_read_only_failure(["confluence", "update", "42", "--title", "New"],
+                                      [cur, self.page("storage", version=8)])
+
+    def test_empty_stored_body_is_preserved(self):
+        calls, _ = self.run_command(["confluence", "update", "42", "--title", "New", "--storage"],
+                                    [self.page("storage", ""), {}])
+        self.assertEqual(calls[-1].kwargs["body"]["body"]["value"], "")
+
+    def test_raw_page_returns_editable_content_and_version(self):
+        cur = self.page("storage")
+        calls, out = self.run_command(["confluence", "page", "42", "--body-format", "storage", "--raw"], [cur])
+        self.assertEqual(json.loads(out), cur)
+        self.assertEqual(len(calls), 1)
+
+    def test_storage_create(self):
+        calls, _ = self.run_command(["confluence", "create", "--space", "12", "--title", "New",
+                                     "--body", "<h1>Rich</h1>", "--storage"], [{"id": "42"}])
+        self.assertEqual(calls[0].kwargs["body"]["body"], {"representation": "storage", "value": "<h1>Rich</h1>"})
+
+    def test_invalid_input_never_calls_api(self):
+        for options in (["--body", "broken", "--adf"], ["--body-file", "/no/such/body-file"], []):
+            self.assert_read_only_failure(["confluence", "update", "42", *options], [])
+
+    def test_conflicting_format_and_source_flags_rejected(self):
+        for options in (["--adf", "--storage"], ["--body", "x", "--body-file", "x"]):
+            with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                at.build_parser().parse_args(["confluence", "update", "42", *options])
+
+
+class VersionedPutTransportTest(unittest.TestCase):
+    def test_versioned_put_serializes_storage_and_does_not_retry_lost_response(self):
+        a = at.build_parser().parse_args(["confluence", "update", "42", "--body", "<p>New</p>", "--storage"])
+        page_response = mock.MagicMock()
+        page_response.__enter__.return_value.read.return_value = json.dumps({
+            "title": "Original", "version": {"number": 7}}).encode()
+        with mock.patch.object(at, "load_auth", return_value=("https://example.atlassian.net", "test", "fake")), \
+                mock.patch.object(at, "build_ssl_context"), \
+                mock.patch.object(at.urllib.request, "urlopen", side_effect=[page_response, TimeoutError("lost reply")]) as send, \
+                mock.patch.object(at.time, "sleep") as sleep, mock.patch("sys.stderr", io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as exc:
+                a.func(a)
+        self.assertEqual(exc.exception.code, at.EX_NET)
+        self.assertIn("may already have been applied", err.getvalue())
+        self.assertEqual(send.call_count, 2)  # GET, PUT; no replay of the uncertain PUT
+        request = send.call_args.args[0]
+        self.assertEqual(request.full_url, "https://example.atlassian.net/wiki/api/v2/pages/42")
+        self.assertEqual(request.method, "PUT")
+        payload = json.loads(request.data)
+        self.assertEqual(payload["body"], {"representation": "storage", "value": "<p>New</p>"})
+        self.assertEqual(payload["version"]["number"], 8)
+        sleep.assert_not_called()
+
+
+class JiraLinkManagementTest(CommandTest):
+    TYPES = {"issueLinkTypes": [{"id": "10", "name": "Blocks", "inward": "is blocked by", "outward": "blocks"}]}
+
+    def test_create_both_directions_with_name_or_id(self):
+        for direction, type_, key_side, other_side, label in [
+            ("outward", "blocks", "inwardIssue", "outwardIssue", "blocks"),
+            ("inward", "10", "outwardIssue", "inwardIssue", "is blocked by"),
+        ]:
+            with self.subTest(direction=direction):
+                calls, out = self.run_command(["jira", "issue", "link", "KUB-1", "KUB-2", "--type", type_,
+                                               "--direction", direction], [self.TYPES, b""])
+                self.assertEqual(calls[-1].args, ("POST", "/rest/api/3/issueLink"))
+                self.assertEqual(calls[-1].kwargs["body"], {"type": {"id": "10"},
+                                  key_side: {"key": "KUB-1"}, other_side: {"key": "KUB-2"}})
+                self.assertIn(f"KUB-1 {label} KUB-2", out)
+
+    def test_create_dry_run_and_unknown_type_never_write(self):
+        calls, out = self.run_command(["jira", "issue", "link", "KUB-1", "KUB-2", "--type", "Blocks", "--dry-run"],
+                                      [self.TYPES])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("would create", out)
+        self.assert_read_only_failure(["jira", "issue", "link", "KUB-1", "KUB-2", "--type", "Missing"], [self.TYPES])
+
+    def test_issue_links_show_ids_direction_and_json(self):
+        calls, out = self.run_command(["jira", "issue", "issue-links", "KUB-252"], [LINKS])
+        self.assertEqual(calls[0].kwargs["params"], {"fields": "issuelinks"})
+        self.assertIn("KUB-252 blocks KUB-242", out)
+        self.assertIn("KUB-252 is blocked by KUB-248", out)
+        self.assertIn("id 102", out)
+        _, out = self.run_command(["jira", "issue", "issue-links", "KUB-252", "--json"], [LINKS])
+        self.assertEqual(json.loads(out), LINKS["fields"]["issuelinks"])
+
+    def test_opposite_links_of_same_type_can_be_deleted_by_id(self):
+        links = {"fields": {"issuelinks": [
+            {"id": "1", "type": self.TYPES["issueLinkTypes"][0], "outwardIssue": {"key": "KUB-2"}},
+            {"id": "2", "type": self.TYPES["issueLinkTypes"][0], "inwardIssue": {"key": "KUB-2"}}]}}
+        argv = ["jira", "issue", "link-delete", "KUB-1", "KUB-2", "--type", "Blocks"]
+        self.assert_read_only_failure(argv, [links])
+        calls, _ = self.run_command([*argv, "--id", "2"], [links, b""])
+        self.assertEqual(calls[-1].args, ("DELETE", "/rest/api/3/issueLink/2"))
+        self.assert_read_only_failure([*argv, "--id", "999"], [links])
+
+    def test_remote_links_still_use_existing_list_schema(self):
+        links = [{"id": 5, "object": {"title": "Design", "url": "https://example.com/design"}}]
+        calls, out = self.run_command(["jira", "issue", "links", "KUB-1", "--json"], [links])
+        self.assertEqual(calls[0].args, ("GET", "/rest/api/3/issue/KUB-1/remotelink"))
+        self.assertEqual(json.loads(out), links)
+        _, out = self.run_command(["jira", "issue", "links", "KUB-1"], [links])
+        self.assertIn("id 5", out)
+
+    def test_remote_link_create_and_edit_preserve_metadata(self):
+        argv = ["jira", "issue", "remote-link", "KUB-1", "https://example.com/new", "--title", "New"]
+        calls, _ = self.run_command([*argv, "--global-id", "doc=42"], [{"id": 5}])
+        self.assertEqual(calls[-1].kwargs["body"], {"globalId": "doc=42",
+                          "object": {"url": "https://example.com/new", "title": "New"}})
+        cur = {"id": 5, "self": "ignored", "globalId": "doc=42", "application": {"type": "com.atlassian.confluence"},
+               "relationship": "mentioned in", "object": {"url": "old", "title": "Old", "summary": "Keep me"}}
+        calls, _ = self.run_command([*argv, "--id", "5"], [cur, {}])
+        self.assertEqual(calls[-1].args, ("PUT", "/rest/api/3/issue/KUB-1/remotelink/5"))
+        payload = calls[-1].kwargs["body"]
+        self.assertEqual(payload["object"]["summary"], "Keep me")
+        self.assertEqual(payload["globalId"], "doc=42")
+        self.assertEqual(payload["application"], cur["application"])
+        self.assertEqual(payload["relationship"], "mentioned in")
+        self.assertNotIn("self", payload)
+
+    def test_remote_dry_runs_do_not_write(self):
+        calls, out = self.run_command(["jira", "issue", "remote-link", "KUB-1", "https://example.com",
+                                      "--title", "Doc", "--dry-run"], [])
+        self.assertEqual(calls, [])
+        self.assertEqual(json.loads(out)["method"], "POST")
+        calls, _ = self.run_command(["jira", "issue", "remote-link-delete", "KUB-1", "5", "--dry-run"], [{"id": 5}])
+        self.assertEqual([c.args[0] for c in calls], ["GET"])
+
+    def test_remote_delete_uses_remote_endpoint(self):
+        calls, _ = self.run_command(["jira", "issue", "remote-link-delete", "KUB-1", "5"], [b""])
+        self.assertEqual(calls[-1].args, ("DELETE", "/rest/api/3/issue/KUB-1/remotelink/5"))
+
+    def test_parent_edit_and_clear_are_hierarchy_fields(self):
+        for option, expected in [(["--parent", "KUB-10"], {"key": "KUB-10"}), (["--clear-parent"], None)]:
+            calls, _ = self.run_command(["jira", "issue", "edit", "KUB-1", *option], [b""])
+            self.assertEqual(calls[-1].kwargs["body"], {"fields": {"parent": expected}})
+
+    def test_parent_can_be_read_back_in_issue_json(self):
+        issue = {"key": "KUB-1", "fields": {"parent": {"key": "KUB-10", "fields": {
+            "issuetype": {"name": "Epic"}, "status": {"name": "Open"}}}}}
+        calls, out = self.run_command(["jira", "issue", "get", "KUB-1", "--json"], [issue])
+        self.assertIn("parent", calls[0].kwargs["params"]["fields"].split(","))
+        self.assertEqual(json.loads(out)["parent"]["key"], "KUB-10")
 
 
 if __name__ == "__main__":

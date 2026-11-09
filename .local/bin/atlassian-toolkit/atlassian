@@ -41,7 +41,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 CONFIG_DIR = Path(os.environ.get("JIRA_TOOLKIT_CONFIG_DIR",
                                  os.environ.get("ATLASSIAN_TOOLKIT_CONFIG_DIR",
@@ -674,6 +674,8 @@ def cmd_project_types(args):
 # --------------------------------------------------------------------------- #
 def cmd_issue_get(args):
     fields = args.fields.split(",") if args.fields else list(DEFAULT_ISSUE_FIELDS)
+    if args.json and not args.fields:
+        fields.append("parent")
     if args.description and "description" not in fields:
         fields.append("description")
     if args.comments:
@@ -732,6 +734,10 @@ def cmd_issue_create(args):
 
 def cmd_issue_edit(args):
     fields = {}
+    if args.parent:
+        fields["parent"] = {"key": args.parent}
+    elif args.clear_parent:
+        fields["parent"] = None
     if args.summary:
         fields["summary"] = args.summary
     if args.description is not None:
@@ -776,13 +782,15 @@ def cmd_issue_comment_delete(args):
     print(f"comment {args.id} deleted from {args.key}")
 
 
-def _issue_links_to(key, other, link_type=None):
+def _issue_links_to(key, other, link_type=None, link_id=None):
     """The issue links between key and other as (id, "KEY verb OTHER") pairs, optionally of one link type."""
     issue = api_request("GET", f"/rest/api/{API}/issue/{key}", params={"fields": "issuelinks"})
     found = []
     for lk in issue.get("fields", {}).get("issuelinks", []):
+        if link_id and str(lk.get("id")) != link_id:
+            continue
         t = lk.get("type", {})
-        if link_type and t.get("name", "").lower() != link_type.lower():
+        if link_type and link_type.lower() not in [str(t.get(k, "")).lower() for k in ("id", "name")]:
             continue
         if (lk.get("outwardIssue") or {}).get("key", "").upper() == other.upper():
             found.append((lk["id"], f"{key} {t.get('outward', t.get('name'))} {other}"))
@@ -793,13 +801,13 @@ def _issue_links_to(key, other, link_type=None):
 
 def cmd_issue_link_delete(args):
     # Permanent: Jira has no undo for a deleted issue link (recreate it to restore).
-    matches = _issue_links_to(args.key, args.other, args.type)
+    matches = _issue_links_to(args.key, args.other, args.type, getattr(args, "id", None))
     if not matches:
         kind = f"{args.type} link" if args.type else "link"
         die(EX_NOTFOUND, f"no {kind} between {args.key} and {args.other}")
     if len(matches) > 1:
         listed = "; ".join(f"{text} (id {lid})" for lid, text in matches)
-        die(EX_USAGE, f"{len(matches)} links between {args.key} and {args.other}: {listed}. Pass --type to pick one")
+        die(EX_USAGE, f"{len(matches)} links between {args.key} and {args.other}: {listed}. Pass --type or --id to pick one")
     lid, text = matches[0]
     if args.dry_run:
         print(f"would delete link {lid}: {text}")
@@ -856,7 +864,78 @@ def cmd_issue_links(args):
         return
     for lk in links:
         obj = lk.get("object", {})
-        print(f"- {obj.get('title') or '(untitled)'}: {obj.get('url','')}")
+        print(f"- {obj.get('title') or '(untitled)'}: {obj.get('url','')}  (id {lk.get('id')})")
+
+
+def cmd_issue_link_types(args):
+    types = api_request("GET", f"/rest/api/{API}/issueLinkType").get("issueLinkTypes", [])
+    if args.json:
+        return jdump(types)
+    for t in types:
+        print(f"{t['id']}  {t['name']}: outward='{t['outward']}', inward='{t['inward']}'")
+
+
+def cmd_issue_issue_links(args):
+    issue = api_request("GET", f"/rest/api/{API}/issue/{args.key}", params={"fields": "issuelinks"})
+    links = issue.get("fields", {}).get("issuelinks", [])
+    if args.json:
+        return jdump(links)
+    if not links:
+        print("(no issue links)")
+    for lk in links:
+        side = "outward" if "outwardIssue" in lk else "inward"
+        print(f"- {args.key} {lk['type'][side]} {lk[side + 'Issue']['key']}  "
+              f"(id {lk['id']}, type {lk['type']['name']})")
+
+
+def cmd_issue_link(args):
+    types = api_request("GET", f"/rest/api/{API}/issueLinkType").get("issueLinkTypes", [])
+    matches = [t for t in types if args.type.lower() in (str(t['id']).lower(), t['name'].lower())]
+    if len(matches) != 1:
+        die(EX_USAGE, "unknown or ambiguous link type; use `jira issue link-types` for names and IDs")
+    t = matches[0]
+    # From KEY's issue view, OTHER appears as outwardIssue for an outward link.
+    key_side, other_side = ("inwardIssue", "outwardIssue") if args.direction == "outward" else ("outwardIssue", "inwardIssue")
+    payload = {"type": {"id": t['id']}, key_side: {"key": args.key}, other_side: {"key": args.other}}
+    text = f"{args.key} {t[args.direction]} {args.other}"
+    if args.dry_run:
+        print(f"would create link: {text}")
+        return
+    api_request("POST", f"/rest/api/{API}/issueLink", body=payload, expect_json=False)
+    print(f"linked: {text}")
+
+
+def cmd_issue_remote_link(args):
+    path = f"/rest/api/{API}/issue/{args.key}/remotelink"
+    payload = {}
+    method = "POST"
+    if args.id:
+        path += f"/{args.id}"
+        current = api_request("GET", path)
+        # PUT clears omitted fields; retain metadata and object attributes on edits.
+        payload = {k: current[k] for k in ("globalId", "application", "relationship", "object") if k in current}
+        method = "PUT"
+    obj = dict(payload.get("object") or {})
+    obj.update({"url": args.url, "title": args.title})
+    payload["object"] = obj
+    if args.global_id is not None:
+        payload["globalId"] = args.global_id
+    if args.relationship is not None:
+        payload["relationship"] = args.relationship
+    if args.dry_run:
+        return jdump({"method": method, "path": path, "body": payload})
+    res = api_request(method, path, body=payload)
+    if args.json:
+        return jdump(res)
+    print(f"remote link saved on {args.key} (id {args.id or res.get('id')})")
+
+
+def cmd_issue_remote_link_delete(args):
+    path = f"/rest/api/{API}/issue/{args.key}/remotelink/{args.id}"
+    if args.dry_run:
+        return jdump(api_request("GET", path))
+    api_request("DELETE", path, expect_json=False)
+    print(f"remote link {args.id} deleted from {args.key}")
 
 
 def cmd_issue_history(args):
@@ -952,7 +1031,10 @@ def cmd_search(args):
 # --------------------------------------------------------------------------- #
 def cmd_conf_page(args):
     pid = parse_confluence_id(args.page)
-    data = api_request("GET", f"/wiki/api/v2/pages/{pid}", params={"body-format": "atlas_doc_format"})
+    fmt = getattr(args, "body_format", "atlas_doc_format")
+    data = api_request("GET", f"/wiki/api/v2/pages/{pid}", params={"body-format": fmt})
+    if getattr(args, "raw", False):
+        return jdump(data)
     title = data.get("title", "")
     adf = (data.get("body", {}).get("atlas_doc_format") or {}).get("value")
     if adf:
@@ -961,7 +1043,7 @@ def cmd_conf_page(args):
         except json.JSONDecodeError:
             text = adf
     else:  # fall back to storage (XHTML) for pages without ADF
-        data2 = api_request("GET", f"/wiki/api/v2/pages/{pid}", params={"body-format": "storage"})
+        data2 = data if fmt == "storage" else api_request("GET", f"/wiki/api/v2/pages/{pid}", params={"body-format": "storage"})
         text = html_to_text((data2.get("body", {}).get("storage") or {}).get("value", ""))
     if args.json:
         return jdump({"id": pid, "title": title, "text": text})
@@ -1007,13 +1089,29 @@ def resolve_space_id(key):
     return str(results[0]["id"])
 
 
+def conf_body_input(args):
+    if getattr(args, "body_file", None) is not None:
+        try:
+            return Path(args.body_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as e:
+            die(EX_USAGE, f"could not read body file: {e}")
+    return read_maybe_stdin(args.body) if args.body is not None else ""
+
+
+def conf_body(args):
+    text = conf_body_input(args)
+    if getattr(args, "storage", False):
+        return {"representation": "storage", "value": text}
+    return {"representation": "atlas_doc_format",
+            "value": json.dumps(body_adf(text, getattr(args, "adf", False)))}
+
+
 def cmd_conf_create(args):
-    body_text = read_maybe_stdin(args.body) if args.body is not None else ""
+    body = conf_body(args)
     payload = {"spaceId": resolve_space_id(args.space), "status": "current", "title": args.title,
-               "body": {"representation": "atlas_doc_format",
-                        "value": json.dumps(body_adf(body_text, getattr(args, "adf", False)))}}
+               "body": body}
     if args.parent:
-        payload["parentId"] = str(args.parent)
+        payload["parentId"] = parse_confluence_id(args.parent)
     res = api_request("POST", "/wiki/api/v2/pages", body=payload)
     if args.json:
         return jdump(res)
@@ -1021,22 +1119,41 @@ def cmd_conf_create(args):
 
 
 def cmd_conf_update(args):
-    if args.title is None and args.body is None:
+    has_body = args.body is not None or getattr(args, "body_file", None) is not None
+    if args.title is None and not has_body:
         die(EX_USAGE, "nothing to update (pass --title and/or --body)")
-    cur = api_request("GET", f"/wiki/api/v2/pages/{args.id}", params={"body-format": "atlas_doc_format"})
-    version = ((cur.get("version") or {}).get("number") or 1) + 1
+    pid = parse_confluence_id(str(args.id))
+    # Validate authored input before any network calls.
+    body = conf_body(args) if has_body else None
+    fmt = "storage" if getattr(args, "storage", False) else "atlas_doc_format"
+    cur = api_request("GET", f"/wiki/api/v2/pages/{pid}", params={"body-format": fmt})
+    current_version = (cur.get("version") or {}).get("number")
+    if not isinstance(current_version, int) or current_version < 1:
+        die(EX_API, "page response has no valid version; refusing to update")
+    expected = getattr(args, "version", None)
+    if expected is not None and expected != current_version:
+        die(EX_API, f"page version changed (expected {expected}, found {current_version}); re-read before editing")
+    version = current_version + 1
     title = args.title if args.title is not None else cur.get("title")
-    if args.body is not None:  # replace body
-        value = json.dumps(body_adf(read_maybe_stdin(args.body), getattr(args, "adf", False)))
-    else:  # title-only change: preserve the existing body (v2 update requires body)
-        value = (cur.get("body", {}).get("atlas_doc_format") or {}).get("value") or json.dumps(text_to_adf(""))
-    payload = {"id": str(args.id), "status": "current", "title": title,
-               "body": {"representation": "atlas_doc_format", "value": value},
+    if body is None:  # Never substitute empty content if the requested representation is absent.
+        value = ((cur.get("body") or {}).get(fmt) or {}).get("value")
+        if value is None or (fmt == "atlas_doc_format" and value == ""):
+            fmt = "storage" if fmt == "atlas_doc_format" else "atlas_doc_format"
+            fallback = api_request("GET", f"/wiki/api/v2/pages/{pid}", params={"body-format": fmt})
+            if (fallback.get("version") or {}).get("number") != current_version:
+                die(EX_API, "page version changed while reading; re-read before editing")
+            value = ((fallback.get("body") or {}).get(fmt) or {}).get("value")
+        if value is None or (fmt == "atlas_doc_format" and value == ""):
+            die(EX_API, "page response has no body to preserve; refusing title-only update")
+        body = {"representation": fmt, "value": value}
+    payload = {"id": pid, "status": "current", "title": title,
+               "body": body,
                "version": {"number": version}}
-    res = api_request("PUT", f"/wiki/api/v2/pages/{args.id}", body=payload)
+    # Replaying a versioned PUT after a lost response can report a false conflict.
+    res = api_request("PUT", f"/wiki/api/v2/pages/{pid}", body=payload, idempotent=False)
     if args.json:
         return jdump(res)
-    print(f"updated page {args.id} (version {version})")
+    print(f"updated page {pid} (version {version})")
 
 
 def cmd_conf_comment(args):
@@ -1187,6 +1304,9 @@ def add_jira_commands(jp):
     ie.add_argument("--description", help="text, or '-' for stdin")
     ie.add_argument("--assignee")
     ie.add_argument("--priority")
+    parent = ie.add_mutually_exclusive_group()
+    parent.add_argument("--parent", help="set the parent issue/epic key (hierarchy, not an issue link)")
+    parent.add_argument("--clear-parent", action="store_true", help="remove the parent, if Jira permits it")
     ie.add_argument("--add-label", action="append")
     ie.add_argument("--remove-label", action="append")
     ie.add_argument("--field", action="append", metavar="KEY=VALUE")
@@ -1210,9 +1330,45 @@ def add_jira_commands(jp):
     ild = isub.add_parser("link-delete", help="delete the issue link between two issues (permanent)")
     ild.add_argument("key")
     ild.add_argument("other", help="the issue on the other end of the link")
-    ild.add_argument("--type", help="link type name (e.g. Blocks, Relates); required when several links join the two")
+    ild.add_argument("--type", help="link type name or ID (e.g. Blocks); use --id if type alone is ambiguous")
     ild.add_argument("--dry-run", action="store_true", help="show the link that would be deleted and stop")
+    ild.add_argument("--id", help="select this link ID when type alone is ambiguous")
     ild.set_defaults(func=cmd_issue_link_delete)
+
+    ilt = isub.add_parser("link-types", help="list available issue link types and direction labels")
+    ilt.add_argument("--json", action="store_true")
+    ilt.set_defaults(func=cmd_issue_link_types)
+
+    ili = isub.add_parser("issue-links", help="list issue-to-issue links with IDs and direction")
+    ili.add_argument("key")
+    ili.add_argument("--json", action="store_true")
+    ili.set_defaults(func=cmd_issue_issue_links)
+
+    ilc = isub.add_parser("link", help="create an issue-to-issue link")
+    ilc.add_argument("key")
+    ilc.add_argument("other")
+    ilc.add_argument("--type", required=True, help="link type name or ID from `issue link-types`")
+    ilc.add_argument("--direction", choices=("outward", "inward"), default="outward",
+                     help="label as seen from KEY (default outward: KEY blocks OTHER for type Blocks)")
+    ilc.add_argument("--dry-run", action="store_true")
+    ilc.set_defaults(func=cmd_issue_link)
+
+    irl = isub.add_parser("remote-link", help="create an external URL link, or update one with --id")
+    irl.add_argument("key")
+    irl.add_argument("url")
+    irl.add_argument("--title", required=True)
+    irl.add_argument("--id", help="existing remote link ID from `issue links`")
+    irl.add_argument("--global-id", help="stable identity; POST updates an existing match (omitted metadata is cleared)")
+    irl.add_argument("--relationship")
+    irl.add_argument("--dry-run", action="store_true")
+    irl.add_argument("--json", action="store_true")
+    irl.set_defaults(func=cmd_issue_remote_link)
+
+    ird = isub.add_parser("remote-link-delete", help="delete an external URL link by ID (permanent)")
+    ird.add_argument("key")
+    ird.add_argument("id")
+    ird.add_argument("--dry-run", action="store_true", help="read the selected remote link without deleting")
+    ird.set_defaults(func=cmd_issue_remote_link_delete)
 
     ics = isub.add_parser("comments", help="list comments")
     ics.add_argument("key")
@@ -1261,6 +1417,8 @@ def add_confluence_commands(cp):
     pg.add_argument("page", help="numeric page id or a .../wiki/.../pages/<id>/... URL")
     pg.add_argument("--full", action="store_true", help="do not truncate the body")
     pg.add_argument("--json", action="store_true")
+    pg.add_argument("--raw", action="store_true", help="full API response, including body and version for editing")
+    pg.add_argument("--body-format", choices=("atlas_doc_format", "storage"), default="atlas_doc_format")
     pg.set_defaults(func=cmd_conf_page)
 
     de = cp.add_parser("descendants", help="list child pages (one level)")
@@ -1279,19 +1437,16 @@ def add_confluence_commands(cp):
     cc = cp.add_parser("create", help="create a page")
     cc.add_argument("--space", required=True, help="space key (e.g. ENG) or numeric spaceId")
     cc.add_argument("--title", required=True)
-    cc.add_argument("--body", help="page body text, or '-' for stdin")
-    cc.add_argument("--adf", action="store_true",
-                    help="interpret --body as a raw ADF JSON document instead of plain text")
+    add_conf_body_arguments(cc)
     cc.add_argument("--parent", help="parent page id")
     cc.add_argument("--json", action="store_true")
     cc.set_defaults(func=cmd_conf_create)
 
     cu = cp.add_parser("update", help="update a page (title and/or body)")
-    cu.add_argument("id", help="page id")
+    cu.add_argument("id", help="page id or URL")
     cu.add_argument("--title")
-    cu.add_argument("--body", help="new body text, or '-' for stdin")
-    cu.add_argument("--adf", action="store_true",
-                    help="interpret --body as a raw ADF JSON document instead of plain text")
+    add_conf_body_arguments(cu)
+    cu.add_argument("--version", type=int, help="expected current version; refuse if the page changed since your read")
     cu.add_argument("--json", action="store_true")
     cu.set_defaults(func=cmd_conf_update)
 
@@ -1302,6 +1457,15 @@ def add_confluence_commands(cp):
                     help="interpret body as a raw ADF JSON document instead of plain text")
     cm.add_argument("--json", action="store_true")
     cm.set_defaults(func=cmd_conf_comment)
+
+
+def add_conf_body_arguments(parser):
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--body", help="page body text, or '-' for stdin; replaces the entire body on update")
+    source.add_argument("--body-file", help="UTF-8 file containing the entire replacement body")
+    fmt = parser.add_mutually_exclusive_group()
+    fmt.add_argument("--adf", action="store_true", help="body is a raw ADF JSON document")
+    fmt.add_argument("--storage", action="store_true", help="body is Confluence storage XHTML (macros supported)")
 
 
 def build_parser():

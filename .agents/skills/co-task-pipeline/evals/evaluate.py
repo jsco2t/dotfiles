@@ -217,7 +217,7 @@ def prepare(destination, scenario, max_agents=0):
         (workspace / name).write_text(contents, encoding="utf-8")
     request = agent / "request.txt"
     request.write_text(instruction + "\n", encoding="utf-8")
-    initialized = subprocess.run([sys.executable, "-B", str(helper), "init", str(agent / "planning"),
+    initialized = subprocess.run([sys.executable, "-B", str(helper), "init", str(agent / "planning"), "--legacy-approvals",
                                   "--title", scenario, "--request-file", str(request)],
                                  capture_output=True, text=True, timeout=15)
     if initialized.returncode:

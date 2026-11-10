@@ -1,290 +1,194 @@
 # Codex state helper
 
-Use `python3 "<actual-skill-dir>/scripts/tp.py"` for `tp` below. Do not assume a deployed home
-path when working on a repository copy. Python 3.9+ and a macOS/Linux filesystem are sufficient;
-there are no third-party Python packages, custom agent registrations, or network dependencies.
-Run its regression suite with `python3 -B -m unittest discover -s <skill-dir>/tests -v`.
-For incremental repair, measurement, scoped input reuse, operation recovery and compact
-context commands, read [execution.md](execution.md) before using that mechanism. Complete-run
-agent evaluations and independent grading are documented in [../evals/README.md](../evals/README.md).
+Use `python3 "<actual-skill-dir>/scripts/tp.py"` as `tp` below. Python 3.9+ on macOS/Linux,
+standard library only. No global configuration, installations or network calls are needed.
+Run regression tests with `python3 -B -m unittest discover -s <skill-dir>/tests -v`.
 
-## Starting and approving
+## New workflow: scope and independently reviewed plan
 
 ```text
-tp init <planning-location> --title <title> --request-file <verbatim-request-file>
-tp schema scope
-tp -w <workflow-dir> scope check
-tp -w <workflow-dir> scope confirm --answer <actual-operator-response>
-tp schema plan
-tp -w <workflow-dir> plan check
-tp -w <workflow-dir> approve --answer <actual-operator-response>
-tp -w <workflow-dir> next
+tp init <location> --title <title> --request-file <verbatim-request> --author-agent-id <actual-main-id>
+tp -w <workflow> scope settle
+tp -w <workflow> plan check
+tp -w <workflow> agent reserve --id A1 --capacity 1 --file -
+tp -w <workflow> agent attach --id A1 --agent-id <actual-independent-reviewer>
+tp -w <workflow> agent finish --id A1 --file -
+tp -w <workflow> plan accept --agent A1
+tp -w <workflow> start T01
 ```
 
-`init` creates `<location>/<UTC-date>-<slug>/`, adding a suffix for collisions. It preserves the
-request in `request.md`. The caller writes `scope.json` and `plan.json` from the schema examples;
-replace every example value with the actual work. `scope.md` and `plan.md` are rendered complete
-contracts for operator review, not extra sources of state. `-w` precedes the command.
-Approval also preserves original planned file contents under `.tp/baseline/`; the state's
-`baseline_files` maps `workspace:path` to its saved file, or null for an initially missing file.
-Use these copies to review the pipeline's actual edits separately from pre-existing user edits,
-including in non-Git workspaces. Amendments add copies for newly planned files without replacing
-the original copies of existing files.
+Write `scope.json` and `plan.json` before their validation commands. `schema scope|plan|agent`
+prints examples. The agent reservation must specify `role: review, purpose: plan`; include
+request requirement IDs, source starting paths, question, stopping condition and model/rationale.
+The packet binds the current request, scope, plan JSON and rendered `plan.md` revision.
+Give that exact request/document to the actual reviewer. Attach its host identity, validate its
+result, then record `accepted: true`, summary, evidence, validation and `unresolved: []` through
+`agent finish`. `plan accept` requires the completed independent review and unchanged source;
+open questions or stale revisions stop entry. Review records are agent-supplied provenance,
+not cryptographic authentication of host identity. Never invent an independent reviewer.
 
-`scope confirm` and `approve` are two separate gates. They record exact operator words supplied
-by the calling agent. They cannot prove who spoke them: never fabricate a response, treat an
-unanswered question as consent, or use this helper as a sandbox/authorization bypass.
+`init` creates a dated slug, preserving the full request in `request.md`. `scope settle` records
+a manager decision without a human answer. It enters internal `PLANNING`, which is still the
+scoping phase. `plan check` renders readable Markdown headings, task descriptions, criteria,
+files and commands; it does not wait for approval. `plan accept` enters implementation. The
+human never needs to approve a new run’s scope or implementation plan.
 
-## Contract format
+Known material uncertainties must be resolved first. Use `block --question ...` and `resolve
+--answer <actual-clarification>`. Use `resolve --by manager --answer ... --evidence ...` only
+when saved decisions already answer it. Missing facts are not authorization. A newly discovered
+product decision during implementation returns that part to scoping, preserving independent work.
 
-Print `schema scope|plan|refine|test-update|result|review|closeout` for complete examples. Essential fields:
+## Contract fields
 
-- Scope: `title`, `deliverables` (`id`, `kind`, `what`, `where`), `workspaces` (`name`, absolute
-  resolved `path`, `mode: read|write`), `constraints`, `non_goals`, `review: self|independent|none`,
-  `max_agents: 0|1|2|3`, optional `estimate_minutes`. New scopes use the standing allowance
-  of three unless the operator sets a lower limit. A future write directory may not exist yet.
-  Deliverable kinds are code, tests, docs, kb, tutorial, education, research, pm, integration.
-  Code/tests always require review. Independent review requires a nonzero agent allowance.
-  `max_agents` counts children; runtime capacity may include the parent and reduce available
-  child slots. Final `review: self` does not prohibit delegated task/component reviews.
-  Each workspace optionally selects `snapshot: git|walk` (legacy default `walk`). Select
-  `git` for a Git worktree; it checkpoints tracked files (including tracked ignored outputs)
-  and nonignored untracked files, without walking ignored caches. Explicit task files are
-  included even when ignored. Deleted tracked files disappear from the snapshot and are
-  detected as changes. Use separate workspaces for submodules; Git failure is an error, never
-  a silent fallback. Choose `walk` for non-Git workspaces. Ignored undeclared source is outside
-  a Git checkpoint; inspect meaningful ignored source and declare intended edits explicitly.
-- New scopes include `requirements`: a nonempty list of `id` (`R1`, `R2`, ...), `text`, and
-  `deliverables` (existing deliverable IDs). Account for every distinct requested outcome and
-  explicit constraint; every deliverable must map back to the request. Existing approved
-  workflows without this field remain compatible. The helper validates links, not whether
-  the ledger faithfully captures the full request; compare it with `request.md` yourself.
-- Plan: `summary`, `tasks`, `checks`, `final_checks`. A task has `id`, `title`, `kind`, `serves`
-  (deliverable ids), `workspace`, `paths`, `depends_on`, `acceptance`, `checks`, `verification`.
-  When scope has a requirement ledger, each task also has `requirements` (request requirement
-  IDs); all requirements must have explicit task coverage, even when they share a deliverable.
-  A task may name only requirements mapped to at least one deliverable that task serves.
-  Name individual relative files, including expected new files; no directory or glob write sets.
-  Research/integration tasks and explicitly adaptive tasks may have empty paths. Read-only workspaces cannot receive
-  deliverables or check output. A file inside a nested workspace belongs to the nested workspace.
-  Optional `adaptive: true` grants the manager permission, through plan approval, to add
-  concrete paths/checks and establish test-first verification when findings become known.
-  It also allows documented mechanical test corrections. Default false preserves legacy gates;
-  it never grants new outcomes, roots, weaker tests or permission to adopt concurrent edits.
-- Verification: `mode: red-green|characterization|existing|manual` and a specific `reason`.
-  All automated modes require `check` naming one of the task's checks. The first two also require
-  `test_paths` within task paths. Manual mode requires evidence in the result rather than a
-  fabricated test command. Existing mode uses regression coverage without a new test phase.
-- A named check has `argv` (a nonempty list of literal arguments), `workspace` for its working
-  directory, optional positive `timeout_seconds` (default 300), and optional `reuse` (default
-  false). Opt in only for checks whose inputs are declared workspace files in a stable
-  environment; leave checks involving external services, time, or untracked inputs uncached.
-  The helper does not parse shell syntax, expand `$HOME`, or run shell strings. If a repository
-  genuinely requires a shell, explicitly plan `['bash', '-lc', '...']`. Check authorization includes any side effects of
-  that approved command; do not use external writes or installation as incidental checks.
-  Optional `inputs` maps workspace names to file/directory/glob patterns; optional `environment`
-  names variables whose values affect the command. Definitions and these inputs determine
-  freshness; omitted inputs conservatively fingerprint all monitored workspaces. See execution.md.
+`schema scope|plan|refine|repair|result|review|closeout|test-correction` prints full examples.
 
-The helper validates dependency cycles, missing deliverables, evidence coverage, and concrete
-write paths. It freezes scope/plan values on approval; direct edits are rejected. It does not
-assess whether prose criteria are sufficient or evidence actually proves them. Codex must do so.
+- Scope: `title`, deliverables (`id: D1`, `kind`, `what`, `where`), `requirements` (`id: R1`,
+  `text`, deliverable IDs), `constraints`, `non_goals`, `workspaces`, `review`, `max_agents`,
+  optional `estimate_minutes`. Every requested outcome/constraint needs coverage. Kinds:
+  code, tests, docs, kb, tutorial, education, research, pm, integration. Code/tests require
+  final review. `review: independent` requires an agent allowance; `self` final review still
+  permits bounded independent component/plan reviewers. Default allowance is three, bounded
+  by host capacity and explicit user limits. New runs always need one independent plan review.
+- Workspaces: unique lowercase `name`, absolute resolved `path`, `mode: read|write`, and
+  `snapshot: git|walk` (legacy default walk). Name submodules separately. Git tracks tracked
+  files plus nonignored untracked source; explicit task files and declared check inputs include
+  meaningful ignored dependencies. Git failures are errors, not a fallback to a giant walk.
+  Optional `monitor: ["file.md", "reference-directory"]` bounds captured paths and traversal.
+  Use it for reference documents instead of watching archives. Files added/deleted under those
+  directories are observed. Task files and check-input roots are always added to monitoring,
+  including ignored glob matches. Undeclared paths outside this set are **not drift-detected**;
+  keep whole monitoring where that guarantee matters. This is bookkeeping, not a sandbox.
+- Plan: `summary`, `tasks`, named `checks`, `final_checks`. Each task: `id: T01`, `title`,
+  `kind`, `serves`, `requirements`, `workspace`, concrete relative `paths`, `depends_on`,
+  `acceptance`, `checks`, `verification`; optional `adaptive: true`. Dependencies must be
+  acyclic and all requirements/deliverables covered. Adaptive review/repair or research and
+  integration tasks can initially have empty paths. Paths cannot escape, name directories,
+  include globs or traverse symlinks. Nested workspaces own their files.
+- Verification: `mode: red-green|characterization|existing|manual`, `reason`; automated modes
+  name `check`, test-first modes name nonempty `test_paths`. Use red-green for real behavior
+  regressions, pin for characterization, existing coverage when adequate, and honest manual
+  evidence when automation adds no value.
+- Checks: literal `argv` list, execution `workspace`, optional positive `timeout_seconds`
+  (default 300), `reuse` (default false), `inputs` workspace-to-pattern map, `environment`
+  variable names. Reuse requires complete source/test/runner/config/dependency inputs and a
+  stable environment. Missing inputs conservatively use all monitored workspaces. Include
+  absent-file patterns so new files invalidate evidence. Environment values are hashed, not
+  printed. Shell syntax is not expanded unless a shell is explicitly in argv; authorize its
+  side effects independently. External/time-sensitive checks stay uncached.
 
-## Working loop
+The contract freezes on acceptance; direct file edits are drift, not amendments. `plan.md`
+is regenerated on valid refinement/amendment. Consult it and `packet T01` during implementation.
+Original planned file copies under `.tp/baseline/` distinguish pipeline edits from existing edits.
 
-```text
-tp -w <workflow-dir> start T01
-tp -w <workflow-dir> test T01 --stage red --note <why-the-test-failure-proves-missing-behavior>
-tp -w <workflow-dir> check unit
-tp -w <workflow-dir> done T01 --result-file <result.json>
-tp -w <workflow-dir> next
+## Low-overhead payloads and execution
+
+Every JSON-reading payload option accepts `-` for stdin. JSON files must not use `.md` or
+`.markdown`; legacy mislabeled payloads should be resubmitted via stdin or `.json`, leaving the
+historical evidence unchanged. Never manufacture a Markdown wrapper for machine state.
+
+```sh
+python3 "<skill>/scripts/tp.py" -w "<workflow>" done T01 --result-file - <<'JSON'
+{"task":"T01","summary":"Delivered the requested behavior.","acceptance":[{"criterion":1,"evidence":"src/calc.py:12 and unit PASS log."}]}
+JSON
 ```
 
-Only one task may be running. `start` checkpoints all workspaces. Test-first `red` requires a
-failing check; characterization uses `--stage pin` and a passing check. Before that checkpoint,
-only planned test files may have changed. The checkpoint pins test contents through completion.
-To correct a defective test strategy, ask the operator and amend/restart with a documented
-reason; never repeatedly repin weaker tests to make implementation pass. For an adaptive
-review/fix task, successive `repair` steps have independent pins against each step's starting
-contents; the entire task need not restart. New pins retain
-the check log and original test copies in `.tp/test-baseline/` so mechanical corrections
-can be inspected without restoring production code.
-
-`show T01` reads one task's contract, status and recorded result/checks without writing state
-or printing workspace fingerprint maps. Prefer it to `status --json` and full plan dumps.
-
-`check` runs the approved command through a detached cancellable worker, records its exit status and source fingerprint, and saves
-output under `checks/`. With `reuse: true`, an unchanged prior stable pass is returned without
-execution; `check <name> --force` reruns it. A failed, missing, or stale result is never reused.
-Red/pin checkpoints always execute their check. This saves repeated runs at the same contents;
-it cannot observe changes outside declared workspaces or changes to environment state.
-The helper does not infer a pre-existing failure or waive one. Missing programs,
-timeouts, unexpected failures, and commands that change source artifacts cannot count as passes.
-Use short focused commands and the runtime's interrupt controls if a check must stop on halt.
-
-`done` requires a result like:
+For deterministic transitions, use a single batch. Each step has `argv` and optionally `input`
+for stdin. Successful steps save independently; failure stops later steps and preserves prior
+progress. Batches do not roll back, change workflows or execute in parallel. They return `next`
+after success. Do not put a future test result or unknown agent identity into a precomputed batch.
 
 ```json
-{
-  "task": "T01",
-  "summary": "The requested behavior is implemented and verified.",
-  "acceptance": [
-    {"criterion": 1, "evidence": "src/calc.py:12 and test_calc.py:8; unit check PASS."}
-  ]
-}
+[
+  {"argv":["check","unit"]},
+  {"argv":["done","T01","--result-file","-"],"input":{"task":"T01","summary":"Delivered and checked.","acceptance":[{"criterion":1,"evidence":"Inspected diff and current unit log."}]}}
+]
 ```
 
-Supply every criterion exactly once, numbered from 1. The helper compares workspace changes to
-the task's file list, verifies pinned tests, and requires successful checks on the current
-content. It also rejects unexplained changes between tasks. Inspect unexpected edits; never
-auto-revert another actor's work. Ask before adopting those edits through an amendment.
+Only one task runs at a time. `start T01` checkpoints; implement its paths. `test T01 --stage
+red|pin --note ...` runs the real contracted check and pins test copies/hashes. `done` requires
+current passing task checks, retained pins and one evidence entry per numbered criterion.
 
-Checkpoints compare file contents, symlink targets, and permissions. They skip `.git`, `.tp`,
-the workflow directory, and common generated trees (`node_modules`, Python caches/venvs,
-`target`, `dist`, `.next`, `.cache`). Explicit task files inside skipped trees are included.
-Stat caching avoids rehashing unchanged files. This is drift detection within declared
-workspaces, not a sandbox: it cannot monitor undeclared paths, transient writes restored before
-sampling, or prove a command had no external side effects. Observe the contract independently.
-The generated-tree exclusions above apply to `walk`; `git` uses Git's tracked/ignore rules
-instead. Neither mode requires relocating caches, modifying ignore files, or changing product
-layout to satisfy bookkeeping. Snapshot mode is part of scope; changing a legacy contract's
-mode needs an approved amendment rather than an automatic migration.
+`check <name>` uses a detached cancellable worker and durable receipts. Reusable stable passes
+at identical declared inputs return their existing log; `--force` requests a rerun. Source
+mutation, missing tools, cancellation, timeouts and stale checks never count as passes. After
+two same-input failures in new runs, further retries require `--retry-reason <diagnosis/change>`.
+Inspect fixtures/readiness first. A red checkpoint needs an intended behavior failure: the
+helper cannot interpret every language’s compiler/setup output for you.
 
-## Adaptive detail and mechanical test corrections
+`next` and mutating boundaries recover finished worker receipts automatically. If one remains
+running or unknown, inspect its operation/log, wait or `cancel-check --id ... --reason ...`;
+then recover. No new human gate is needed. Unknown commits/publications require read-back,
+not a blind retry. `operation begin/finish` records already-authorized external effects; it
+does not execute them or grant permission. Read-only `status`, `packet` and `metrics` do not recover.
 
-```text
-tp schema refine
-tp -w <workflow-dir> refine T01 --file <refinement.json> --reason <finding-and-need>
-tp schema test-update
-tp -w <workflow-dir> test-update T01 --file <correction.json>
-```
+## Refinement and self-healing
 
-`refine` requires `adaptive: true` in the approved task. Its JSON contains only optional
-`paths` (a list of concrete relative files), `checks` (name → definition), and `verification`.
-Paths/checks append; existing checks must match exactly. New checks run in the task's existing
-writable workspace and must be authorized, focused verification of its existing outcomes,
-not installation or unrelated external mutations. Task IDs, dependencies, acceptance criteria,
-deliverable/requirement mappings, final checks and scope stay unchanged. Verification may
-move from `manual`/`existing` to `red-green`/`characterization` before a pin; it cannot replace
-an approved test-first strategy. Use one coherent regression batch per adaptive review/fix unit.
+`refine T01 --file - --reason ...` adds paths/checks and establishes test-first verification
+on adaptive tasks without changing outcomes or pinned strategy. `widen T01 --path ...
+--deliverable D1 --reason ...` adds files inside an existing workspace. Do this before editing
+new files. Neither operation adopts unexpected edits. `repair start/test/done` gives successive
+findings independent retained checkpoints inside one adaptive task. Prefer a coherent finding
+batch; do not create a new human decision per defect.
 
-Refine a pending/running task before editing the added files. The helper rejects unexpected
-edits and newly exposed ignored contents, captures original file baselines, preserves the
-running checkpoint/partial work, retains checks whose definitions and inputs remain current,
-and invalidates final review. It records manager
-provenance without an invented operator answer. If only paths are needed, `widen` remains
-available on nonadaptive tasks too. Helper validation cannot decide whether prose justification
-is truthful; the manager must keep every refinement within the approved outcomes.
+Honest pinned test corrections use the detailed procedure in [execution.md](execution.md).
+New runs require a focused independent reviewer for pin changes, preserving old evidence and
+current genuine proof. Before pinning, correct mistakes directly. No human approval is needed
+for same-contract test fixes. Do not label assertion weakening a mechanical correction.
 
-`test-update` requires a running adaptive task, an existing pin with saved original copies,
-and a fresh passing verification check on the corrected current contents. JSON needs
-`kind: mechanical`, `reason`, and concrete `evidence` explaining why values, cases and assertions
-are unchanged. Inspect the original saved tests and current diff. Use this only for equivalent
-formatting/lint corrections (for example `0` → `0o0`), never assertion removal, new expectations,
-test skipping or strategy changes. Those need operator-approved amendment. New behavior still
-needs genuine pre-fix regression evidence; this command cannot create it retroactively.
+`amend --by manager --reason ... --plan-file <draft.json>` can adjust same-scope scheduling,
+concrete files and verification runners while preserving task IDs, titles, deliverables,
+requirements, workspace roots, criteria, verification modes, existing paths/check obligations,
+final gates and pins. Replacing an existing check definition requires an accepted independent
+`purpose: amendment` assignment with `plan_file` naming that exact draft inside the workflow;
+pass `--agent <id>`. Reviewer must verify the command still executes all required cases,
+assertions and checks. It is not permission to replace tests with a no-op. Concurrent edits
+cannot be auto-adopted. `refine` is simpler when only adding finding-driven detail.
 
-The helper retains the previous checkpoint, original test copies and original red/pin log,
-stores corrected copies/hashes, and records the correction in history/report. It does not
-replay production or prove semantic equivalence automatically. It never accepts an ordinary
-`test` call as permission to repin. Old pins without saved copies require an amendment.
-This prevents a routine equivalent lint fix from forcing a rollback and a fresh approval.
+Accepted tasks keep their delivery evidence when manager changes invalidate checks; the
+helper marks affected completed tasks and transitive dependents `verification_dirty`. Repair
+pending/running work first. `next` then requests stale affected checks and refreshes saved check
+evidence without forcing repeated `done` records or creating dependency deadlocks. Final
+review still covers integration and original requirement coverage. `reopen T01 --reason ...`
+reopens an actual defective owner and marks completed dependents for verification in new runs.
 
-## Questions, amendments, and repairs
+New outcomes, changed scope or adoption of another actor’s edits need a real human decision:
+`amend --answer <actual-response> --scope-file ... --plan-file ...`. Show the concrete change
+when asking. Keep unrelated work as an observation instead of expanding the contract.
 
-```text
-tp -w <workflow-dir> block --question <specific-unknown-and-its-consequence>
-tp -w <workflow-dir> resolve --answer <operator-clarification>
-tp -w <workflow-dir> resolve --by manager --answer <already-settled-answer> --evidence <saved-decision>
-tp -w <workflow-dir> widen T01 --path <file> --deliverable D1 --reason <existing-criterion-and-why-it-needs-this-file>
-tp -w <workflow-dir> amend --scope-file <draft-scope.json> --plan-file <draft-plan.json> --answer <approval>
-tp -w <workflow-dir> reopen T01 --reason <confirmed-defect-and-evidence>
-tp -w <workflow-dir> note <unrelated-discovery>
-```
+## Closeout and persistence
 
-`block` preserves partial work and prevents further execution until a decision. `resolve` records
-a clarification and does not change scope. Default `--by operator` records actual operator
-words. `--by manager` requires `--evidence` pointing to the scope, plan, or saved decision
-that already answers the question; it grants no new approval and keeps that provenance in
-history/report. Consult those sources before blocking or asking a settled question again.
+New-run `note <worthwhile-unrelated-finding>` records an optional observation immediately,
+without assigning the human a follow-up obligation. Use it once per substantive finding, not
+for progress chatter. Required work must finish; it cannot be parked as an observation.
+Legacy `closeout --file ...` keeps its original deferral/follow-up approval contract.
 
-`widen` adds individual files to a pending/running task in its existing writable workspace
-without another operator answer. Name one of its existing `serves` deliverables and explain
-why unchanged criteria need the files. It cannot change scope, acceptance criteria, check
-commands, test strategy, workspace roots, or adopt unexpected edits. Honor constraints and
-non-goals independently. Widen before editing the extra files; existing drift and previously
-untracked contents in ignored trees require inspection and an approved amendment. Reopen
-completed work first, and finish any other running task. The helper preserves original
-baselines, captures newly planned originals, keeps test pins/partial work, retains check records
-whose command and inputs remain current, invalidates final review, and records a manager
-decision. No heuristic proves the reason true.
+`review --file -` records final method, verdict, summary, findings and evidence for every
+request requirement. Independent methods identify the actual reviewer. Valid findings reopen
+owners; retain prior coverage and rerun affected checks. `final` refuses missing tasks, dirty
+verification, stale final checks, missing review, unsettled agents/effects or unclassified notes.
+It writes the final human report and metrics. It does not run checks implicitly.
 
-For a changed contract, prepare new draft files, validate their implications, show the exact
-changes, and ask before `amend`. Either draft flag
-may be omitted to retain its approved value; during planning there may be no plan yet.
-Amendment decisions and old/new contracts remain in history. Changed tasks and their dependents
-reopen; changed scope reopens all tasks conservatively. Partial edits remain for inspection.
-Unchanged current check results survive; changed commands/inputs and final review invalidate.
-Task/repair checkpoints, correction history and completed repair results remain attached across
-reopening. Prior attempts and removed tasks are archived separately in `.tp/state.json` under
-`evidence_history`, including original contracts and red/pin copies/log links. Restart an affected
-pending task with `start`; a pinned running repair resumes from the adopted checkpoint without
-manufacturing another red. Earlier pins are checked across task boundaries and at final review.
-An amendment may explicitly adopt concurrent edits; never use a made-up
-answer to reset a failing checkpoint. Adopted edits are named in the decision history, and
-completed tasks owning those files reopen for verification.
-When moving a workspace to a different root, give it a new workspace name and update task/check
-references in the draft; names retain their root identity so original file evidence stays clear.
+New-run JSON state holds references to immutable compressed checkpoint maps in one
+`.tp/snapshots.sqlite3` file. Keep that database with state; missing/corrupt objects fail closed.
+Legacy JSON checkpoints remain readable and retain their existing semantics. Fingerprint
+caching uses stat signatures; content, symlink targets and permissions are checked. Durable
+pins, original files, logs and effect receipts are evidence, not disposable junk.
 
-`reopen` repairs in-scope work and reopens completed dependents without changing the contract.
-On a test-first repair, add the regression test before changing production code, then checkpoint
-it with the planned strategy. On an adaptive reopened task, use a new repair ID and regression
-file while retaining prior repairs. If partial production changes make that impossible,
-inspect them and ask about a corrected plan rather than bypassing the gate.
+Root artifacts are request, scope, readable plan, optional compact research notes, final report
+and metrics. Use `.tp/drafts/`, `.tp/evidence/`, `.tp/scratch/` for their respective purposes.
+Payloads and packets normally flow through stdin/tool output and need no files. Remove only
+owned disposable scratch, retaining any content cited as evidence. Never clean historical runs
+or other actors’ files opportunistically.
 
-Replacing a pin requires concrete approval of the corrected test strategy and
-`amend --supersede-tests T01` (task pin) or `--supersede-tests T01:F1` (repair pin); repeat the
-flag for multiple pins. Original evidence is archived with the exact operator answer.
-A superseded repair remains visible but no longer supplies valid verification; register its
-approved replacement with `replaces: ["F1"]` and complete it before claiming the task's criteria.
-An unrelated scope amendment cannot silently adopt changed pinned tests.
-Mechanical equivalent corrections still use `test-update`
-without another approval. Archive records are provenance, not a fresh pass.
+## Legacy compatibility and measurements
 
-## Review and completion
+Existing states without `governance: autonomous` keep their actual scope-confirm/approve and
+amendment contracts. Resume using saved authority; never fabricate an old user answer. Explicit
+`init --legacy-approvals` exists only for historical evaluations/compatibility fixtures, not
+new user work. It does not migrate live workflows. Status remains read-only.
 
-After every task is done, `next` requests final checks, final review, closeout as needed, then
-`final`. Print `schema review` for the review format. `method` must match approved scope; an
-independent result also names the actual `agent_id`. A passing review has an empty `findings`
-list. If scope has a requirement ledger, review JSON also needs `requirements` with exactly
-one `id` and concrete `evidence` per requirement, checked against the original request and
-delivered artifacts. The report preserves these links and evidence. Legacy scopes without
-the ledger keep their existing review format. A `changes` verdict has findings with `task`,
-`issue`, and `evidence`; these reopen owning tasks and completed dependents. Validate findings
-before recording them. After fixes, run required checks and review current artifacts again.
-
-Closeout takes a JSON list with `id`, `classification: observation|deferred|followup`, and
-`reason` describing the issue and consequence:
-
-```text
-tp -w <workflow-dir> closeout --file <decisions.json> [--answer <operator-decision>]
-tp -w <workflow-dir> final
-```
-
-Deferrals and follow-up obligations require an operator answer; observations do not. Closeout
-cannot skip a task. Defer required work only by an explicit scope/plan amendment. `final` checks
-the gates and writes `report.md` with acceptance evidence, checks, actual review method,
-amendments, and noticed items. It never commits, pushes, deploys, or files a ticket.
-
-## Recovery and status
-
-`halt --reason ...` (alias `hault`) preserves the current phase, running task checkpoint, and
-approval. `resume --answer ...` restores that phase. Inspect interrupted edits, then follow
-`next`; a running task continues from its checkpoint rather than being blindly restarted.
-`status` is read-only; `status --json` exposes the complete persistent state and decision history.
-An explicit status-only invocation stops after reporting; a status question during execution
-does not end the active work. Mutating helper commands lock and atomically replace state.
-
-State is identified as `codex-task-pipeline-v1`; existing Claude/OpenCode state is rejected
-without modification. The operator's start/resume/halt/status interaction stays familiar;
-internal helper commands and file schemas deliberately differ.
+`metrics` measures helper-boundary wall spans, recorded checks/reuse/agents and imported actual
+host usage. `activity` can refine phase attribution; do not create a bookkeeping call for every
+minor activity. Spans overlap; waiting labels are not proof of idle CPU/model time. Tokens are
+unmeasured unless supplied from actual host receipts. See [../evals/README.md](../evals/README.md)
+and [../evals/hidlins-execution-audit.md](../evals/hidlins-execution-audit.md) for evidence and limits.

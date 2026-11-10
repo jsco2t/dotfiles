@@ -19,7 +19,7 @@ class PipelineTest(unittest.TestCase):
         self.request = self.base / "request.txt"
         self.request.write_text('Write an overview.\nKeep `literal` and "quotes".\n')
         self.wf = None
-        output = self.cli("init", str(self.base / "planning"), "--title", "Overview", "--request-file", str(self.request))
+        output = self.cli("init", str(self.base / "planning"), "--legacy-approvals", "--title", "Overview", "--request-file", str(self.request))
         self.wf = Path(output.splitlines()[0].removeprefix("workflow: "))
 
     def tearDown(self):
@@ -84,7 +84,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual((self.wf / "request.md").read_bytes(), self.request.read_bytes())
         old = self.wf
         self.wf = None
-        result = self.cli("init", str(self.base / "planning"), "--title", "Overview", "--request-file", str(self.request))
+        result = self.cli("init", str(self.base / "planning"), "--legacy-approvals", "--title", "Overview", "--request-file", str(self.request))
         self.assertIn(str(old) + "-2", result)
         self.assertTrue(old.is_dir())
 

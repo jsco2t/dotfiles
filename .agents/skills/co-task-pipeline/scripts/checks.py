@@ -49,13 +49,13 @@ def read_receipt(path):
 
 def recover(wf):
     """Merge detached worker receipts idempotently, including after parent loss."""
-    if not any(op["kind"] == "check" and op["status"] in ("running", "unknown")
+    if not any(op["kind"] in ("check", "proof") and op["status"] in ("running", "unknown")
                for op in wf.state.get("operations", {}).values()):
         return []
     scope, plan = wf.contract()
     recovered = []
     for op in wf.state.get("operations", {}).values():
-        if op["kind"] != "check" or op["status"] not in ("running", "unknown"):
+        if op["kind"] not in ("check", "proof") or op["status"] not in ("running", "unknown"):
             continue
         receipt = read_receipt(wf.root / op["receipt"])
         if receipt is None:
@@ -70,14 +70,21 @@ def recover(wf):
         after = wf.snapshot(scope, plan)
         same_contract = op["contract"] == digest([scope, plan])
         stable = op["before"] == digest(after) and same_contract
+        if op["kind"] == "proof":
+            from corrections import baseline_snapshot
+            stable = stable and op["proof"]["baseline_fingerprint"] == digest(baseline_snapshot(op["proof"]))
         result = dict(check=name, argv=op["argv"], workspace=op["workspace"],
                       started=op["started"], ended=receipt["ended"],
                       exit_code=receipt["exit_code"], log=op["log"],
                       fingerprint=op.get("input_fingerprint"),
                       stable=stable, operation=op["id"])
-        wf.state["checks"][name] = result
+        if op["kind"] == "proof":
+            result.update(proof=op["proof"])
+            wf.state.setdefault("proofs", {})[op["id"]] = result
+        else:
+            wf.state["checks"][name] = result
         op.update(status=receipt["status"], ended=receipt["ended"], exit_code=receipt["exit_code"])
-        wf.event("check", **result)
+        wf.event("correction-proof" if op["kind"] == "proof" else "check", **result)
         import tracking
         if wf.state.get("active_activity", {}).get("operation") == op["id"]:
             tracking.pause(wf, "worker receipt", ended=receipt["ended"])
@@ -88,28 +95,30 @@ def recover(wf):
     return recovered
 
 
-def run(wf, name, scope, plan):
+def run(wf, name, scope, plan, proof=None):
     if name not in plan["checks"]:
         raise ValueError(f"unknown check {name}")
     if any(op["status"] in ("running", "unknown") for op in wf.state.get("operations", {}).values()):
         raise ValueError("an operation is unresolved; recover and inspect it before another check")
     definition = plan["checks"][name]
     workspace = next(w for w in scope["workspaces"] if w["name"] == definition["workspace"])
-    operation = "check-" + uuid.uuid4().hex[:16]
+    operation = ("proof-" if proof else "check-") + uuid.uuid4().hex[:16]
     directory = wf.meta / "operations" / operation
     directory.mkdir(parents=True)
     log = wf.root / "checks" / (operation + ".log")
     log.parent.mkdir(exist_ok=True)
     before = wf.snapshot(scope, plan)
-    op = dict(id=operation, kind="check", status="running", check=name,
+    op = dict(id=operation, kind="proof" if proof else "check", status="running", check=name,
               argv=definition["argv"], workspace=definition["workspace"], started=wf.timestamp(),
               before=digest(before), input_fingerprint=fingerprint(before, definition), contract=digest([scope, plan]),
               log=str(log.relative_to(wf.root)), receipt=str((directory / "receipt.json").relative_to(wf.root)))
+    if proof:
+        op["proof"] = proof
     import tracking
     op["resume_activity"] = wf.state.get("active_activity")
     tracking.switch(wf, "verification", "Check " + name, operation=operation)
     wf.state.setdefault("operations", {})[operation] = op
-    wf.write_json(directory / "spec.json", dict(argv=definition["argv"], cwd=workspace["path"],
+    wf.write_json(directory / "spec.json", dict(argv=definition["argv"], cwd=proof["baseline"] if proof else workspace["path"],
                   timeout_seconds=definition.get("timeout_seconds", 300), log=str(log)))
     wf.event("operation-start", operation=operation, kind="check", check=name)
     wf.save()  # Durable intent precedes execution; unknown launch outcomes are never replayed.
@@ -132,10 +141,10 @@ def run(wf, name, scope, plan):
             time.sleep(0.05)
     finally:
         fcntl.flock(wf.lock, fcntl.LOCK_EX)
-        wf.state = wf.read_json(wf.state_path)
+        wf.reload()
     recover(wf)
     wf.save()
-    result = wf.state["checks"].get(name)
+    result = wf.state.get("proofs", {}).get(operation) if proof else wf.state["checks"].get(name)
     if not result or result.get("operation") != operation:
         raise ValueError(f"check outcome unknown ({operation}); inspect receipt/log and use recover; do not replay")
     return result
@@ -145,7 +154,7 @@ def cancel(wf):
     for op in wf.state.get("operations", {}).values():
         if op["status"] != "running":
             continue
-        if op["kind"] == "check":
+        if op["kind"] in ("check", "proof"):
             (wf.root / op["receipt"]).with_name("cancel").touch()
         else:
             op["status"] = "unknown"  # An external effect cannot be assumed cancelled.
@@ -154,7 +163,7 @@ def cancel(wf):
 def cancel_one(wf, operation, reason):
     """Request cancellation through the owning worker, never an arbitrary PID."""
     op = wf.state.get("operations", {}).get(operation)
-    if not op or op["kind"] != "check":
+    if not op or op["kind"] not in ("check", "proof"):
         raise ValueError("cancel-check requires a known check operation id")
     recover(wf)
     if op["status"] in ("running", "unknown"):

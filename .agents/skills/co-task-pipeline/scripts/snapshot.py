@@ -37,13 +37,24 @@ def fingerprint(path, cache):
     return value
 
 
-def take(workspaces, workflow, tasks, cache):
+def take(workspaces, workflow, tasks, cache, input_roots=()):
     result = {}
     roots = {w["name"]: Path(w["path"]) for w in workspaces}
     modes = {w["name"]: w.get("snapshot", "walk") for w in workspaces}
     for name, root in roots.items():
         excluded = [workflow] + [p for p in roots.values() if p != root and root in p.parents]
         paths = set()
+        workspace = next(w for w in workspaces if w["name"] == name)
+        monitoring = workspace.get("monitor")
+        monitored = [root / p for p in monitoring] if monitoring is not None else [root]
+        monitored += [root / p for task in list(tasks) + list(input_roots) if task["workspace"] == name for p in task["paths"]]
+
+        def selected(path):
+            return any(path == p or p in path.parents for p in monitored)
+
+        def traverse(path):
+            return selected(path) or any(path in p.parents for p in monitored)
+
         if modes[name] == "git":
             # Git performs ignore pruning without opening SDKs, caches or build outputs.
             # Keep tracked ignored files and ordinary untracked source in the checkpoint.
@@ -59,19 +70,38 @@ def take(workspaces, workflow, tasks, cache):
                         continue
                     if path.is_dir() and not path.is_symlink():
                         raise ValueError(f"Git snapshot needs a separate workspace for submodule {path}")
-                    if path.exists() or path.is_symlink():
+                    if selected(path) and (path.exists() or path.is_symlink()):
                         paths.add(path)
+        if modes[name] == "git":
+            patterns = [p for item in input_roots if item["workspace"] == name for p in item.get("patterns", [])]
+            if patterns:
+                # Declared check inputs include ignored dependencies, including new glob matches.
+                prefixes = [p for item in input_roots if item["workspace"] == name for p in item["paths"]]
+                process = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--others", "--ignored",
+                                          "--exclude-standard", "--", *prefixes],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if process.returncode:
+                    raise ValueError("Git input enumeration failed: " + os.fsdecode(process.stderr))
+                for raw in process.stdout.split(b"\0"):
+                    if raw:
+                        path = root / os.fsdecode(raw)
+                        from checks import matches
+                        if any(matches(path.relative_to(root).as_posix(), pattern) for pattern in patterns) and not any(path == p or p in path.parents for p in excluded):
+                            paths.add(path)
         for directory, dirs, files in os.walk(root, followlinks=False) if modes[name] == "walk" else ():
             here = Path(directory)
             # Directory symlinks are artifacts too, but never followed.
             files += [d for d in dirs if (here / d).is_symlink()]
-            dirs[:] = [d for d in dirs if d not in SKIP and not (here / d).is_symlink()
+            dirs[:] = [d for d in dirs if d != ".git" and
+                       (d not in SKIP or any(here / d == p or here / d in p.parents for p in monitored if p != root))
+                       and not (here / d).is_symlink() and traverse(here / d)
                        and not any(here / d == p for p in excluded)]
             for filename in files:
                 path = here / filename
                 if path == workflow or workflow in path.parents:
                     continue
-                paths.add(path)
+                if selected(path):
+                    paths.add(path)
         # Explicit task files count even inside an ordinarily ignored generated tree.
         for task in tasks:
             if task["workspace"] == name:

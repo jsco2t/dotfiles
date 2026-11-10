@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Codex task-pipeline bookkeeping. No agent launch, installation, or external API calls.
 
-Approvals record operator words supplied by Codex; this is not an authentication boundary.
-Exit 2 means a gate refused the operation. Checks run only approved argv, without a shell.
+New runs settle scope and accept an independently reviewed readable plan without human approval.
+Legacy approvals record operator words; host identities/evidence are supplied, not authenticated.
+Exit 2 means a gate refused the operation. Checks run only contracted argv, without a shell.
 """
 import argparse
 import copy
 import fcntl
 import json
+import io
+import contextlib
 import os
 import re
 import shutil
@@ -49,12 +52,17 @@ def now():
 
 def read(path):
     try:
+        if str(path) == "-":
+            return json.load(sys.stdin)
+        need(Path(path).suffix.lower() not in (".md", ".markdown"),
+             "JSON payloads need a .json extension, never .md; use --file - for stdin")
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise Gate(f"Cannot read JSON {path}: {exc}") from exc
 
 
 def write(path, value):
+    need(path.suffix.lower() not in (".md", ".markdown"), "never write JSON to a Markdown file")
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
                                      delete=False) as stream:
@@ -119,6 +127,15 @@ def validate_scope(scope, root):
         need(workspace.get("snapshot", "walk") in ("walk", "git"), f"{name}: snapshot must be walk or git")
         need(not path.exists() or path.is_dir(), f"{name}: workspace is not a directory")
         need(workspace["mode"] != "read" or path.is_dir(), f"{name}: read workspace must exist")
+        if "monitor" in workspace:
+            patterns = workspace["monitor"]
+            need(strings(patterns), f"{name}: monitor must name files/directories")
+            for relative in patterns:
+                pure = PurePosixPath(relative)
+                need(not pure.is_absolute() and relative == pure.as_posix()
+                     and not {"..", ".git", ".tp"}.intersection(pure.parts)
+                     and not any(c in relative for c in "*?[]\\"),
+                     f"{name}: monitor needs relative files/directories, not globs")
         names.add(name)
         paths.add(path)
     need(scope.get("review") in ("self", "independent", "none"), "review must be self, independent, or none")
@@ -246,11 +263,18 @@ class Workflow:
     write_json = staticmethod(write)
     read_json = staticmethod(read)
 
+    def reload(self):
+        current = Workflow(self.root)
+        self.state = current.state
+
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.meta = self.root / ".tp"
         self.state_path = self.meta / "state.json"
         self.state = read(self.state_path)
+        if self.state.get("governance") == "autonomous":
+            import state_store
+            self.state = state_store.unpack(self.meta, self.state)
         need(self.state.get("version") == VERSION,
              "Incompatible workflow. Use its original client or request an explicit migration.")
 
@@ -258,7 +282,11 @@ class Workflow:
         self.state["history"].append(dict(at=now(), action=action, **values))
 
     def save(self):
-        write(self.state_path, self.state)
+        state = self.state
+        if state.get("governance") == "autonomous":
+            import state_store
+            state = state_store.pack(self.meta, state)
+        write(self.state_path, state)
 
     def contract(self):
         scope = read(self.root / "scope.json")
@@ -280,7 +308,19 @@ class Workflow:
                            for workspace, patterns in check.get("inputs", {}).items()
                            for pattern in patterns if not any(c in pattern for c in "*?[]")
                            and ((roots[workspace] / pattern).is_file() or (roots[workspace] / pattern).is_symlink())]
-        result = take(scope["workspaces"], self.root, plan["tasks"] + explicit_inputs, cache)
+        input_roots = []
+        for check in list(plan.get("checks", {}).values()) + [{"inputs": extra_inputs or {}}]:
+            for workspace, patterns in check.get("inputs", {}).items():
+                prefixes = []
+                for pattern in patterns:
+                    parts = []
+                    for part in PurePosixPath(pattern).parts:
+                        if any(c in part for c in "*?[]"):
+                            break
+                        parts.append(part)
+                    prefixes.append("/".join(parts) or ".")
+                input_roots.append(dict(workspace=workspace, paths=prefixes, patterns=patterns))
+        result = take(scope["workspaces"], self.root, plan["tasks"] + explicit_inputs, cache, input_roots)
         write(cache_path, cache)
         return result
 
@@ -351,7 +391,10 @@ class Workflow:
                 break
             targets = expanded
         for target in targets:
-            self.tasks()[target] = verification_evidence.reset(self, target, reason)
+            if self.state.get("governance") == "autonomous" and target != tid and self.tasks()[target]["status"] == "done":
+                self.state.setdefault("verification_dirty", {})[target] = reason
+            else:
+                self.tasks()[target] = verification_evidence.reset(self, target, reason)
         self.state["review"] = None
         self.event("reopen", tasks=sorted(targets), reason=reason)
 
@@ -366,9 +409,65 @@ class Workflow:
 
 
 def render(root, name, data):
-    # JSON fences retain the exact complete contract while keeping operator docs readable.
-    (root / f"{name}.md").write_text(f"# {name.title()}\n\n```json\n" +
-                                    json.dumps(data, indent=2, ensure_ascii=False) + "\n```\n", encoding="utf-8")
+    """Human contracts are Markdown prose; JSON has its own authoritative file."""
+    lines = [f"# {data.get('title', name.title())}", ""]
+    if name == "scope":
+        lines += ["## Requested outcomes", ""]
+        for d in data["deliverables"]:
+            lines += [f"- **{d['id']}**: {d['what']} — {d['where']}"]
+        lines += ["", "## Requirements", ""]
+        lines += [f"- **{r['id']}**: {r['text']} (serves {', '.join(r['deliverables'])})"
+                  for r in data.get("requirements", [])]
+        for heading, key in (("Constraints", "constraints"), ("Outside scope", "non_goals")):
+            lines += ["", f"## {heading}", ""] + [f"- {v}" for v in data[key]]
+        lines += ["", "## Workspaces and review", ""]
+        for w in data["workspaces"]:
+            boundary = ", ".join(w.get("monitor", ["whole workspace"]))
+            lines += [f"- **{w['name']}**: {w['path']} ({w['mode']}); monitor: {boundary}."]
+        lines += [f"- Final review: {data['review']}; child agent ceiling: {data.get('max_agents', 0)}."]
+    else:
+        lines += [data["summary"], "", "## Delivery sequence", ""]
+        for t in data["tasks"]:
+            lines += [f"### {t['id']}: {t['title']}", "",
+                      f"Serves: {', '.join(t['serves'])}. Requirements: {', '.join(t.get('requirements', [])) or 'see scope'}. ",
+                      f"Depends on: {', '.join(t['depends_on']) or 'none'}.", "",
+                      "Acceptance:", ""]
+            lines += [f"{i}. {a}" for i, a in enumerate(t["acceptance"], 1)]
+            lines += ["", f"Workspace: {t['workspace']}. Files:", ""]
+            lines += [f"- `{v}`" for v in t["paths"]] or ["- Determined from findings within this task."]
+            v = t["verification"]
+            lines += ["", f"Verification: **{v['mode']}**. {v['reason']}",
+                      f"Checks: {', '.join(t['checks']) or 'documented manual evidence'}.", ""]
+        lines += ["## Verification commands", ""]
+        import shlex
+        for key, c in data["checks"].items():
+            lines += [f"### {key}", "", f"Run in {c['workspace']}:", "", "```sh",
+                      shlex.join(c["argv"]), "```", "",
+                      f"Reuse stable evidence: {c.get('reuse', False)}. Inputs: " +
+                      ("; ".join(w + ': ' + ', '.join(v) for w, v in c.get('inputs', {}).items()) or "all monitored files") + ".", ""]
+        lines += ["## Final gate", "", ', '.join(data["final_checks"]) or "Documented manual evidence."]
+    lines += ["", f"Machine contract: {name}.json. Preserve the original request and settled constraints."]
+    (root / f"{name}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def plan_revision(wf, scope=None, plan=None):
+    scope = scope if scope is not None else read(wf.root / "scope.json")
+    plan = plan if plan is not None else read(wf.root / "plan.json")
+    decisions = [{k: event.get(k) for k in ("question", "answer", "by", "evidence")}
+                 for event in wf.state["history"] if event["action"] == "answer"]
+    return digest([scope, plan, (wf.root / "request.md").read_text(),
+                   (wf.root / "plan.md").read_text(), decisions, wf.state.get("question")])
+
+
+def independent(wf, agent_id, purpose):
+    agent = wf.state.get("agents", {}).get(agent_id, {})
+    need(agent.get("status") == "done" and agent.get("accepted") is True
+         and agent.get("role") == "review" and agent.get("purpose") == purpose
+         and text(agent.get("agent_id"))
+         and agent["agent_id"] != wf.state.get("author_agent_id", "main")
+         and not agent.get("unresolved"),
+         "a completed, accepted independent reviewer with no unresolved issues is required")
+    return agent
 
 
 def initialize(args):
@@ -391,11 +490,12 @@ def initialize(args):
     (root / "request.md").write_text(request, encoding="utf-8")
     created = now()
     write(root / ".tp" / "state.json", dict(version=VERSION, title=args.title, created=created,
+          governance="legacy" if args.legacy_approvals else "autonomous", author_agent_id=args.author_agent_id,
           phase="SCOPING", scope=None, plan=None, tasks={}, checks={}, notes=[], review=None,
           history=[], question=None, active_activity=dict(category="bookkeeping", label="Scope preparation",
                                                          started=created, automatic=True, task=None)))
     args.created_workflow = root
-    return f"workflow: {root}\nNext: draft scope.json, then scope check and scope confirm."
+    return f"workflow: {root}\nNext: restate the request, resolve questions, draft scope.json, then scope settle (legacy: scope confirm)."
 
 
 def fresh(check, snapshot, definition=None):
@@ -425,9 +525,11 @@ def next_action(wf):
     if unresolved:
         return "recover: inspect operation receipts before advancing: " + ", ".join(unresolved)
     if state["phase"] == "SCOPING":
-        return "scope: draft/check scope.json and obtain operator confirmation"
+        return ("scope: restate request, resolve questions, then scope settle" if state.get("governance") == "autonomous"
+                else "scope: draft/check scope.json and obtain operator confirmation")
     if state["phase"] == "PLANNING":
-        return "plan: draft/check plan.json and obtain operator approval"
+        return ("plan: write readable plan.md via plan check; independent review, then plan accept --agent <assignment>"
+                if state.get("governance") == "autonomous" else "plan: draft/check plan.json and obtain operator approval")
     if state["phase"] == "COMPLETE":
         return "complete: report.md"
     scope, plan, snapshot = wf.current()
@@ -445,6 +547,14 @@ def next_action(wf):
     active_agents = [a["id"] for a in state.get("agents", {}).values() if a["status"] in ("reserved", "running", "unknown")]
     if active_agents:
         return "agents: collect/validate or cancel assignments before final delivery: " + ", ".join(active_agents)
+    for tid in list(state.get("verification_dirty", {})):
+        task = next(t for t in plan["tasks"] if t["id"] == tid)
+        for name in task["checks"]:
+            if not fresh(state["checks"].get(name), snapshot, plan["checks"][name]):
+                return f"check: {name} (revalidate {tid}; delivery evidence retained)"
+        wf.tasks()[tid]["checks"] = {c: copy.deepcopy(state["checks"][c]) for c in task["checks"]}
+        del state["verification_dirty"][tid]
+        wf.event("revalidated", task=tid, reason="Affected checks current; original acceptance evidence retained")
     for name in plan["final_checks"]:
         if not fresh(state["checks"].get(name), snapshot, plan["checks"][name]):
             return f"check: {name}"
@@ -452,7 +562,7 @@ def next_action(wf):
             state["review"]["fingerprint"] == digest(snapshot) and state["review"]["verdict"] == "pass"):
         return f"review: complete change ({scope['review']})"
     if any(not item.get("classification") for item in state["notes"]):
-        return "closeout: classify noticed items and obtain any required operator decisions"
+        return "closeout: classify worthwhile observations; do not create follow-up obligations for unrelated work"
     return "final: write the verified completion report"
 
 
@@ -515,38 +625,88 @@ def execute(wf, args):
         need(state["phase"] in ("SCOPING", "PLANNING"), "scope already confirmed; use amend")
         scope = read(wf.root / "scope.json")
         validate_scope(scope, wf.root)
-        need(state["scope"] is None or scope == state["scope"], "confirmed scope changed; use amend")
+        need(state["scope"] is None or scope == state["scope"] or
+             state.get("governance") == "autonomous" and state.get("plan") is None,
+             "confirmed scope changed; use amend")
         render(wf.root, "scope", scope)
-        if args.action == "confirm":
-            need(not state["question"], "resolve pending questions before confirmation")
-            need(text(args.answer), "confirmation needs --answer with the operator's words")
+        if args.action in ("confirm", "settle"):
+            need(not state["question"], "resolve pending questions before confirmation/settlement")
+            if args.action == "settle":
+                need(state.get("governance") == "autonomous", "legacy scope needs its original confirmation")
+                need(scope.get("max_agents", 0) > 0, "autonomous scoping needs capacity for one independent plan reviewer; set max_agents >= 1")
+            else:
+                need(text(args.answer), "confirmation needs --answer with the operator's words")
             state["scope"], state["phase"] = scope, "PLANNING"
-            tracking.switch(wf, "research", "Research and plan approved outcomes")
-            wf.event("scope-confirm", answer=args.answer, scope=scope)
-        elif state["phase"] == "SCOPING":
+            tracking.switch(wf, "scoping" if state.get("governance") == "autonomous" else "research", "Investigate and plan settled outcomes")
+            wf.event("scope-settle" if args.action == "settle" else "scope-confirm",
+                     by="manager" if args.action == "settle" else "operator", answer=args.answer, scope=scope)
+        elif state["phase"] == "SCOPING" and state.get("governance") != "autonomous":
             tracking.switch(wf, "waiting", "Scope confirmation")
         return "scope ok: scope.md"
     if command in ("plan", "approve"):
         need(state["phase"] == "PLANNING", "confirm scope before planning; use amend after approval")
         scope, plan = wf.contract()
         render(wf.root, "plan", plan)
-        if command == "approve":
-            need(not state["question"], "resolve pending questions before approval")
+        if command == "approve" or args.action == "accept":
+            need(not state["question"], "resolve pending questions before implementation")
+            if state.get("governance") == "autonomous":
+                need(command == "plan", "use independently reviewed plan accept, not human approval")
+                agent = independent(wf, args.agent, "plan")
+                need(agent.get("plan_revision") == plan_revision(wf, scope, plan),
+                     "independent plan review is stale; review the current request and readable plan")
+                source_snapshot = wf.snapshot(scope, plan, agent.get("inputs"))
+                current_source = check_runtime.fingerprint(source_snapshot, {"inputs": agent["inputs"]}) if "inputs" in agent else digest(source_snapshot)
+                need(agent.get("source") == current_source, "plan review source changed; review the affected plan assumptions")
+                state["plan_review"] = copy.deepcopy(agent)
+            else:
+                need(command == "approve", "legacy plan needs its original approval")
             state["plan"], state["phase"] = plan, "EXECUTING"
             state["tasks"] = {t["id"]: {"status": "pending"} for t in plan["tasks"]}
             state["baseline"] = wf.snapshot(scope, plan)
             state["checkpoint"] = state["baseline"]
             wf.capture_baseline(scope, plan)
             tracking.switch(wf, "bookkeeping", "Begin approved plan")
-            wf.event("approve", answer=args.answer, scope=scope, plan=plan)
-        else:
+            wf.event("plan-accept" if state.get("governance") == "autonomous" else "approve",
+                     by="manager" if state.get("governance") == "autonomous" else "operator",
+                     answer=getattr(args, "answer", None), scope=scope, plan=plan)
+        elif state.get("governance") != "autonomous":
             tracking.switch(wf, "waiting", "Concrete plan approval")
-        return ("plan ok: plan.md" if command == "plan" else "Approved. Run next.") + check_warnings(plan)
+        result = "Plan accepted. Implement the delivery sequence in plan.md." if state.get("plan") else "plan ok: plan.md"
+        return result + "\nReview revision: " + plan_revision(wf, scope, plan) + check_warnings(plan)
     if command == "amend":
         need(state["scope"] is not None, "confirm an initial scope first")
         scope = read(args.scope_file) if args.scope_file else copy.deepcopy(state["scope"])
         plan = read(args.plan_file) if args.plan_file else copy.deepcopy(state["plan"])
         validate_scope(scope, wf.root)
+        manager = args.by == "manager"
+        if manager:
+            need(state.get("governance") == "autonomous" and text(args.reason), "manager amendment needs autonomous workflow and --reason")
+            need(not state.get("question"), "resolve material questions before manager amendments")
+            need(scope == state["scope"], "manager amendment cannot change settled scope; clarify changed requirements")
+            need(plan is not None and state.get("plan") is not None, "accept the initial plan first")
+            previous_tasks = {t["id"]: t for t in state["plan"]["tasks"]}
+            need({t["id"] for t in plan["tasks"]} == set(previous_tasks), "manager amendment cannot add/remove delivery units")
+            for t in plan["tasks"]:
+                old = previous_tasks[t["id"]]
+                need(all(t.get(k) == old.get(k) for k in ("title", "kind", "serves", "requirements", "workspace", "acceptance")),
+                     "manager amendment cannot change requested outcomes or acceptance criteria")
+                need(set(old["paths"]) <= set(t["paths"]) and set(old["checks"]) <= set(t["checks"]),
+                     "manager amendment cannot remove existing files/check obligations")
+                need(t["verification"] == old["verification"], "use test-update for honest test corrections; retain verification strategy")
+            need(set(state["plan"]["final_checks"]) <= set(plan["final_checks"]), "manager amendment cannot drop final gates")
+            need(not args.supersede_tests, "use independently reviewed test-update for agent-owned corrections")
+            changed_checks = [name for name, definition in state["plan"]["checks"].items()
+                              if plan["checks"].get(name) != definition]
+            if changed_checks:
+                reviewer = independent(wf, args.agent, "amendment")
+                need(reviewer.get("amendment_revision") == digest([scope, state["plan"], plan]),
+                     "check correction review is stale; independently verify unchanged test/acceptance obligations")
+                reviewed_source = wf.snapshot(scope, state["plan"], reviewer.get("inputs"))
+                signature = check_runtime.fingerprint(reviewed_source, {"inputs": reviewer["inputs"]}) if "inputs" in reviewer else digest(reviewed_source)
+                need(reviewer.get("source") == signature, "check correction source changed since review")
+            args.answer = args.reason
+        else:
+            need(text(args.answer), "changed scope/adoption needs the operator's actual --answer")
         old_roots = {w["name"]: w["path"] for w in state["scope"]["workspaces"]}
         need(all(w["name"] not in old_roots or w["path"] == old_roots[w["name"]] for w in scope["workspaces"]),
              "use a new workspace name for a changed root so baseline provenance remains unambiguous")
@@ -571,6 +731,14 @@ def execute(wf, args):
         if new_snapshot is not None:
             verification_evidence.preserve(wf, new_snapshot, need)
         adopted = changed(state.get("checkpoint", {}), new_snapshot) if new_snapshot is not None else []
+        if manager and new_snapshot is not None:
+            running = next((t for t in state["plan"]["tasks"] if state["tasks"][t["id"]]["status"] == "running"), None)
+            if running:
+                wf.edits(state["scope"], state["plan"], running, state["tasks"][running["id"]]["before"])
+                expanded = wf.snapshot(state["scope"], state["plan"])
+                need(expanded == new_snapshot, "manager amendment exposes previously unmonitored contents; inspect before adoption")
+            else:
+                need(not adopted, "manager amendment cannot adopt unexpected workspace edits")
         new_tasks = {}
         for task in (plan or {"tasks": []})["tasks"]:
             previous = state["tasks"].get(task["id"], {})
@@ -580,8 +748,13 @@ def execute(wf, args):
             if task["id"] in old_tasks:
                 need(not previous.get("test_checkpoint") or task["verification"] == old_tasks[task["id"]]["verification"],
                      "changed pinned verification needs explicit --supersede-tests before a replacement checkpoint")
-                new_tasks[task["id"]] = previous if same and previous.get("status") == "done" else verification_evidence.reset(
-                    wf, task["id"], "Approved amendment: " + args.answer)
+                if manager:
+                    new_tasks[task["id"]] = previous
+                    if previous.get("status") == "done" and not same:
+                        state.setdefault("verification_dirty", {})[task["id"]] = args.reason
+                else:
+                    new_tasks[task["id"]] = previous if same and previous.get("status") == "done" else verification_evidence.reset(
+                        wf, task["id"], "Approved amendment: " + args.answer)
                 retained = new_tasks[task["id"]]
                 for repair in retained.get("repairs", []):
                     need(repair["status"] == "superseded" or
@@ -590,6 +763,16 @@ def execute(wf, args):
             else:
                 new_tasks[task["id"]] = {"status": "pending"}
         # An unchanged dependent still needs re-verification if its prerequisite changed.
+        if manager:
+            dirty = set(state.get("verification_dirty", {})) | {tid for tid, entry in new_tasks.items() if entry["status"] != "done"}
+            while True:
+                expanded = dirty | {t["id"] for t in plan["tasks"] if dirty.intersection(t["depends_on"])}
+                if expanded == dirty:
+                    break
+                dirty = expanded
+            for tid in dirty:
+                if new_tasks[tid]["status"] == "done":
+                    state.setdefault("verification_dirty", {})[tid] = args.reason
         while True:
             affected = [t["id"] for t in (plan or {"tasks": []})["tasks"]
                         if new_tasks[t["id"]]["status"] == "done" and any(
@@ -597,7 +780,12 @@ def execute(wf, args):
             if not affected:
                 break
             for tid in affected:
-                new_tasks[tid] = verification_evidence.reset(wf, tid, "Prerequisite changed in approved amendment")
+                if manager:
+                    state.setdefault("verification_dirty", {})[tid] = args.reason
+                else:
+                    new_tasks[tid] = verification_evidence.reset(wf, tid, "Prerequisite changed in approved amendment")
+            if manager:
+                break
         changes = []
         for key in sorted(set(state["scope"]) | set(scope)):
             if state["scope"].get(key) != scope.get(key):
@@ -622,12 +810,16 @@ def execute(wf, args):
             write(wf.root / "plan.json", plan)
             render(wf.root, "plan", plan)
             state["checkpoint"] = new_snapshot
+            state["verification_dirty"] = {tid: reason for tid, reason in state.get("verification_dirty", {}).items() if tid in new_tasks}
             wf.capture_baseline(scope, plan)
         tracking.switch(wf, "bookkeeping", "Apply approved amendment")
-        wf.event("amend", answer=args.answer, changes=changes, scope=scope, plan=plan)
+        wf.event("amend", answer=args.answer, by=args.by, changes=changes, scope=scope, plan=plan)
         return "Amendment recorded; affected work and final verification reopen. Inspect partial edits, then next."
     wf.runnable()
     scope, plan = wf.contract()
+    if command == "correction-proof":
+        import corrections
+        return corrections.execute(wf, args, sys.modules[__name__])
     if command == "refine":
         _, _, task = wf.task(args.task)
         entry = wf.tasks()[args.task]
@@ -688,10 +880,13 @@ def execute(wf, args):
             need(target is not None, "unknown repair step")
         need(target.get("test_checkpoint"), "start and pin this task/repair first")
         correction = read(args.file)
-        need(isinstance(correction, dict) and set(correction) == {"kind", "reason", "evidence"}
-             and correction.get("kind") == "mechanical"
-             and text(correction.get("reason")) and text(correction.get("evidence")),
-             "only documented mechanical corrections qualify; changed strategy requires an approved amendment")
+        ordinary = (state.get("governance") != "autonomous" and isinstance(correction, dict)
+                    and set(correction) == {"kind", "reason", "evidence"} and correction.get("kind") == "mechanical")
+        reviewed = (isinstance(correction, dict) and correction.get("kind") == "correction"
+                    and set(correction) == {"kind", "reason", "evidence", "agent", "regression"}
+                    and state.get("governance") == "autonomous")
+        need((ordinary or reviewed) and text(correction.get("reason")) and text(correction.get("evidence")),
+             "use a documented mechanical correction or independently reviewed correction; retain acceptance criteria")
         checkpoint = target["test_checkpoint"]
         need(checkpoint.get("files"), "original pinned copies unavailable; use an approved amendment")
         snapshot, _ = wf.edits(scope, plan, task, entry["before"])
@@ -701,12 +896,43 @@ def execute(wf, args):
         verification = target["verification"] if args.repair else task["verification"]
         need(fresh(state["checks"].get(verification["check"]), snapshot, plan["checks"][verification["check"]]),
              "run the verification check on current contents before recording a correction")
+        if reviewed:
+            agent = independent(wf, correction["agent"], "test-correction")
+            need(agent.get("task") == args.task and agent.get("repair") == args.repair,
+                 "correction reviewer must cover this exact task/repair pin")
+            current = check_runtime.fingerprint(snapshot, {"inputs": agent["inputs"]}) if "inputs" in agent else digest(snapshot)
+            import corrections
+            need(agent.get("source") == current and agent.get("pin_revision") == digest(checkpoint)
+                 and agent.get("correction_revision") == corrections.revision(wf, args.task, args.repair, agent.get("proof")),
+                 "test correction review is stale; inspect current tests, original pin and criteria")
+            proof = correction["regression"]
+            need(isinstance(proof, dict) and proof.get("basis") in ("retained", "reproduced") and text(proof.get("evidence")),
+                 "correction needs independently verified regression evidence")
+            if proof["basis"] == "reproduced":
+                receipt = state.get("proofs", {}).get(proof.get("operation"), {})
+                details = receipt.get("proof", {})
+                need(receipt and receipt.get("stable") and details.get("task") == args.task
+                     and details.get("repair") == args.repair and details.get("tests") == hashes
+                     and details.get("check_definition") == plan["checks"][verification["check"]]
+                     and agent.get("proof") == proof.get("operation"),
+                     "reproduced correction needs the actual stable correction-proof receipt for these exact tests and reviewer")
+                code = receipt["exit_code"]
+                need((code > 0 and code not in (124, 127, 130)) if checkpoint["stage"] == "red" else code == 0,
+                     "baseline must demonstrate the intended failure/pass, not a launch error or timeout")
+            else:
+                need(proof.get("assertions_unchanged") is True and proof.get("original_checkpoint_valid") is True,
+                     "retained proof requires unchanged cases/assertions and a genuine original behavior failure; otherwise reproduce")
+            verification_evidence.archive(wf, args.task, "Agent-owned test correction: " + correction["reason"])
         target.setdefault("test_updates", []).append(dict(previous=copy.deepcopy(checkpoint), **correction))
         target["test_checkpoint"] = dict(checkpoint, hashes=hashes, files=wf.pin_files(task, hashes))
+        if reviewed and correction["regression"]["basis"] == "reproduced":
+            target["test_checkpoint"].update(log=receipt["log"],
+                                           note=correction["regression"]["evidence"],
+                                           baseline=details["identity"], proof=receipt["operation"])
         state["review"] = None
         wf.event("test-update", task=args.task, previous=checkpoint["hashes"], current=hashes,
                  detail=correction, reason=correction["reason"], repair=args.repair, by="manager")
-        return "Mechanical correction recorded; original tests and test-first evidence preserved."
+        return "Test correction recorded; original tests/logs retained, current regression proof and green check preserved."
     if command == "widen":
         _, _, task = wf.task(args.task)
         entry = wf.tasks()[args.task]
@@ -761,6 +987,14 @@ def execute(wf, args):
         if plan["checks"].get(args.name, {}).get("reuse", False) and not args.force and fresh(previous, snapshot, plan["checks"][args.name]):
             wf.event("check-reuse", check=args.name, log=previous["log"])
             return f"PASS {args.name} (reused unchanged contents): {previous['log']}"
+        if state.get("governance") == "autonomous":
+            recent = [e for e in state["history"] if e["action"] == "check" and e.get("check") == args.name][-2:]
+            signature = check_runtime.fingerprint(snapshot, plan["checks"].get(args.name, {}))
+            repeated = len(recent) == 2 and all(e["exit_code"] != 0 and e.get("fingerprint") == signature for e in recent)
+            need(not repeated or text(args.retry_reason),
+                 "same check failed twice without source changes; diagnose infrastructure/fixture failure and retry with --retry-reason, not blind retries")
+            if args.retry_reason:
+                wf.event("check-retry", check=args.name, reason=args.retry_reason)
         result = wf.run_check(args.name, scope, plan)
         need(result["exit_code"] == 0 and result["stable"],
              f"check {args.name} failed or changed source artifacts; inspect {result['log']}")
@@ -825,7 +1059,10 @@ def execute(wf, args):
         wf.reopen(args.task, args.reason)
         return "Task and completed dependents reopened. Run next."
     if command == "note":
-        state["notes"].append(dict(id=len(state["notes"]) + 1, text=args.text))
+        item = dict(id=len(state["notes"]) + 1, text=args.text)
+        if state.get("governance") == "autonomous":
+            item.update(classification="observation", reason="Outside requested outcomes; reported for consideration, no follow-up obligation.")
+        state["notes"].append(item)
         wf.event("note", text=args.text)
         return f"Noted item {len(state['notes'])}."
     if command == "closeout":
@@ -909,7 +1146,7 @@ def execute(wf, args):
         report += ["", "## Review", "", state["review"]["summary"] + f" ({scope['review']})." if state["review"] else "None required by approved scope.",
                    "", "## Scope decisions"]
         for event in state["history"]:
-            if event["action"] in ("scope-confirm", "approve", "amend", "answer", "widen", "refine", "test-update"):
+            if event["action"] in ("scope-settle", "plan-accept", "scope-confirm", "approve", "amend", "answer", "widen", "refine", "test-update"):
                 report += [f"- {event['action']} ({event.get('by', 'operator')}): {event.get('answer', event.get('reason'))}"]
                 if event["action"] in ("refine", "test-update"):
                     report += [f"  - {event['task']}: {json.dumps(event['detail'])}"]
@@ -955,6 +1192,10 @@ SCHEMAS = {
                                      reason="Reproduce the validated bug before changing production.")),
     "test-update": dict(kind="mechanical", reason="Spell the permission literal in octal for lint.",
                         evidence="Pinned test diff changes 0 to 0o0 only; values, cases and assertions are identical. Original red log retained."),
+    "test-correction": dict(kind="correction", reason="Fix an incorrect test fixture without changing required behavior.",
+                            evidence="Independent reviewer checked old/new tests, assertions, criteria and genuine regression proof.",
+                            agent="A2", regression=dict(basis="reproduced", operation="proof-actual-receipt-id",
+                            evidence="Corrected test executes and fails on the intended behavior against the isolated pre-fix baseline.")),
     "repair": dict(id="F1", reason="Reproduced incorrect multiplication, required by criterion 1.", criteria=[1],
                    paths=["calc.py", "test_mul_regression.py"], checks=dict(unit=dict(
                        argv=["python3", "-B", "-m", "unittest", "discover"], workspace="app", reuse=True,
@@ -985,6 +1226,8 @@ def parser():
     item.add_argument("location")
     item.add_argument("--title", required=True)
     item.add_argument("--request-file", required=True)
+    item.add_argument("--legacy-approvals", action="store_true", help="compatibility fixtures only; new runs use independent plan review")
+    item.add_argument("--author-agent-id", default="main", help="actual main host identity when exposed")
     item = commands.add_parser("schema")
     item.add_argument("name", choices=SCHEMAS)
     for name in ("status", "next", "approve", "resume", "resolve", "final"):
@@ -997,14 +1240,18 @@ def parser():
         if name == "status":
             item.add_argument("--json", action="store_true")
     item = commands.add_parser("scope")
-    item.add_argument("action", choices=("check", "confirm"))
+    item.add_argument("action", choices=("check", "confirm", "settle"))
     item.add_argument("--answer")
     item = commands.add_parser("plan")
-    item.add_argument("action", choices=("check",))
+    item.add_argument("action", choices=("check", "accept"))
+    item.add_argument("--agent", help="completed independent plan-review assignment")
     item = commands.add_parser("amend")
     item.add_argument("--scope-file")
     item.add_argument("--plan-file")
-    item.add_argument("--answer", required=True)
+    item.add_argument("--answer")
+    item.add_argument("--by", choices=("operator", "manager"), default="operator")
+    item.add_argument("--reason")
+    item.add_argument("--agent", help="independent reviewer required when correcting an existing check")
     item.add_argument("--supersede-tests", action="append", default=[], metavar="TASK[:REPAIR]",
                       help="explicitly approved replacement of a pinned test strategy; archives original evidence")
     item = commands.add_parser("halt", aliases=["hault"])
@@ -1024,6 +1271,7 @@ def parser():
     item = commands.add_parser("check")
     item.add_argument("name")
     item.add_argument("--force", action="store_true", help="rerun even when a passing check matches current contents")
+    item.add_argument("--retry-reason", help="diagnosed cause/change after repeated infrastructure failures")
     item = commands.add_parser("widen")
     item.add_argument("task")
     item.add_argument("--path", action="append", required=True)
@@ -1045,9 +1293,27 @@ def parser():
         item.add_argument("--file", required=True)
         if name == "closeout":
             item.add_argument("--answer")
+    item = commands.add_parser("correction-proof", help="execute corrected tests against a prepared isolated pre-fix baseline")
+    item.add_argument("task")
+    item.add_argument("--repair")
+    item.add_argument("--baseline", required=True)
+    item.add_argument("--identity", required=True, help="exact pre-fix revision/fixture provenance")
+    item.add_argument("--snapshot", choices=("git", "walk"), default="walk")
+    item = commands.add_parser("batch", help="sequential durable steps, stop on failure, then next")
+    item.add_argument("--file", required=True)
     import tracking
     tracking.add_parsers(commands)
     return result
+
+
+@contextlib.contextmanager
+def stdin_payload(value):
+    previous = sys.stdin
+    try:
+        sys.stdin = io.StringIO(json.dumps(value))
+        yield
+    finally:
+        sys.stdin = previous
 
 
 def main(argv=None):
@@ -1064,12 +1330,28 @@ def main(argv=None):
             print(output)
             return 0
         need(args.workflow, "use -w with the workflow directory")
-        for key in ("answer", "reason", "question", "note"):
+        for key in ("answer", "reason", "question", "note", "identity"):
             if hasattr(args, key) and getattr(args, key) is not None:
                 need(text(getattr(args, key)), f"--{key} must not be blank")
+        if args.command == "batch":
+            steps = read(args.file)
+            need(isinstance(steps, list) and steps, "batch needs a nonempty list of argv/input steps")
+            for step in steps:
+                need(isinstance(step, dict) and set(step) <= {"argv", "input"} and strings(step.get("argv")),
+                     "batch steps need argv, plus optional structured input")
+                need(step["argv"][0] not in ("batch", "init", "schema")
+                     and not any(v in ("-w", "--workflow") or v.startswith("--workflow=") for v in step["argv"]),
+                     "batch cannot nest, initialize, or switch workflows")
+            for index, step in enumerate(steps, 1):
+                print(f"Step {index}: {step['argv'][0]}", flush=True)
+                with stdin_payload(step.get("input")):
+                    code = main(["-w", args.workflow] + step["argv"])
+                if code:
+                    return code
+            return main(["-w", args.workflow, "next"])
         wf = Workflow(args.workflow)
         if args.command == "status":
-            print(json.dumps(wf.state, indent=2) if args.json else status(wf))
+            print(json.dumps(read(wf.state_path), indent=2) if args.json else status(wf))
             return 0
         if args.command == "show":
             print(execute(wf, args))
@@ -1086,6 +1368,9 @@ def main(argv=None):
             if args.command == "hault":
                 args.command = "halt"
             try:
+                if args.command not in ("halt", "recover", "cancel-check"):
+                    if check_runtime.recover(wf):
+                        wf.save()
                 output = execute(wf, args)
                 wf.save()
             except BaseException:

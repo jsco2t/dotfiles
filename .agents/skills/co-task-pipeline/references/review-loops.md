@@ -3,9 +3,9 @@
 Use this reference when reviews and fixes are the requested work. The pipeline coordinates
 the named reviewer; it does not replace that review with its own generic final checklist.
 
-## Map, then plan
+## Scope, then implement
 
-Research identifies coherent responsibility boundaries, their entry points/callers, critical
+Scoping identifies coherent responsibility boundaries, their entry points/callers, critical
 invariants, and useful verification commands. Give each component a primary owner; record
 cross-component edges so they are traced without duplicating entire reviews. A short map is
 usually enough. Stop mapping when each unit has a clear review scope and no coverage hole.
@@ -23,7 +23,7 @@ affected verification → repair inspection → authorized commit. Use `adaptive
 findings are unknown. Initially it can have empty paths/checks and manual verification for a
 clean review. Acceptance must require qualifying defects to be fixed test-first, then checked
 and committed where authorized. Do not pre-create a second task just to checkpoint each review,
-or another plan/approval round for each finding. Use incremental `repair` steps within the
+or another human approval round for each finding. Use incremental `repair` steps within the
 task when findings arrive sequentially: each step has its own red/green checkpoint and
 retains prior regressions. A genuinely new outcome or architecture exception still needs
 one concrete decision; do not silently change outcomes through repair details.
@@ -56,9 +56,22 @@ Maintain one compact cycle ledger. It should answer completed components/cycles,
 closed, current activity and remaining work. After cycle one, report an evidence-based forecast
 separating review, repair, checks, environment work and operator waits. If a repair needs a
 material architecture/policy exception, prepare one concrete decision and ask. Routine
-refinement and equivalent lint corrections use existing plan authority.
+refinement and honest test corrections use existing scope authority and execution.md; no human approval is needed.
 
 Final pipeline review verifies integration and request coverage using completed reports and
 current checks. Preserve a requested whole-codebase security pass, and keep its scope distinct
 from repair inspection. No finite runtime is guaranteed: defects can make repairs expensive;
 the remedy is an honest forecast and efficient execution, never an invented clean result.
+
+## Avoid repeated acceptance and final-gate discovery
+
+Completed review coverage is evidence; a stale check is a verification obligation. In new runs,
+manager runner/dependency amendments and reopened prerequisites preserve completed dependent
+tasks and mark their verification dirty. Finish the repair, then revalidate affected checks
+without repeating task acceptance or removing/restoring prerequisites just to get unstuck.
+Changed existing check commands need a focused independent review of preserved obligations.
+
+When platform integration is part of the request, prefer an early bounded diagnostic sweep that
+collects independent fixture failures together before the strict final gate. Two unchanged
+infrastructure failures trigger readiness diagnosis, not another blind emulator/device retry.
+Do not broaden into unrelated platform work or add unrequested performance/licensing checks.

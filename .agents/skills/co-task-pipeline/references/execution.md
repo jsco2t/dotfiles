@@ -1,186 +1,85 @@
-# Measured, incremental and recoverable execution
+# Execution and honest test corrections
 
-Read the sections relevant to the current operation. Use the bundled helper; `tp` here is
-the absolute Python invocation defined in helper.md. These mechanisms support the approved
-request; they do not authorize new outcomes or external side effects.
+Use the normal start → implementation → affected checks → done loop in [helper.md](helper.md).
+Retain previous evidence rather than starting a new research/approval cycle per finding.
 
-## Progress and overhead
+## Prevent premature pins
 
-```text
-tp -w <workflow> activity begin research --label "Map component boundaries"
-tp -w <workflow> activity end --evidence "research.md contains the bounded map"
-tp -w <workflow> metrics
-tp -w <workflow> usage --file <observed-usage.json>
-```
+Before a red checkpoint, compile/load fixtures and check that tests execute the intended
+behavior. An import error, build failure, unavailable device or broken setup is not a useful
+behavioral failure. Correct these mistakes and rerun before pinning. Keep fixture checks
+focused. Once checks pass and no new concern appears, proceed; do not repeat broad verification.
 
-Main-thread phase wall spans are automatic at existing scope/plan, task/repair, check,
-decision and resume boundaries, without extra tool calls. Categories are research,
-implementation, verification, bookkeeping and waiting. They measure time between declared
-workflow boundaries, including idle time inside that phase, not CPU-active work. Only one main
-span is active; delegated work is tracked separately. Use explicit begin/end to refine a
-meaningful phase, not per tool call; begin can replace an automatic span. `block` switches to
-waiting, scope/plan checks mark approval wait, and halt/final close the active span. Check
-recovery closes its span at the worker's actual end time, so lost-parent gaps are not labeled
-check execution. Covered/unclassified wall time is reported. Do not invent spans retroactively.
+## Correcting pinned tests without human approval
 
-The helper automatically appends receipts for **mutating helper invocations**, including failed
-ones, under `.tp/telemetry.jsonl`. Read-only status/show/packet/metrics preserve their read-only
-contract and are not counted. Worker check durations and check-reuse events are automatic.
-Agent assignment durations run from reservation to settlement and may include scheduling wait.
-Question-to-answer/amend intervals separately give recorded operator wait; scope/plan waits
-also appear in the main waiting spans. No CPU-active or complete tool-time inference is made.
+The agent owns honest test repairs. A pin is evidence to preserve and, when mistaken, correct;
+it is not a reason to wait overnight for permission to fix an import or expectation.
 
-`metrics` returns compact JSON. `final` also saves metrics.json alongside report.md. Task and
-requirement counts reflect accepted saved state, not a fresh independent artifact audit.
-Compare completed requested units and accepted quality against time/cost, not task/artifact count.
-Main activity, helper, checks, agents and operator-wait durations can overlap: never add them
-as though they were exclusive categories or claim a percentage from overlapping clocks.
+1. Inspect the original saved tests and red/pin log, task criteria and current diff. Identify
+   the actual mistake and how the corrected test proves the unchanged requested behavior.
+   Preserve every unaffected regression. Correct the tests in the running task’s declared
+   paths; keep other actors’ edits separate. Do not restore the live production tree.
+2. Choose the evidence basis. If values/cases/assertions and the genuine original behavioral
+   proof are unchanged, use `basis: retained` with `assertions_unchanged: true`,
+   `original_checkpoint_valid: true` and specific evidence. An original compiler/setup failure
+   cannot be retained as behavioral red. A semantic correction needs a fresh reproduction.
+3. For reproduction, prepare an isolated trustworthy pre-fix checkout/fixture outside all
+   live workspace roots. Include the exact corrected test files, necessary source,
+   dependencies/configuration and explicit baseline identity. Inspect the baseline diff;
+   `.tp/baseline` copies alone may not reconstruct a multi-step repair’s original state.
+   Baseline source symlinks cannot escape the directory, and the runner/language search path
+   must not point into live workspaces. This is evidence bookkeeping, not an OS sandbox: the
+   reviewer must inspect source/runner behavior and dependencies as well as the directory name.
+   Execute the contracted verification command there:
 
-`schema usage` shows an import with unique source ID and actual provenance. Measurements may
-include input/cached-input/output tokens, tool calls and repeated reads. A cumulative update
-replaces the same source ID, preventing double counting repeat imports. Ensure different
-sources do not overlap (e.g. main totals already including children). Missing values remain
-unmeasured; the helper does not estimate model usage or monetary cost. Retain requested and
-runtime-reported model settings separately. Use actual host exports for full tool/context data.
+   ```text
+   tp correction-proof T01 --repair F1 --baseline <isolated-dir> --identity <exact-pre-fix-provenance> --snapshot git
+   ```
 
-## Incremental repair steps
+   Omit `--repair` for a task-level pin; use `--snapshot walk` for a small non-Git fixture.
+   This uses the same detached cancellable worker as normal checks. It records exact argv,
+   baseline fingerprint, corrected test hashes, observed exit status, stability and log under
+   a `proof-...` operation ID. It does not overwrite current green evidence. Inspect its log:
+   intended assertion/behavior failure for red, original passing behavior for characterization.
+   The helper cannot recognize every compiler/setup error; the reviewer must reject those.
+   Do not invent the exit status or supply an arbitrary log in place of execution.
+4. Run the current live verification check green. Get one focused independent reviewer with
+   `role: review, purpose: test-correction, task: T01`, optional `repair: F1`, and `proof:
+   <proof-operation>` when reproduced. Give the reviewer original/corrected tests, original
+   criteria/pin, current diff/green log and baseline identity/actual proof log. They verify
+   cases/assertions, meaningful regression detection and absence of weakened obligations.
+   The helper binds mandatory corrected-test hashes and task/pin/proof revision even if
+   optional review inputs are narrow. Attach the real host identity and validate the response.
+5. Record `test-update T01 --repair F1 --file -`. JSON has `kind: correction`, concrete
+   `reason`, `evidence`, `agent: <completed-assignment-id>` and `regression`. For reproduced
+   evidence use `{"basis":"reproduced","operation":"proof-actual-id","evidence":"specific intended failure"}`.
+   For retained evidence use the fields in step 2. A stale review, mismatched test/proof,
+   missing real receipt or absent current green stops replacement. Original pin/copies/logs
+   remain archived; the corrected pin carries the current proof. Continue without human approval.
 
-Keep one top-level task per delivered unit/cycle. With an approved `adaptive: true` task,
-unknown defects can become successive small repair steps without a new task contract:
+Legacy workflows retain their previous formatting-only `kind: mechanical` procedure or actual
+operator-authorized supersession. Do not silently migrate legacy authority. New workflows
+require focused review of every pin correction; merely labeling a semantic change mechanical
+does not bypass review. Before a pin, routine test fixes need no correction ceremony.
 
-```text
-tp schema repair
-tp -w <workflow> repair start T01 --file <repair-F1.json>
-tp -w <workflow> repair test T01 --id F1 --stage red --note <actual-behavior-failure>
-tp -w <workflow> check unit
-tp schema repair-result
-tp -w <workflow> repair done T01 --id F1 --file <repair-F1-result.json>
-```
+If a trustworthy pre-fix baseline cannot be reconstructed, investigate an alternate genuine
+reproduction and record the limitation honestly. Do not manufacture red evidence, weaken tests
+or ask the human to approve success without proof. Ask only for missing facts or material
+requirements they actually need to decide.
 
-Repair JSON names an ID, demonstrated finding/blocker reason, existing acceptance `criteria`
-(1-based), concrete `paths`, check definitions, and red-green/characterization `verification`.
-It appends needed paths/checks to the task, never replaces existing commands/outcomes, captures
-original files and checks drift before adoption. Characterization uses `--stage pin`.
-The top-level cycle can keep manual verification for its review/closure evidence while each
-repair has its own test-first gate. Do not use manual cycle verification to bypass a repair.
+## Evidence reuse and recovery
 
-Start one step, add and inspect its regressions, checkpoint the intended failure before its
-production edits, implement, check green, inspect the diff, then record concrete result
-evidence. A missing tool, compile error or broken fixture is not a valid behavioral red.
-All previous pins remain immutable; use a distinct regression module/file for a new step
-when adding assertions would change an earlier pin. Narrow production files may overlap
-between successive repairs. New outcomes or semantic test corrections still need approval.
+Current checks are available from `packet T01 --section checks`; a final reviewer without a
+task can use `packet --section checks`. These are saved logs/definitions, not a fresh audit;
+helper execution boundaries validate freshness. Include full source/config/runner/dependency
+and environment inputs when caching. Ignore unrelated bookkeeping changes, never dependencies.
 
-`test-update T01 --repair F1 --file <mechanical-correction.json>` applies the documented
-equivalence-only correction gate to a repair pin. It retains original copies and evidence.
-Every step must close before task done. Task completion checks every repair's final tests
-on final current contents, so a later repair cannot leave an earlier regression broken.
-Partial work, repair checkpoints, logs and original copies survive halt/resume.
-Amendments and reopening also retain these records; original attempts are archived in
-`evidence_history`. A repair whose tests were explicitly superseded remains visible with
-`status: superseded`. Its approved replacement spec adds `replaces: ["F1"]`, covers all of
-F1's criteria, and must complete its own red/pin and green checks before task completion.
-Supersession cannot by itself satisfy a criterion or remove the original evidence.
+`next` and advancing commands merge finished check/proof receipts. Running/unknown operations
+are not replayed. `cancel-check --id <id> --reason ...` requests cancellation through the
+recorded worker; inspect/recover after it settles. Missing receipts require diagnosis, not
+repeated respawn. External effect receipts must be reconciled by actual read-back before retry.
 
-## Check inputs and safe reuse
-
-```json
-{
-  "argv": ["python3", "-B", "-m", "unittest", "discover"],
-  "workspace": "app",
-  "reuse": true,
-  "inputs": {
-    "app": ["src/", "tests/", "pyproject.toml", "requirements.lock"],
-    "shared": ["build-config.json"]
-  },
-  "environment": ["FEATURE_MODE"]
-}
-```
-
-`inputs` maps approved read/write workspace names to relative file, directory-prefix or glob
-patterns. `**/` also matches zero directories. Check definition and selected environment values
-participate in fingerprints; environment values are hashed rather than printed. Absence of a
-declared input is meaningful: later creation/removal invalidates the pass. Literal files are
-checkpointed even inside ignored/generated trees. Patterns otherwise select checkpointed
-source: name meaningful ignored dependency files literally rather than relying on a glob to
-walk caches. No .git/.tp or escaping patterns. Missing `inputs` retains legacy whole-workspace
-freshness. `reuse` is still opt-in; unknown external/environment inputs require fresh execution.
-`plan check` and `approve` warn when `reuse: true` lacks scoped inputs. Resolve the warning
-with complete declarations or a recorded reason for conservative whole-workspace freshness;
-the helper does not rewrite approved legacy contracts. Refinement, widening, reopening and
-amendments retain passes only when their definitions and current inputs still match.
-
-Include the command's test runner/scripts, transitive source, build configuration, relevant
-feature flags, dependency manifests and lockfiles. An incorrect declaration can reuse stale
-evidence; keep whole-workspace defaults when uncertain. External/time-sensitive checks remain
-uncached. Scoped passes survive unrelated docs edits and bounded refinement when their inputs
-are unchanged. Any monitored source mutation during a check makes it unstable even if it was
-outside the selected inputs; a command cannot mutate source and certify its own pass.
-
-## Checks, cancellation and recovery
-
-Checks now have durable operation intent, logs and worker receipts under `.tp/operations/`.
-A detached standard-library worker executes only the approved command, enforces its timeout,
-and writes its receipt atomically. The caller releases the bookkeeping lock while waiting.
-`halt` can therefore save the halt and request cancellation promptly. The worker stops the
-command process group, including ordinary grandchildren, and records an interrupted result.
-Commands that deliberately detach out of that process group need explicit reconciliation.
-
-For a hung owned check, use `tp cancel-check --id <check-operation-id> --reason <observed-hang>`
-and then `tp recover`. IDs are in the context packet's unresolved operations or status detail.
-This requests cancellation through that operation's worker; it never signals a supplied PID,
-changes the contract, halts the workflow or requires another user resume instruction. A completed
-receipt wins a cancellation race and is recovered truthfully. Repeated cancellation of a settled
-check is a no-op. Unknown/dead workers remain unresolved until inspected/reconciled. Retry only
-after the prior operation settles and its cause has been repaired within existing authority.
-
-```text
-tp -w <workflow> status
-tp -w <workflow> recover
-tp -w <workflow> resume --answer <actual-resume-instruction>
-tp -w <workflow> packet T01
-```
-
-`recover` merges receipts idempotently, checks the captured contract/source snapshot and
-records actual exit status. A success is reusable only when current evidence is valid.
-Worker evidence survives caller loss, so recovery does not rerun a completed check. A worker
-without a receipt is still running or unknown. Inspect process records/logs; never infer that
-silence means failure. For a dead worker with no receipt, stop/reconcile any recorded child
-and use `operation finish --id <check-id>` with failed/cancelled status and concrete evidence.
-Unknown checks cannot be marked passing by a prose receipt. No automatic exactly-once claim
-is made across arbitrary crashes or external systems.
-
-## Commit and delivery receipts
-
-```text
-tp -w <workflow> operation begin --id C1 --kind commit --task T01 --intent <exact-effect> --authority <existing-authorization>
-tp schema operation-result
-tp -w <workflow> operation finish --id C1 --file <read-back-result.json>
-```
-
-Kinds are commit and delivery. These commands record intent/outcome, never execute the action
-or grant authorization. Read-back evidence names the exact commit, remote artifact, or delivery
-result. An interrupted effect becomes unknown; inspect whether it already happened before any
-retry. Resolve its actual completed/failed/cancelled status with evidence. Unresolved operations
-prevent advancing/final completion. Publishing authority is separate from scope bookkeeping.
-
-## Compact context and delegation
-
-`packet T01` contains the complete task, requirement text, constraints/non-goals, workspace roots,
-authority links, active repair and unresolved-operation status. It avoids file-hash maps and
-duplicated artifacts. `packet --agent A1` includes the reserved brief. Its explicit `details`
-index links `checks`, `repairs`, `decisions` and archived `evidence` sections with their counts.
-Fetch `packet T01 --section checks --offset 0 --count 10` and follow `next_offset` until the
-needed section is read. Pages automatically fit fewer complete items within the byte budget;
-none are silently dropped. Check pages include definitions and results; repair pages include
-pins/results without workspace snapshot maps. Full authority/constraints remain in the context
-packet. Read linked decisions before dependent work.
-Default limit is 16,000 bytes; `--max-bytes` changes it. Essential context that exceeds the
-limit is an error: narrow the assignment or deliberately use a justified larger packet,
-never silently truncate requirements. Read linked decisions/research on demand.
-
-Follow delegation.md to reserve, spawn, attach identity and validate/settle up to three
-research/review children. Core-thread SOL/TERRA selection, actual identity and accepted useful
-evidence are recorded. No nested fanout, blind acceptance, or unrecorded model fallback.
-Each activity must serve an approved requirement or a demonstrated blocker; source-based
-validation and the final original-request coverage check remain necessary.
+`metrics` exposes recorded counts and overlapping wall spans; use it at unit boundaries to
+spot repeated work. After two unchanged check failures, diagnose infrastructure/readiness and
+record `--retry-reason` before another attempt. An environment fix belongs in scope only when
+a demonstrated blocker requires it. Required unavailable checks remain unfinished, never pass.

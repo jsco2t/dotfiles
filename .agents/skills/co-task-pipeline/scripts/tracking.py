@@ -9,7 +9,7 @@ from snapshot import digest
 
 READ_ONLY = {"metrics", "packet"}
 COMMANDS = READ_ONLY | {"activity", "usage", "agent", "operation", "recover", "repair", "cancel-check"}
-CATEGORIES = ("research", "implementation", "verification", "bookkeeping", "waiting")
+CATEGORIES = ("scoping", "research", "implementation", "verification", "bookkeeping", "waiting")
 MODELS = {"SOL": "gpt-6.1-sol", "TERRA": "gpt-6.1-terra"}
 
 
@@ -93,7 +93,7 @@ def packet(wf, task_id=None, agent_id=None, limit=16000, section="context", offs
     state = wf.state
     scope = state.get("scope")
     if scope is None:
-        raise ValueError("confirm scope before building a packet")
+        raise ValueError("settle scope before building a packet")
     task = next((t for t in (state.get("plan") or {}).get("tasks", []) if t["id"] == task_id), None)
     if task_id and task is None:
         raise ValueError("unknown task")
@@ -104,11 +104,12 @@ def packet(wf, task_id=None, agent_id=None, limit=16000, section="context", offs
     requirements = [r for r in scope.get("requirements", []) if not wanted or r["id"] in wanted]
     entry = state["tasks"].get(task_id, {})
     sections = {
-        "checks": [dict(name=name, definition=state["plan"]["checks"][name], result=state["checks"].get(name))
-                   for name in (task or {}).get("checks", [])],
+        "checks": [dict(name=name, definition=state["plan"]["checks"][name], result=state["checks"].get(name),
+                        instruction="Check fingerprints at the execution boundary; read this log before considering a rerun.")
+                   for name in ((task or {}).get("checks", []) if task else (state.get("plan") or {}).get("checks", {}))],
         "repairs": [{k: v for k, v in r.items() if k != "before"} for r in entry.get("repairs", [])],
         "decisions": [{k: e[k] for k in ("at", "action", "answer", "reason", "by", "evidence", "changes") if k in e}
-                      for e in state["history"] if e["action"] in ("scope-confirm", "approve", "amend", "answer", "test-superseded")],
+                      for e in state["history"] if e["action"] in ("scope-settle", "plan-accept", "scope-confirm", "approve", "amend", "answer", "test-superseded")],
         "evidence": [e for e in state.get("evidence_history", []) if not task_id or e["task"] == task_id],
     }
     if limit <= 0 or offset < 0 or count <= 0:
@@ -128,7 +129,7 @@ def packet(wf, task_id=None, agent_id=None, limit=16000, section="context", offs
                 raise ValueError("essential packet item exceeds byte limit; use a justified larger --max-bytes")
             end -= 1
     result = dict(workflow=str(wf.root), phase=state["phase"], request_file=str(wf.root / "request.md"),
-                  scope_file=str(wf.root / "scope.json"), plan_file=str(wf.root / "plan.json"),
+                  scope_file=str(wf.root / "scope.md"), plan_file=str(wf.root / "plan.md"),
                   research_file=str(wf.root / "research.md"), requirements=requirements,
                   constraints=scope["constraints"], non_goals=scope["non_goals"], workspaces=scope["workspaces"],
                   task=task, status=entry.get("status"), pending_question=state.get("question"),
@@ -231,7 +232,30 @@ def execute(wf, args, api):
             api.need(sum(a["status"] in ("reserved", "running", "unknown") for a in agents.values()) < allowance,
                      "agent allowance/runtime capacity exhausted; do not spawn or nest")
             api.need(not brief.get("task") or brief["task"] in state["tasks"], "unknown agent task")
-            snapshot = wf.snapshot(scope, state.get("plan") or {"tasks": []}, brief.get("inputs"))
+            purpose = brief.get("purpose")
+            if purpose == "plan":
+                api.need(brief["role"] == "review" and state.get("plan") is None, "plan reviewer needs an unaccepted plan")
+                candidate_scope, candidate_plan = wf.contract()
+                api.need((wf.root / "plan.md").is_file(), "run plan check to render the readable plan first")
+                brief["plan_revision"] = api.plan_revision(wf, candidate_scope, candidate_plan)
+            elif purpose == "test-correction":
+                api.need(brief["role"] == "review" and brief.get("task") in state["tasks"], "test-correction reviewer needs an owning task")
+                entry = state["tasks"][brief["task"]]
+                target = next((r for r in entry.get("repairs", []) if r["id"] == brief["repair"]), {}) if brief.get("repair") else entry
+                api.need(target.get("test_checkpoint"), "correction reviewer needs an existing pin")
+                brief["pin_revision"] = digest(target["test_checkpoint"])
+                import corrections
+                brief["correction_revision"] = corrections.revision(wf, brief["task"], brief.get("repair"), brief.get("proof"))
+            elif purpose == "amendment":
+                api.need(brief["role"] == "review" and api.text(brief.get("plan_file")), "amendment review needs a candidate plan_file")
+                path = (wf.root / brief["plan_file"]).resolve()
+                api.need(wf.root in path.parents, "candidate plan must be stored within this workflow")
+                candidate = api.read(path)
+                api.validate_plan(candidate, scope, wf.root)
+                brief["amendment_revision"] = digest([scope, state["plan"], candidate])
+            else:
+                api.need(purpose is None, "purpose must be plan or test-correction when supplied")
+            snapshot = wf.snapshot(scope, candidate_plan if purpose == "plan" else state.get("plan") or {"tasks": []}, brief.get("inputs"))
             source = checks.fingerprint(snapshot, {"inputs": brief["inputs"]}) if "inputs" in brief else digest(snapshot)
             agents[args.id] = dict(brief, id=args.id, status="reserved", started=api.now(), source=source,
                                   requested_model=MODELS[brief["model"]], actual_model=None, actual_reasoning=None, no_children=True)
@@ -241,6 +265,7 @@ def execute(wf, args, api):
         api.need(agent is not None, "unknown agent assignment")
         if args.action == "attach":
             api.need(agent["status"] == "reserved" and api.text(args.agent_id), "attach actual identity to a reserved assignment")
+            api.need(args.agent_id != state.get("author_agent_id", "main"), "reviewer cannot be the main author")
             if agent.get("context") == "fresh":
                 api.need(not any(a.get("agent_id") == args.agent_id for a in agents.values()),
                          "fresh context requires a new host agent identity")
@@ -255,9 +280,15 @@ def execute(wf, args, api):
                      and api.text(result.get("summary")) and api.text(result.get("validation"))
                      and api.strings(result.get("evidence")), "agent result needs accepted, summary, evidence and parent validation")
             scope = state["scope"]
-            snapshot = wf.snapshot(scope, state.get("plan") or {"tasks": []}, agent.get("inputs"))
+            snapshot = wf.snapshot(scope, wf.contract()[1] if agent.get("purpose") == "plan" else state.get("plan") or {"tasks": []}, agent.get("inputs"))
             current = checks.fingerprint(snapshot, {"inputs": agent["inputs"]}) if "inputs" in agent else digest(snapshot)
             api.need(not result["accepted"] or current == agent["source"], "review source changed; validate/review affected changes before accepting")
+            if agent.get("purpose") == "plan" and result["accepted"]:
+                api.need(agent["plan_revision"] == api.plan_revision(wf), "plan review is stale; review the current request and plan")
+            if agent.get("purpose") == "test-correction" and result["accepted"]:
+                import corrections
+                api.need(agent["correction_revision"] == corrections.revision(wf, agent["task"], agent.get("repair"), agent.get("proof")),
+                         "test correction review is stale; review exact corrected tests, pin and proof")
             agent.update(result, status="done", ended=api.now())
         else:
             api.need(agent["status"] in ("reserved", "running", "unknown"), "agent is already settled")
@@ -280,7 +311,7 @@ def execute(wf, args, api):
             api.need(isinstance(result, dict) and set(result) == {"status", "evidence"}
                      and result.get("status") in ("completed", "failed", "cancelled")
                      and api.text(result.get("evidence")), "effect result needs actual status and read-back/reconciliation evidence")
-            if op["kind"] == "check":
+            if op["kind"] in ("check", "proof"):
                 api.need(op["status"] == "unknown" and result["status"] in ("failed", "cancelled"),
                          "checks can pass only from worker receipts; unknown checks require inspected failure/cancellation")
                 process = checks.read_receipt((wf.root / op["receipt"]).with_name("process.json")) or {}

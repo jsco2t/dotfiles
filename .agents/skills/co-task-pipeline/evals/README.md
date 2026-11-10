@@ -1,4 +1,18 @@
-# Complete-run evaluations
+# Evaluation status for the autonomous workflow
+
+The historical agent scenarios below intentionally initialize with `--legacy-approvals` so
+existing measurements, prompts and graders retain their original contract. They are not
+performance evidence for the new autonomous default. The autonomous runtime is covered by
+`tests/test_autonomous.py`, including independently recorded plan acceptance, real isolated
+baseline reproduction for an honest test correction, dirty verification, compact checkpoint
+storage and artifact rules. Those are scripted regressions, not real-agent timing/token trials.
+
+See [hidlins-execution-audit.md](hidlins-execution-audit.md) for the two supplied run audits and
+[efficiency-plan.md](efficiency-plan.md) for the implementation plan/review decisions. Future
+complete-run comparisons must use the same request, model, hardware/environment and required
+quality gates; record actual usage/waits instead of inferring token savings from helper counts.
+
+# Historical complete-run evaluations
 
 `evaluate.py` prepares small isolated tasks for a real agent, grades delivered behavior
 independently, and compares compatible runs. Python standard library only. It does not

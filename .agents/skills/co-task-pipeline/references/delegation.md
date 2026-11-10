@@ -6,7 +6,7 @@ deliverables, verification, and integration.
 ## Decision
 
 Choose from the workload. Keep connected discovery and implementation local; for independent
-component research or reviews, recommend a bounded agent allowance at scope confirmation.
+component research or reviews, choose a bounded agent allowance during scoping. One independent plan review is required in new runs.
 Do not turn a one-writer restriction into a ban on useful parallel reads. Parallel tool calls
 are useful even with a single agent.
 
@@ -17,8 +17,8 @@ Use a bounded research or review agent when:
 3. The expected value justifies context setup, extra tokens, and verification of its result.
 4. The approved scope allows the role and count, and the runtime exposes delegation tools.
 
-Explain the reason briefly and record the assignment and returned agent identity in
-`research.md`. Default to one agent when delegation is justified; at most three children may be
+Explain the reason briefly; use the helper assignment and returned identity as the durable record.
+Record only reusable conclusions in optional `research.md`. Default to one agent when delegation is justified; at most three children may be
 active, within the approved `max_agents` allowance and available runtime slots (which may
 include the parent). If delegation has marginal value, keep the work
 local; ask only if the uncertainty concerns a material user requirement or an agreed independent
@@ -89,7 +89,7 @@ retry the same failing assignment indefinitely. Unknown facts are not permission
 scope; material product choices still belong to the operator.
 
 Record agent identity, requested and actual model/effort when exposed, question, coverage,
-and evidence outcome once in `research.md` (including reviews). Never infer actual settings
+and evidence outcome once in the helper assignment (including reviews). Never infer actual settings
 from a requested override when the runtime does not report them. Use runtime token/elapsed
 measurements when available; otherwise mark them unmeasured. Measure savings on comparable
 accepted work before claiming a cost or latency improvement.
@@ -102,13 +102,20 @@ actual runs.
 
 ## Assignment and return records
 
+Use `tp schema agent` for a brief and pass small payloads through `--file -`.
+Set `purpose: plan` for the mandatory initial plan reviewer, `purpose: test-correction` with
+owning task/optional repair and actual proof operation for a pinned test repair, or
+`purpose: amendment` with candidate `plan_file` inside the workflow for existing check changes.
+Give these reviewers the exact request, criteria, old/new contents and relevant actual logs;
+accept only a verified return with no unresolved issues. See execution.md for proof requirements.
+
 Use `tp schema agent` for a brief. It names approved requirement IDs, role, absolute starting
-paths inside approved workspaces, one bounded question, stopping condition, `model: SOL|TERRA`,
+paths inside settled workspaces, one bounded question, stopping condition, `model: SOL|TERRA`,
 `reasoning: medium|high`, and the core thread's `model_reason`.
 Set `task` when execution has an owning task. Optional `inputs` uses the check-input map
 format to declare the complete reviewed source, tests, shared configuration and transitive
-dependencies. Include patterns for newly created source as well as current files. Only these
-inputs determine source freshness; unrelated edits preserve the review. Omission retains
+dependencies. Include patterns for newly created source as well as current files. These inputs determine source freshness; mandatory plan/test-correction revisions are additionally
+bound by the helper, so narrow inputs cannot hide changed tests or contracts. Omission retains
 conservative whole-workspace freshness. Starting `paths` are navigation hints, not a substitute
 for complete dependencies. Name meaningful ignored dependencies with literal input paths.
 
@@ -131,7 +138,7 @@ for complete dependencies. Name meaningful ignored dependencies with literal inp
    before final delivery. The helper records authority and provenance; it never launches agents.
 
 Use the helper assignment record as the source of truth; put reusable conclusions in
-research.md once rather than copying the entire brief/report into multiple ledgers.
+optional research.md once rather than copying the entire brief/report into multiple ledgers.
 
 ## Research brief
 
@@ -143,7 +150,7 @@ paths as a reading fence.
 
 Require read-only work, no external mutations, no child agents, and no scope decisions. Return
 concise findings in the reply; do not require another JSON file and duplicated report for a
-small answer. The parent stores reusable evidence once in `research.md` and verifies claims
+small answer. The parent stores reusable conclusions once in optional `research.md` and verifies claims
 that affect the plan. Ask the operator when facts leave a material choice unresolved.
 
 ## Review brief
@@ -160,7 +167,7 @@ evidence. For a repair round, inspect changed fixes and affected behavior with t
 review findings, retaining requirement coverage without repeating unaffected analysis.
 
 The parent checks each finding against the source before routing it. Store only validated
-in-scope findings in the helper's review result; unresolved questions go to the operator.
+in-scope findings in the helper's review result; material requirement questions go to the operator during scoping; routine repair decisions remain with the manager.
 Identify the actual agent in an independent review record. Do not label an agent's echo of
 the author's conclusions an independent review.
 

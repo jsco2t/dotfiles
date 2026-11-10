@@ -34,11 +34,11 @@ def permission(front: str, name: str):
 class FootprintTest(unittest.TestCase):
     def test_the_command_file_is_small(self) -> None:
         # Anything `tp.py` prints on demand (`tp next`, `tp schema`) stays out of the command.
-        # 15,500: the 2026-11 efficiency round made advance/publish/ship, fused test-first
-        # builds, and non-blocking human gates first-class — the 2026-10 cap of 14,000 could
-        # only be met by deleting those playbooks. The cap keeps the command a playbook, not
-        # a manual: mechanics live in `tp.py` output.
-        self.assertLess(len(COMMAND.read_bytes()), 15_500)
+        # 17,500: the 2026-11 plan-review round replaced the human approval gate with the
+        # independent plan-review loop and added the requirements ledger — the 15,500 cap
+        # could only be met by deleting those playbooks. The cap keeps the command a
+        # playbook, not a manual: mechanics live in `tp.py` output.
+        self.assertLess(len(COMMAND.read_bytes()), 17_500)
 
     def test_core_style_is_small(self) -> None:
         self.assertLess(len((STYLES / "answer-first-core.md").read_bytes()), 1_500)

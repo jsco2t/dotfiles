@@ -17,6 +17,7 @@ TEST_PY = ("import unittest\nfrom calc import mul\n\n\nclass T(unittest.TestCase
            "    def test_mul(self):\n        self.assertEqual(mul(2, 3), 6)\n")
 
 PARTICIPANTS = {
+    "plan": {"agent": "plan-reviewer", "role": "plan", "why": "Independently reviews the plan against the request."},
     "tests": {"agent": "test-author", "role": "tests", "why": "Writes mul's tests first, red."},
     "code": {"agent": "code-author", "role": "author", "why": "Implements mul to pass the tests."},
     "docs": {"agent": "doc-author", "role": "author", "why": "Writes the note and the comment text."},
@@ -25,6 +26,12 @@ PARTICIPANTS = {
     "security": {"agent": "security-reviewer", "role": "reviewer", "why": "Checks mul's input handling."},
     "test-review": {"agent": "test-reviewer", "role": "reviewer", "why": "Checks the mul tests prove it."},
     "doc-review": {"agent": "doc-reviewer", "role": "reviewer", "why": "Checks the note against the code."},
+}
+
+REQUIREMENTS = {
+    "code": {"id": "R1", "text": "mul(2, 3) returns 6, test-first", "deliverables": ["D1"]},
+    "docs": {"id": "R2", "text": "A note explains mul, cited against calc.py", "deliverables": ["D2"]},
+    "integration": {"id": "R3", "text": "One comment on KUB-1, from a reviewed draft", "deliverables": ["D3"]},
 }
 
 DELIVERABLES = {
@@ -57,14 +64,15 @@ class Mixed:
         # split_tests=True keeps the two-agent (test-author then code-author) flow under test;
         # the fused build round (the production default) has its own coverage in test_code_flow.
         return dict(deliverables=[DELIVERABLES[d] for d in deliverables],
-                    participants=[PARTICIPANTS[p] for p in participants], review=review,
+                    participants=[PARTICIPANTS[p] for p in (["plan"] + list(participants))],
+                    requirements=[REQUIREMENTS[d] for d in deliverables], review=review,
                     split_tests=split_tests,
                     workspaces=[{"name": "app", "path": str(self.app), "mode": "write"}] + (extra_workspaces or []))
 
     def code_task(self, tid: str = "T01", **over: Any) -> Dict[str, Any]:
         t = {"id": tid, "title": "mul", "serves": ["D1"], "agent": "code-author", "workspace": "app",
              "paths": ["calc.py", "test_calc.py"], "sources": ["app:calc.py"],
-             "brief": "Add mul(a, b) beside add.", "acceptance": ["mul(2, 3) == 6"],
+             "brief": "Add mul(a, b) beside add.", "acceptance": ["mul(2, 3) == 6"], "requirements": ["R1"],
              "test_cmd": "python3 -m unittest -q test_calc", "tests_paths": ["test_calc.py"],
              "checks": [], "estimate_min": 10, "depends_on": []}
         t.update(over)
@@ -73,7 +81,8 @@ class Mixed:
     def doc_task(self, tid: str = "T02", path: str = "docs/calc.md", **over: Any) -> Dict[str, Any]:
         t = {"id": tid, "title": "Note on mul", "serves": ["D2"], "agent": "doc-author", "workspace": "app",
              "paths": [path], "sources": ["app:calc.py"], "brief": "Explain mul, citing calc.py.",
-             "acceptance": ["Explains mul, citing calc.py path:line."], "checks": ["docs"], "estimate_min": 10,
+             "acceptance": ["Explains mul, citing calc.py path:line."], "requirements": ["R2"],
+             "checks": ["docs"], "estimate_min": 10,
              "depends_on": []}
         t.update(over)
         return t

@@ -18,7 +18,9 @@ sys.path.insert(0, str(SKILL / "scripts"))
 
 CODE = dict(
     deliverables=[{"id": "D1", "kind": "code", "what": "calc gains mul()", "where": "app"}],
-    participants=[{"agent": "test-author", "role": "tests", "why": "Writes mul's tests first."},
+    requirements=[{"id": "R1", "text": "mul(2, 3) returns 6, test-first", "deliverables": ["D1"]}],
+    participants=[{"agent": "plan-reviewer", "role": "plan", "why": "Independently reviews the plan against the request."},
+                  {"agent": "test-author", "role": "tests", "why": "Writes mul's tests first."},
                   {"agent": "code-author", "role": "author", "why": "Implements mul to pass them."},
                   {"agent": "correctness-reviewer", "role": "reviewer", "why": "Reviews the D1 change."}],
     review="final",

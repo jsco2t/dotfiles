@@ -482,6 +482,7 @@ def _route(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope: Dic
     out = {}
     for tid in sorted(by_task):
         task = plan_task(plan, tid)
+        state["tasks"].setdefault(tid, {}).setdefault("from_review", []).append(s["sid"] if isinstance(s.get("sid"), str) else f"{s.get('batch')}/{s.get('reviewer')}")
         routes: Dict[str, List[str]] = {}
         for f, line in zip([f for f in findings if f["task"] == tid], by_task[tid]):
             routes.setdefault(run.fix_route(task, scope, f), []).append(line)

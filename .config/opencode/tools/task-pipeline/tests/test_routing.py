@@ -26,7 +26,7 @@ class PublishTest(unittest.TestCase):
                              ["tests", "code", "docs", "correctness", "doc-review"])
         self.draft_task = m.doc_task("T02", path=DRAFT, depends_on=["T01"],
                                      brief="Write the KUB-1 comment text about mul, citing calc.py.")
-        self.publish = {"id": "T03", "title": "Post the KUB-1 comment", "serves": ["D3"], "workspace": "app",
+        self.publish = {"id": "T03", "title": "Post the KUB-1 comment", "serves": ["D3"], "requirements": ["R3"], "workspace": "app",
                         "publish": {"to": "jira-comment", "target": "KUB-1", "body": DRAFT},
                         "acceptance": ["The comment is posted once and reads back as sent."],
                         "estimate_min": 5, "depends_on": ["T02"]}
@@ -149,7 +149,7 @@ class LiaisonTransportsOnlyTest(unittest.TestCase):
         self.m.close()
 
     def liaison_task(self, **over):
-        t = {"id": "T02", "title": "Attach the PDF", "serves": ["D3"], "agent": "atlassian-liaison",
+        t = {"id": "T02", "title": "Attach the PDF", "serves": ["D3"], "requirements": ["R3"], "agent": "atlassian-liaison",
              "workspace": "app", "paths": ["wf:receipts/attach.json"], "sources": ["app:calc.py"],
              "brief": "Attach report.pdf to KUB-1, dry run first, then after the human's OK.",
              "acceptance": ["The attachment is on KUB-1."], "estimate_min": 5, "depends_on": ["T01"]}
@@ -209,7 +209,7 @@ class OlderWorkflowsKeepRunningTest(unittest.TestCase):
         m = Mixed()
         try:
             scope = m.scope(["code", "integration"], ["tests", "code", "liaison", "correctness"])
-            liaison = {"id": "T02", "title": "Attach the PDF", "serves": ["D3"], "agent": "atlassian-liaison",
+            liaison = {"id": "T02", "title": "Attach the PDF", "serves": ["D3"], "requirements": ["R3"], "agent": "atlassian-liaison",
                        "workspace": "app", "paths": ["wf:receipts/attach.json"], "sources": ["app:calc.py"],
                        "brief": "Attach report.pdf to KUB-1, dry run first.", "acceptance": ["Attached."],
                        "estimate_min": 5, "depends_on": ["T01"]}
@@ -236,7 +236,7 @@ class AmendUnderOldRulesTest(unittest.TestCase):
         try:
             scope = m.scope(["code", "docs", "integration"], ["tests", "code", "docs", "liaison", "doc-review",
                                                                "correctness"])
-            liaison = {"id": "T03", "title": "KUB-1 comment", "serves": ["D3"], "agent": "atlassian-liaison",
+            liaison = {"id": "T03", "title": "KUB-1 comment", "serves": ["D3"], "requirements": ["R3"], "agent": "atlassian-liaison",
                        "workspace": "app", "paths": ["wf:receipts/kub-1.json"], "sources": ["app:calc.py"],
                        "brief": "Attach report.pdf to KUB-1, dry run first.", "acceptance": ["Posted."],
                        "estimate_min": 10, "depends_on": ["T02"]}

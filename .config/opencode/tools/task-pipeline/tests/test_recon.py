@@ -153,7 +153,8 @@ class ResearchTest(unittest.TestCase):
         self.record("R1")
         self.h.tp("plan", "check")
         self.h.tp("plan", "submit")
-        self.h.tp("approve", "--answer", "approve")
+        self.h.plan_review_pass()
+        self.h.tp("approve")
         self.h.tp("dispatch", "T01")
         brief = (self.h.run_dir("T01") / "brief-author-0.md").read_text()
         self.assertIn(str(self.h.wf / "recon" / "R1.json"), brief)
@@ -170,7 +171,8 @@ class ResearchTest(unittest.TestCase):
     def test_research_is_planning_only(self) -> None:
         self.h.write_json("plan.json", self.h.plan())
         self.h.tp("plan", "submit")
-        self.h.tp("approve", "--answer", "approve")
+        self.h.plan_review_pass()
+        self.h.tp("approve")
         self.add("R2", ["Which areas?"], expect=2)
 
 

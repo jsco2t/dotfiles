@@ -309,7 +309,8 @@ class RevisedScopeKeepsTheApprovedPlanTest(unittest.TestCase):
         write(h, "plan.json", plan)
         h.tp("plan", "check")
         h.tp("plan", "submit")
-        h.tp("approve", "--answer", "Approve")
+        h.plan_review_pass()
+        h.tp("approve")
         self.assertEqual(h.state()["write_baseline"]["app"], self.base)
         self.assertEqual(h.state()["tasks"]["T01"]["status"], "accepted")
 

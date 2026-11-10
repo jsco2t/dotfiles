@@ -157,7 +157,7 @@ class ScopeCheckTest(unittest.TestCase):
                 for a, r in [("code-author", "author"), ("test-author", "tests")] + [(x, "reviewer") for x in reviewers]]
         res = self.check(expect=2, review="final", participants=many,
                          deliverables=[{"id": "D1", "kind": "code", "what": "mul()", "where": "kb"}])
-        self.assertIn("9 participants", res.text)
+        self.assertIn("10 participants", res.text)
         self.assertIn("7 reviewers", res.text)
 
     def test_specific_reviewers_fit_within_the_caps(self) -> None:

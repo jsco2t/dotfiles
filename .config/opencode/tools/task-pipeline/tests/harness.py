@@ -90,7 +90,11 @@ class Harness:
             "deliverables": [{"id": "D1", "kind": "kb", "what": "A KB covering calc's code and build", "where": "kb"}],
             "terms": [{"term": "KB", "means": "Markdown files in kb/", "not": "the repo's own docs"}],
             "non_goals": ["No changes to the calc repository"],
-            "participants": [{"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."}],
+            "participants": [{"agent": "plan-reviewer", "role": "plan",
+                              "why": "Independently reviews the plan against the request."},
+                             {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."}],
+            "requirements": [{"id": "R1", "text": "The KB explains what Add does, cited against the source",
+                              "deliverables": ["D1"]}],
             "review": "none",
             "budget_minutes": 180,
             "workspaces": [
@@ -101,6 +105,15 @@ class Harness:
             "fix_tasks": {"allow": 0, "answer": "No, ask me every time."},
         }
         base.update(over)
+        # The plan reviewer and the ledger are the new-run contract: tests that override
+        # participants or deliverables still get a valid one unless they say otherwise.
+        if isinstance(base.get("participants"), list) and not any(p.get("role") == "plan" for p in base["participants"]):
+            base["participants"].append({"agent": "plan-reviewer", "role": "plan",
+                                          "why": "Independently reviews the plan against the request."})
+        if "requirements" not in over:
+            ids = [d["id"] for d in base.get("deliverables", [])]
+            base["requirements"] = [{"id": "R1", "text": "Deliver what the request asks, as the scope states",
+                                     "deliverables": ids}]
         return base
 
     def task(self, tid: str, path: str, **over: Any) -> Dict[str, Any]:
@@ -109,6 +122,7 @@ class Harness:
             "workspace": "kb", "paths": [path], "sources": ["src:calc/**"],
             "brief": f"Write the article at {path} about the calc package.",
             "acceptance": ["Explains what Add does, citing src path:line."],
+            "requirements": ["R1"],
             "checks": ["docs"], "estimate_min": 15, "depends_on": [],
         }
         base.update(over)
@@ -158,7 +172,22 @@ class Harness:
         self.write_json("plan.json", plan or self.plan())
         self.tp("plan", "check")
         self.tp("plan", "submit")
-        self.tp("approve", "--answer", "approve")
+        self.plan_review_pass()
+        self.tp("approve")
+
+    def plan_review_pass(self, verdict: str = "pass", findings: Optional[List[Dict[str, Any]]] = None,
+                         coverage: Optional[List[Dict[str, Any]]] = None) -> str:
+        """Simulate the independent plan reviewer: dispatch it, write its result, record it."""
+        self.tp("plan", "review")
+        scope = self.read_json("scope.json")
+        reqs = scope.get("requirements", [])
+        cov = coverage if coverage is not None else [{"requirement": r["id"], "covered": True, "note": "T01"}
+                                                      for r in reqs]
+        rnd = self.state().get("plan_review", {}).get("round", 1)
+        self.write_json(f"runs/plan/result-review-{rnd}.json",
+                        {"review": "plan", "round": rnd, "verdict": verdict,
+                         "findings": findings or [], "coverage": cov, "observations": []})
+        return self.tp("plan", "record", "--agent-id", "pr-1").out
 
     # --- simulated agents ----------------------------------------------------
 

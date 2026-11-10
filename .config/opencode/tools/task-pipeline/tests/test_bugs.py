@@ -105,7 +105,8 @@ class ConventionsListedOnceTest(unittest.TestCase):
         m.h.write_json("plan.json", m.plan([task], conventions=["wf:conventions.md"]))
         m.h.tp("plan", "check")
         m.h.tp("plan", "submit")
-        m.h.tp("approve", "--answer", "approve")
+        m.h.plan_review_pass()
+        m.h.tp("approve")
         m.h.tp("dispatch", "T01")
         brief = (m.h.run_dir("T01") / "brief-author-0.md").read_text()
         start = brief.split("## Start from")[1].split("##")[0]

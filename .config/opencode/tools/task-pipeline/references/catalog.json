@@ -211,6 +211,22 @@
         "code"
       ],
       "use": "a user-facing CLI/TUI/UI surface the change creates or alters"
+    },
+    "plan-reviewer": {
+      "roles": [
+        "plan"
+      ],
+      "kinds": [
+        "code",
+        "kb",
+        "docs",
+        "tutorial",
+        "education",
+        "research",
+        "pm",
+        "integration"
+      ],
+      "use": "independent review of the delivery plan against the original request before execution (/task-pipeline plan review)"
     }
   },
   "suggest": {
@@ -317,7 +333,8 @@
       "education-author",
       "codebase-researcher",
       "domain-researcher",
-      "architecture-reviewer"
+      "architecture-reviewer",
+      "plan-reviewer"
     ],
     "code_extensions": [
       ".go",

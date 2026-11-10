@@ -235,13 +235,22 @@ class ApprovalTest(unittest.TestCase):
 
     def test_plan_edited_after_submit_cannot_be_approved(self) -> None:
         self.h.tp("plan", "submit")
+        self.h.plan_review_pass()
         self.h.write_json("plan.json", self.h.plan([self.h.task("T01", "a.md")]))
-        self.assertIn("changed", self.h.tp("approve", "--answer", "approve", expect=2).text)
+        res = self.h.tp("approve", expect=2)
+        self.assertTrue("changed" in res.text or "re-review" in res.text, res.text)
+
+    def test_approve_requires_a_passing_review_first(self) -> None:
+        self.h.tp("plan", "submit")
+        res = self.h.tp("approve", expect=2)
+        self.assertIn("plan review", res.text)
+        self.assertEqual(self.h.state()["phase"], "AWAITING_APPROVAL")
 
     def test_approve_starts_execution_and_freezes_the_plan(self) -> None:
         self.h.tp("plan", "submit")
         self.assertEqual(self.h.state()["phase"], "AWAITING_APPROVAL")
-        self.h.tp("approve", "--answer", "approve")
+        self.h.plan_review_pass()
+        self.h.tp("approve")
         self.assertEqual(self.h.state()["phase"], "EXECUTING")
         self.assertIn("approve", (self.h.wf / "decisions.md").read_text())
         self.h.write_json("plan.json", self.h.plan([self.h.task("T01", "a.md")]))

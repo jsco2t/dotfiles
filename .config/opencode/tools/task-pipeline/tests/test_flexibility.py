@@ -300,7 +300,7 @@ class JiraIssuePublishTest(unittest.TestCase):
         self.draft = "wf:drafts/followup.md"
         scope = m.scope(["docs", "integration"], ["docs"], review="none")
         tasks = [m.doc_task("T01", path=self.draft, brief="Draft the follow-up ticket."),
-                 {"id": "T02", "title": "File the follow-up", "serves": ["D3"], "workspace": "app",
+                 {"id": "T02", "title": "File the follow-up", "serves": ["D3"], "requirements": ["R3"], "workspace": "app",
                   "publish": {"to": "jira-issue", "target": "KUB-1", "project": "KUB", "type": "Task",
                               "labels": ["product:stratum-pro"], "body": self.draft},
                   "acceptance": ["The issue exists and reads back."], "estimate_min": 5, "depends_on": ["T01"]}]

@@ -203,7 +203,18 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
         free = limit("max_in_flight") - len(state["in_flight"])
         return _research().actions(state, free) + [{"action": "plan"}]
     if phase == "AWAITING_APPROVAL":
-        return [{"action": "human", "why": "approve or revise the plan in plan.md"}]
+        pr = state.get("plan_review")
+        if pr is None:  # a workflow from before plan review keeps its human-approval contract
+            return [{"action": "human", "why": "approve or revise the plan in plan.md"}]
+        if pr["status"] == "in_flight":
+            return [{"action": "wait", "ids": [f"plan/review:{pr['round']}"]}]
+        if pr["status"] == "needs_triage":
+            return [{"action": "plan_triage"}]
+        if pr["status"] == "changes":
+            return [{"action": "plan_fix"}]
+        if pr["status"] == "pass":
+            return [{"action": "approve"}]
+        return [{"action": "plan_review"}]
 
     plan, scope, tasks = _loaded(wf, state)
     acts = []
@@ -248,6 +259,12 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
 GUIDE = {
     "scope": "Draft scope.json (`tp schema scope`), then `tp scope check`, then confirm it with the human.",
     "plan": "Write plan.json (`tp schema plan`), `tp plan check`, then `tp plan submit`.",
+    "plan_review": "`tp plan review`, then send the call it prints: the independent reviewer reads the "
+                   "request, the scope, and the plan. No human approval follows — only the review's verdict.",
+    "plan_triage": "Verify round {id}'s findings against the plan, then `tp plan triage --accept-all` (fix, "
+                   "resubmit, re-review) or `--dismiss F#=\"reason\"` for each you overrule.",
+    "plan_fix": "Fix the plan for the accepted findings, then `tp plan check` and `tp plan submit`; the "
+                "review re-runs with the same reviewer.",
     "dispatch": "`tp dispatch {id}`, then send the call it prints.",
     "fix": "`tp dispatch {id}` (fix round), then send the call it prints.",
     "review": "`tp dispatch {id}`, then send the call it prints.",
@@ -258,6 +275,7 @@ GUIDE = {
               "each) and/or `--assign F#=T##`.",
     "followup": "Decide {id} ({why}): pursue it (`tp research add ... --from {id}`) or "
                 "`tp research dismiss {id} --reason \"...\"`.",
+    "approve": "`tp approve` — the passing, current plan review enters execution. No human answer is needed.",
     "human": "Ask the human{about}: {why} — but do not stall the run: dispatch every other ready action in this "
              "list first; only this decision waits. If settling it changes the plan, draft and check the amendment "
              "first (`tp plan amend`) and show its change in this one question; the same answer then goes to `tp "
@@ -1253,6 +1271,16 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
                 msgs.append(f"green: `{task['test_cmd']}` passes.")
             else:
                 findings.append(f"The tests are not green: `{task['test_cmd']}` failed: {tail}")
+        elif effective == "build" and task.get("test_mode") == "existing":
+            # Existing coverage: no red ceremony — the current tests already prove the criterion;
+            # the change must keep them green, and the baseline freeze still guards weakening.
+            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
+            if ok:
+                msgs.append(f"green: the existing tests still pass (`{task['test_cmd']}`).")
+                ts["tests_hash"] = _tests_hash(task, scope)
+                _freeze_tests_baseline(wf, task, scope)
+            else:
+                findings.append(f"The existing tests fail: `{task['test_cmd']}` failed: {tail}")
         elif effective == "build":
             # One fused round: tests first (observed red, logged), then the implementation (green).
             # The pipeline cannot re-create the red moment — the impl exists now — so red is the
@@ -1481,23 +1509,29 @@ def _record_review(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], t
 
 # --- manager verdicts and exceptions --------------------------------------------------------
 
-def cmd_accept(wf: Workflow, tid: str, note: str) -> str:
+def cmd_accept(wf: Workflow, tids: List[str], note: str) -> str:
+    """One call accepts a whole wave of fact-checked hand-backs — the note covers them all."""
     with wf.locked():
         state = wf.load()
         _, scope, tasks = _loaded(wf, state)
-        ts = state["tasks"].get(tid)
-        if ts is None or ts["status"] != "needs_check":
-            raise TPError(f"{tid} is not awaiting your fact check (status {ts and ts['status']}).")
-        ts.update(status="accepted", accepted=now_iso(), note=note)
-        task = tasks.get(tid)
-        if task and "docs" in task.get("checks", []):
-            # What the docs check already doubts at acceptance: a later code change is judged
-            # only on doubts it adds (see _stale_docs).
-            ts["doc_doubts"] = _doc_problems(wf, task, scope)[1]
+        bad = [t for t in tids if state["tasks"].get(t, {}).get("status") != "needs_check"]
+        if bad:
+            raise TPError(*[f"{t} is not awaiting your fact check (status "
+                            f"{state['tasks'].get(t, {}).get('status')})." for t in bad])
+        out = []
+        for tid in tids:
+            ts = state["tasks"][tid]
+            ts.update(status="accepted", accepted=now_iso(), note=note)
+            task = tasks.get(tid)
+            if task and "docs" in task.get("checks", []):
+                # What the docs check already doubts at acceptance: a later code change is judged
+                # only on doubts it adds (see _stale_docs).
+                ts["doc_doubts"] = _doc_problems(wf, task, scope)[1]
+            mins = task_minutes(state, ts)
+            wf.event("accept", id=tid, minutes=round(mins, 1), wall=round(minutes_since(ts["started"]), 1))
+            out.append(f"accepted {tid} ({mins:.0f} min, {ts['round']} fix rounds).")
         wf.save(state)
-        mins = task_minutes(state, ts)
-        wf.event("accept", id=tid, minutes=round(mins, 1), wall=round(minutes_since(ts["started"]), 1))
-        return f"accepted {tid} ({mins:.0f} min, {ts['round']} fix rounds). Next: `tp next`."
+        return "\n".join(out) + "\nNext: `tp next`."
 
 
 def cmd_reject(wf: Workflow, tid: str, reason: str) -> str:
@@ -1605,11 +1639,12 @@ def decision_lines(state: Dict[str, Any], tids: List[str]) -> List[str]:
 
 
 def cmd_rebaseline_tests(wf: Workflow, tid: str, answer: str, by: str) -> str:
-    """The human approved a test change made outside the test step (a mechanical rename after an
-    interface moved): the task's tests as they are now become the baseline the impl gate compares
-    against. Only the human moves it — the gate exists so nobody else can loosen a test."""
-    if by != "human":
-        raise TPError("only the human may move a test baseline: ask them, then repeat with --by human and their words.")
+    """A test change made outside the test step becomes the baseline the impl gate compares against.
+    The human moves it freely; the manager may move it only when an independent reviewer already
+    confirmed a finding on this task (the correction is reviewer-initiated, not self-reported) —
+    the gate exists so nobody can loosen a test to make faulty work pass."""
+    if by not in ("human", "manager"):
+        raise TPError("by must be human or manager.")
     with wf.locked():
         state = wf.load()
         _, scope, tasks = _loaded(wf, state)
@@ -1620,12 +1655,16 @@ def cmd_rebaseline_tests(wf: Workflow, tid: str, answer: str, by: str) -> str:
             raise TPError(f"{tid} is in flight; rebaseline once it has handed back and been recorded.")
         if not ts.get("tests_hash"):
             raise TPError(f"{tid}'s tests are not recorded yet; its test step sets the first baseline.")
+        if by == "manager" and not ts.get("from_review"):
+            raise TPError(f"the manager may move {tid}'s baseline only after an independent review finding "
+                          "confirmed the test was wrong (its fix round came from review); otherwise ask the human.")
         before, now = ts["tests_hash"], _tests_hash(task, scope)
         moved = sorted(rel for rel in set(before) | set(now) if before.get(rel) != now.get(rel))
         ts["tests_hash"] = now
         _freeze_tests_baseline(wf, task, scope)
         wf.save(state)
-        wf.decision(f"rebaseline tests {tid}", f"{answer} ({', '.join(moved) or 'no file changed'})", who="human")
+        wf.decision(f"rebaseline tests {tid}", f"{answer} ({', '.join(moved) or 'no file changed'})",
+                    who=by)
         wf.event("rebaseline_tests", id=tid, files=moved)
         return (f"{tid}: the tests as they stand are the new baseline ({', '.join(moved) or 'unchanged'}). "
                 "Its next record compares against them. `tp next`.")
@@ -2047,6 +2086,16 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
            f"Planning took {planning:.0f} min and execution took {_execution(wf, state)}"
            + (f". The budget was {budget} min, wall-clock, planning included." if budget else "."),
            "", "## Deliverables", ""]
+    if scope.get("requirements"):
+        by_req: Dict[str, List[Dict[str, Any]]] = {}
+        for t in tasks.values():
+            for r in t.get("requirements", []):
+                by_req.setdefault(r, []).append(t)
+        out += ["", "## Requirement coverage", "", "| Requirement | Tasks | Status |", "|---|---|---|"]
+        for r in scope["requirements"]:
+            served = by_req.get(r["id"], [])
+            how = ", ".join(f"{t['id']} {state['tasks'][t['id']]['status']}" for t in served) or "**no task**"
+            out.append(f"| {r['id']} — {r['text']} | {', '.join(t['id'] for t in served) or '—'} | {how} |")
     for d in scope["deliverables"]:
         served = [t for t in tasks.values() if d["id"] in t["serves"]]
         out.append(f"- {d['id']} — {d['what']}: " + ", ".join(

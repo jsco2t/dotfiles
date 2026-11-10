@@ -176,8 +176,13 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("schema", help="print an example of a workflow file")
     s.add_argument("name", choices=["scope", "plan", "research", "result", "review"])
 
-    s = sub.add_parser("plan", help="check or submit plan.json; amend it mid-run (plan-amend.json)")
-    s.add_argument("what", choices=["check", "submit", "amend"])
+    s = sub.add_parser("plan", help="check or submit plan.json; amend it mid-run; the independent review "
+                                     "(review, record, triage) before execution")
+    s.add_argument("what", choices=["check", "submit", "amend", "review", "record", "triage"])
+    s.add_argument("--agent-id", help="record: the plan reviewer's agent id")
+    s.add_argument("--accept-all", action="store_true", help="triage: accept every finding (fix, resubmit, re-review)")
+    s.add_argument("--dismiss", action="append", default=[], metavar="F#=reason",
+                   help="triage: overrule a finding with a recorded reason")
     s.add_argument("--answer", help="amend: the human's agreement, verbatim (without it, amend only checks)")
     s.add_argument("--delegated", action="store_true", help="amend: apply a checked draft inside the human's standing "
                                                             "fix-task delegation (scope fix_tasks), without a question")
@@ -189,11 +194,13 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--path", action="append", required=True, help="one file to add (repeatable)")
     s.add_argument("--reason", required=True, help="the finding or correction that needs it")
     s.add_argument("--answer", help="the human's words, verbatim: needed past two files for the task")
-    s = sub.add_parser("rebaseline-tests", help="accept a code task's tests as they are now, on the human's say-so "
-                                                "(a test change made outside the test step that the human approved)")
+    s = sub.add_parser("rebaseline-tests", help="accept a code task's tests as they are now (a test change "
+                                                "made outside the test step: human always; manager only "
+                                                "when an independent review finding confirmed the test was wrong)")
     s.add_argument("id")
-    s.add_argument("--answer", required=True, help="the human's words, verbatim")
-    s.add_argument("--by", choices=["human", "manager"], required=True, help="only the human may move a test baseline")
+    s.add_argument("--answer", required=True, help="the human's words (or, for --by manager, what was wrong)")
+    s.add_argument("--by", choices=["human", "manager"], required=True,
+                   help="the human freely; the manager only on a reviewer-confirmed test correction")
     s = sub.add_parser("budget", help="the time budget: reporting metadata that gates nothing")
     bs = s.add_subparsers(dest="what", required=True)
     be = bs.add_parser("extend", help="raise the whole-job budget (your re-estimate; no human approval needed)")
@@ -206,8 +213,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--summary", required=True, help="what happened, and the evidence")
     sub.add_parser("baseline", help="record which final checks already fail before the run (right after approval)")
 
-    s = sub.add_parser("approve", help="record the human's approval")
-    s.add_argument("--answer", required=True)
+    s = sub.add_parser("approve", help="enter execution: on the new contract, the passing independent plan "
+                                       "review; on a pre-review workflow, the human's answer")
+    s.add_argument("--answer", help="the human's words (a pre-review workflow)")
     s = sub.add_parser("revise", help="record the human's revision request")
     s.add_argument("--feedback", required=True)
     s.add_argument("--scope", action="store_true", help="the scope itself changes (back to SCOPING)")
@@ -229,8 +237,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--answer", help="the human's OK, verbatim, given after they saw the dry run")
     s = sub.add_parser("recheck", help="rerun a sibling-waiting task's tests and checks once its siblings land")
     s.add_argument("id")
-    s = sub.add_parser("accept", help="accept a task after your fact check")
-    s.add_argument("id")
+    s = sub.add_parser("accept", help="accept task(s) after your fact check — one call takes the whole wave")
+    s.add_argument("ids", nargs="+", metavar="id")
     s.add_argument("--note", required=True)
     s = sub.add_parser("reject", help="reject a task after your fact check (a fix round)")
     s.add_argument("id")
@@ -364,6 +372,12 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "plan":
         if args.what == "amend":
             return planmod.cmd_amend(wf, args.answer, args.delegated, args.note)
+        if args.what == "review":
+            return planmod.cmd_plan_review(wf)
+        if args.what == "record":
+            return planmod.cmd_plan_record(wf, args.agent_id)
+        if args.what == "triage":
+            return planmod.cmd_plan_triage(wf, args.accept_all, args.dismiss)
         return planmod.cmd_check(wf) if args.what == "check" else planmod.cmd_submit(wf)
     if c == "approve":
         return planmod.cmd_approve(wf, args.answer)
@@ -390,7 +404,7 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "recheck":
         return run.cmd_recheck(wf, args.id)
     if c == "accept":
-        return run.cmd_accept(wf, args.id, args.note)
+        return run.cmd_accept(wf, args.ids, args.note)
     if c == "reject":
         return run.cmd_reject(wf, args.id, args.reason)
     if c == "exception":

@@ -9,7 +9,9 @@ from harness import Harness, deep, git
 
 CODE = dict(
     deliverables=[{"id": "D1", "kind": "code", "what": "calc gains mul()", "where": "app"}],
-    participants=[{"agent": "test-author", "role": "tests", "why": "Writes mul's tests first."},
+    requirements=[{"id": "R1", "text": "mul(2, 3) returns 6, test-first", "deliverables": ["D1"]}],
+    participants=[{"agent": "plan-reviewer", "role": "plan", "why": "Independently reviews the plan against the request."},
+                  {"agent": "test-author", "role": "tests", "why": "Writes mul's tests first."},
                   {"agent": "code-author", "role": "author", "why": "Implements mul to pass them."}],
 )
 
@@ -32,7 +34,7 @@ class CodeFlowTest(unittest.TestCase):
                          {"agent": "correctness-reviewer", "role": "reviewer", "why": "Checks mul's edge cases."}])
         task = {"id": "T01", "title": "mul", "serves": ["D1"], "agent": "code-author", "workspace": "app",
                 "paths": ["calc.py", "test_calc.py"], "sources": ["app:calc.py"],
-                "brief": "Add mul(a, b) beside add.", "acceptance": ["mul(2, 3) == 6"],
+                "brief": "Add mul(a, b) beside add.", "acceptance": ["mul(2, 3) == 6"], "requirements": ["R1"],
                 "test_cmd": "python3 -m unittest -q test_calc", "tests_paths": ["test_calc.py"],
                 "checks": [], "estimate_min": 10, "depends_on": []}
         self.plan = h.plan([task], final_checks=[])
@@ -138,7 +140,7 @@ class FusedBuildTest(unittest.TestCase):
                               {"agent": "correctness-reviewer", "role": "reviewer", "why": "Checks mul's edge cases."}])
         self.task = {"id": "T01", "title": "mul", "serves": ["D1"], "agent": "code-author", "workspace": "app",
                      "paths": ["calc.py", "test_calc.py"], "sources": ["app:calc.py"],
-                     "brief": "Add mul(a, b) beside add.", "acceptance": ["mul(2, 3) == 6"],
+                     "brief": "Add mul(a, b) beside add.", "acceptance": ["mul(2, 3) == 6"], "requirements": ["R1"],
                      "test_cmd": "python3 -m unittest -q test_calc", "tests_paths": ["test_calc.py"],
                      "checks": [], "estimate_min": 10, "depends_on": []}
 

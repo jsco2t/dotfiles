@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Set
 from .common import TPError, Workflow, catalog, limit, load_json, now_iso, set_limit_overrides, sha_file
 
 REVIEW_MODES = ("none", "final", "per-task", "both")
-WORK_ROLES = ("author", "tests", "reviewer")
+WORK_ROLES = ("author", "tests", "reviewer", "plan")
 ROLE_ALIASES = {"recon": "research"}  # workflows created before research budgets called it recon
 
 
@@ -120,7 +120,8 @@ def is_code_file(path: str) -> bool:
     return Path(str(path)).suffix.lower() in roles().get("code_extensions", [])
 
 
-def validate(scope: Dict[str, Any], require_fix_tasks: bool = True) -> List[str]:
+def validate(scope: Dict[str, Any], require_fix_tasks: bool = True,
+            require_requirements: bool = True) -> List[str]:
     """require_fix_tasks: False for a scope confirmed before the fix-task question existed — a
     revision or amendment of it must not force that question on the human mid-run (it allows
     no delegated fix tasks)."""
@@ -163,7 +164,7 @@ def validate(scope: Dict[str, Any], require_fix_tasks: bool = True) -> List[str]
     if not has_write:
         errs.append("at least one workspace must be mode write (where deliverables go).")
 
-    work = reviewers = 0
+    work = reviewers = planners = 0
     seen: Set[str] = set()
     for p in scope["participants"]:
         agent, role, why = p.get("agent", ""), role_of(p), str(p.get("why", "")).strip()
@@ -184,6 +185,7 @@ def validate(scope: Dict[str, Any], require_fix_tasks: bool = True) -> List[str]
         if role in WORK_ROLES:
             work += 1
             reviewers += role == "reviewer"
+            planners += role == "plan"
             if not kinds & set(agent_kinds(agent, role)):
                 errs.append(f"{agent} ({role}) does not apply to {', '.join(sorted(kinds))} deliverables; "
                             f"as {role} it is for: {', '.join(agent_kinds(agent, role))}.")
@@ -192,6 +194,28 @@ def validate(scope: Dict[str, Any], require_fix_tasks: bool = True) -> List[str]
                     f"{limit('max_participants')} — keep only agents with a direct bearing on the output.")
     if reviewers > limit("max_reviewers"):
         errs.append(f"{reviewers} reviewers; the limit is {limit('max_reviewers')} — keep the lenses this change needs.")
+    if require_requirements:
+        if planners < 1:
+            errs.append("new runs need one `plan`-role participant — the independent plan reviewer "
+                        "(plan-reviewer) that reviews the plan before execution.")
+        reqs = scope.get("requirements")
+        if not reqs:
+            errs.append("requirements is the ledger of every distinct requested outcome, format, destination "
+                        "and constraint, each with an id (R1...), its text, and the deliverables it maps to.")
+        else:
+            known = {d["id"] for d in scope["deliverables"]}
+            ids = [r.get("id") for r in reqs]
+            for r in reqs:
+                rid = r.get("id", "")
+                if not str(rid).strip() or not r.get("text") or not r.get("deliverables"):
+                    errs.append(f"requirement {rid or '(unnamed)'}: needs id, text, and the deliverables it maps to.")
+                else:
+                    unknown = [d for d in r["deliverables"] if d not in known]
+                    if unknown:
+                        errs.append(f"requirement {rid} maps to unknown deliverables {', '.join(unknown)}.")
+            dupes = {i for i in ids if ids.count(i) > 1}
+            if dupes:
+                errs.append(f"requirement ids must be unique: {', '.join(sorted(str(d) for d in dupes))}.")
 
     for kind in sorted(kinds - {"integration"}):  # tp publish posts integration work; a liaison is optional
         authors = [a for a in participants(scope, "author") if kind in agent_kinds(a, "author")]
@@ -279,6 +303,10 @@ def render(scope: Dict[str, Any]) -> str:
             f"**Review:** {scope['review']}.", _fix_tasks_line(scope), "", "## Deliverables"]
     out += [f"- {d['id']} ({d['kind']}): {d['what']}" + (f" — in `{d['where']}`" if d.get("where") else "")
             for d in scope["deliverables"]]
+    if scope.get("requirements"):
+        out += ["", "## Requirements (the coverage the plan must prove)"]
+        out += [f"- **{r['id']}** — {r['text']} (→ {', '.join(r['deliverables'])})"
+                for r in scope["requirements"]]
     if scope.get("terms"):
         out += ["", "## Significant terms"]
         out += [f"- **{t['term']}** — {t['means']}" + (f" Not: {t['not']}" if t.get("not") else "")
@@ -316,7 +344,8 @@ def cmd_check(wf: Workflow) -> str:
         raise TPError(f"Scope is checked in SCOPING; the workflow is {state['phase']}.",
                       "To change a confirmed scope, the human must ask: `tp revise --scope --feedback ...`.")
     scope = load_scope(wf)
-    errs = validate(scope, require_fix_tasks=not state.get("scope_confirmed"))
+    fresh = not state.get("scope_confirmed")
+    errs = validate(scope, require_fix_tasks=fresh, require_requirements=fresh)
     if errs:
         raise TPError(*errs)
     (wf.root / "scope.md").write_text(render(scope))

@@ -21,7 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 CODE = dict(
     deliverables=[{"id": "D1", "kind": "code", "what": "calc gains mul()", "where": "app"}],
-    participants=[{"agent": "test-author", "role": "tests", "why": "Writes mul's tests first."},
+    requirements=[{"id": "R1", "text": "mul(2, 3) returns 6, test-first", "deliverables": ["D1"]}],
+    participants=[{"agent": "plan-reviewer", "role": "plan", "why": "Independently reviews the plan against the request."},
+                  {"agent": "test-author", "role": "tests", "why": "Writes mul's tests first."},
                   {"agent": "code-author", "role": "author", "why": "Implements mul to pass them."},
                   {"agent": "correctness-reviewer", "role": "reviewer", "why": "Reviews the D1 change."}],
     review="final",
@@ -60,7 +62,7 @@ def code_harness() -> Tuple[Harness, Path, Callable[[], None]]:
                  split_tests=True)  # this helper exercises the split gates; the fused round has its own tests
     task = {"id": "T01", "title": "mul", "serves": ["D1"], "agent": "code-author", "workspace": "app",
             "paths": ["calc.py", "test_calc.py"], "sources": ["app:calc.py"],
-            "brief": "Add mul(a, b) beside add.", "acceptance": ["mul(2, 3) == 6"],
+            "brief": "Add mul(a, b) beside add.", "acceptance": ["mul(2, 3) == 6"], "requirements": ["R1"], "requirements": ["R1"],
             "test_cmd": "python3 -m unittest -q test_calc", "tests_paths": ["test_calc.py"],
             "checks": [], "estimate_min": 10, "depends_on": []}
     return h, app, lambda: h.approved(h.plan([task], final_checks=[]), **scope)
@@ -708,7 +710,8 @@ class ExpandTest(unittest.TestCase):
         self.plan_with(["gen/**", "architecture/overview.md"])
         self.h.tp("plan", "check")
         self.h.tp("plan", "submit")
-        self.h.tp("approve", "--answer", "ok")
+        self.h.plan_review_pass()
+        self.h.tp("approve")
         err = self.h.tp("dispatch", "T01", expect=2).text
         self.assertIn("210 files", err)
         self.assertEqual(self.h.state()["in_flight"], {})

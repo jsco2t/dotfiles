@@ -346,6 +346,8 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
 
     tasks: Dict[str, Dict[str, Any]] = {}
     served: Set[str] = set()
+    scope_reqs = {r["id"] for r in scope.get("requirements", [])}
+    cited_reqs: Set[str] = set()
     computable = True  # ids, dependencies, and estimates are sound enough for the graph checks
     all_ids = {x.get("id") for x in tasks_list}
     for t in tasks_list:
@@ -365,6 +367,7 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
         for d in unknown:
             errs.append(f"{tid}: serves unknown deliverable {d}.")
         served |= set(t.get("serves", []))
+        cited_reqs |= set(t.get("requirements", []))
         kind = task_kind(t, scope)
         if t.get("serves") and not unknown and kind is None:
             errs.append(f"{tid}: every deliverable a task serves must be of one kind.")
@@ -415,8 +418,20 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
         if kind == "code":
             if not t.get("test_cmd"):
                 errs.append(f"{tid}: a code task needs `test_cmd` (tests first, observed red, then green).")
-            if t.get("test_mode", "red") not in ("red", "pin"):
-                errs.append(f"{tid}: test_mode must be red (new behaviour) or pin (characterize current behaviour).")
+            if t.get("test_mode", "red") not in ("red", "pin", "existing"):
+                errs.append(f"{tid}: test_mode must be red (new behaviour), pin (characterize current "
+                            "behaviour), or existing (current tests already prove the criterion).")
+            if t.get("test_mode") == "existing" and scope.get("split_tests"):
+                errs.append(f"{tid}: test_mode 'existing' needs the fused build round (split_tests runs use "
+                            "red or pin: a separate test author has nothing to write).")
+        req_ids = t.get("requirements", [])
+        if scope.get("requirements"):
+            if not req_ids:
+                errs.append(f"{tid}: cite the requirements it serves in `requirements` (R# ids from scope).")
+            else:
+                unknown = [r for r in req_ids if r not in scope_reqs]
+                if unknown:
+                    errs.append(f"{tid}: cites unknown requirements {', '.join(unknown)}.")
         if scope.get("review") in ("per-task", "both") and t.get("review") is not False:
             rev = reviewer_for(t, scope)
             if rev is None or rev not in scopemod.participants(scope, "reviewer"):
@@ -426,6 +441,8 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
 
     for d in sorted(deliverables - served):
         errs.append(f"{d} is served by no task.")
+    for r in sorted(scope_reqs - cited_reqs):
+        errs.append(f"{r} ({next(x['text'] for x in scope['requirements'] if x['id'] == r)}) is served by no task.")
     if not computable:
         return errs
 
@@ -543,6 +560,17 @@ def render(plan: Dict[str, Any], scope: Dict[str, Any], wf: Workflow) -> str:
             writes = f"{t['workspace']}: " + ", ".join(f"`{p}`" for p in t["paths"])
             agent = t["agent"]
         out.append(f"| {t['id']} | {t['title']} | {agent} | {rev} | {t.get('estimate_min', 5)}m | {deps} | {writes} |")
+    # The request, requirement by requirement, and the tasks that carry each: this is what the
+    # plan review verifies and the report re-checks — coverage the reader can see, not just trust.
+    if scope.get("requirements"):
+        by_req: Dict[str, List[str]] = {}
+        for t in tasks.values():
+            for r in t.get("requirements", []):
+                by_req.setdefault(r, []).append(t["id"])
+        out += ["", "## Requirements coverage", "", "| Requirement | Tasks |", "|---|---|"]
+        for r in scope["requirements"]:
+            who = by_req.get(r["id"], [])
+            out.append(f"| {r['id']} — {r['text']} | {', '.join(who) if who else '**none — plan check refuses**'} |")
     # The coverage the human verifies at approval: every deliverable, and the tasks that serve it.
     # A deliverable with no tasks is a plan check error; this matrix makes the fit readable,
     # not just machine-checked, so revisions happen before approval instead of after execution.
@@ -593,7 +621,9 @@ def _checked(wf: Workflow, state: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[
 
 def cmd_check(wf: Workflow) -> str:
     state = wf.load()
-    if state["phase"] != "PLANNING":
+    pr = state.get("plan_review") or {}
+    fixing = state["phase"] == "AWAITING_APPROVAL" and pr.get("status") == "changes"
+    if state["phase"] != "PLANNING" and not fixing:
         raise TPError(f"Plans are checked in PLANNING; the workflow is {state['phase']}.")
     plan, scope = _checked(wf, state)
     wf.event("plan_check", tasks=len(plan["tasks"]))
@@ -603,8 +633,12 @@ def cmd_check(wf: Workflow) -> str:
 
 def cmd_submit(wf: Workflow) -> str:
     state = wf.load()
-    if state["phase"] != "PLANNING":
-        raise TPError(f"Only a PLANNING workflow can be submitted; it is {state['phase']}.")
+    pr = state.get("plan_review")
+    resubmit = state["phase"] == "AWAITING_APPROVAL" and pr and pr.get("status") == "changes"
+    if state["phase"] != "PLANNING" and not resubmit:
+        raise TPError(f"Only a PLANNING workflow can be submitted; it is {state['phase']}."
+                     + (" A plan in review is resubmitted only after its findings are triaged." if
+                        state["phase"] == "AWAITING_APPROVAL" else ""))
     unsettled = []
     for rid, item in state.get("recon", {}).items():
         if item["status"] in ("pending", "in_flight"):
@@ -620,17 +654,23 @@ def cmd_submit(wf: Workflow) -> str:
     state["plan_submitted_sha"] = sha_file(wf.plan_json)
     state["phase"] = "AWAITING_APPROVAL"
     state["submitted"] = now_iso()
+    if pr is None:  # a new run; a resumed legacy run keeps its human-approval contract
+        pr = state["plan_review"] = {"round": 0, "status": "pending", "agent": None, "agent_id": None,
+                                     "sha": None, "findings": [], "dismissed": {}, "observations": []}
+    pr.update(status="pending", sha=None)  # re-bind on the next review dispatch
     wf.save(state)
     wf.event("plan_submit", planning_min=round(minutes_since(state["created"]), 1))
     out = [f"submitted — {len(plan['tasks'])} tasks, planning took {minutes_since(state['created']):.0f} min.",
-           f"Plan for the human: {wf.root / 'plan.md'}"]
+           f"Plan: {wf.root / 'plan.md'}"]
     if plan.get("questions"):
-        out += ["Questions to put to the human:"] + [f"  - {q}" for q in plan["questions"]]
+        out += ["Questions the plan leaves open (the plan reviewer checks they are answered):"] \
+               + [f"  - {q}" for q in plan["questions"]]
     noticed = wf.noticed_items()
     if noticed:
-        out += ["Noticed, not in plan (tell the human):"] + [f"  - {n}" for n in noticed]
-    out.append("Ask the human to approve or revise (the `question` tool). Then `tp approve --answer \"<their words>\"` "
-               "or `tp revise --feedback \"<their words>\"`.")
+        out += ["Noticed, not in plan (the reviewer sees them):"] + [f"  - {n}" for n in noticed]
+    out.append("Next: the independent plan review — `tp next` says exactly what to send (`tp plan review`). "
+               "No human approval: the human still decides anything material you put to them, and can "
+               "interject with `tp revise --feedback \"<their words>\"` at any time.")
     return "\n".join(out)
 
 
@@ -640,6 +680,20 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
     state = wf.load()
     if state["phase"] != "AWAITING_APPROVAL":
         raise TPError(f"Nothing awaits approval: the workflow is {state['phase']} (submit the plan first).")
+    pr = state.get("plan_review")
+    if pr is not None:  # the new contract: an independent, current, passing plan review enters execution
+        if pr.get("status") != "pass":
+            raise TPError(f"the plan review is {pr.get('status') or 'not run'} — `tp plan review` starts it; "
+                          "only a passing review enters execution.")
+        if pr.get("sha") != state.get("plan_submitted_sha"):
+            raise TPError("the plan changed after its review passed — submit it again and re-review "
+                          "(`tp plan review`).")
+        answer = answer or (f"independent plan review passed (round {pr['round']}, agent {pr.get('agent')}"
+                            + (f", {len(pr.get('dismissed', {}))} finding(s) dismissed with reasons" if
+                               pr.get("dismissed") else "") + ")")
+    elif not answer:
+        raise TPError("this workflow predates plan review — the human's approval is needed: "
+                      "`tp approve --answer \"<their words>\"`.")
     if sha_file(wf.plan_json) != state.get("plan_submitted_sha"):
         raise TPError("plan.json changed since it was submitted — run `tp plan check` and `tp plan submit` again.")
     plan = load_plan(wf)
@@ -658,7 +712,7 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
     state["reviews"] = review.new_reviews(plan, scope, state.get("reviews", {}))
     state["integration"] = review.integration_ids(plan, scope)
     wf.save(state)
-    wf.decision("plan approve", answer)
+    wf.decision("plan approve", answer, who=None if pr is not None else "human")
     wf.event("approve")
     return "approved — EXECUTING. Run `tp next` and keep going until it says final or human."
 
@@ -1128,3 +1182,178 @@ def cmd_revise(wf: Workflow, feedback: str, to_scope: bool) -> str:
         return "back to SCOPING — edit scope.json, `tp scope check`, and have the human confirm it again."
     return ("back to PLANNING — edit plan.json from the feedback, `tp plan check`, `tp plan submit`. "
             "Accepted tasks stay accepted.")
+
+# --- independent plan review -----------------------------------------------------------------
+
+def _plan_reviewer(scope: Dict[str, Any]) -> str:
+    who = [a for a in scopemod.participants(scope, "plan")]
+    if not who:
+        raise TPError("no plan-role participant in scope.json — the independent plan reviewer "
+                      "(plan-reviewer) must be confirmed with the scope.")
+    return who[0]
+
+
+def cmd_plan_review(wf: Workflow) -> str:
+    """Dispatch the independent plan review: one read-only reviewer gets the request, the scope,
+    and the plan bound to this exact revision. The manager never reviews its own plan."""
+    from . import briefs
+    state = wf.load()
+    if state["phase"] != "AWAITING_APPROVAL":
+        raise TPError(f"the plan review runs after submit; the workflow is {state['phase']}.")
+    pr = state.get("plan_review")
+    if pr is None:
+        raise TPError("this workflow predates plan review — the human approves it: "
+                      "`tp approve --answer \"<their words>\"`.")
+    if pr["status"] == "in_flight":
+        raise TPError(f"round {pr['round']} is in flight — record it: `tp plan record --agent-id <its id>`.")
+    if pr["status"] == "pass":
+        raise TPError(f"round {pr['round']} already passed — `tp approve` enters execution.")
+    if pr["status"] == "needs_triage":
+        raise TPError(f"round {pr['round']} has findings to triage first: `tp plan triage`.")
+    if pr["round"] >= limit("max_review_rounds"):
+        raise TPError(f"the plan has failed {pr['round']} independent review rounds. Put it to the human: "
+                      "`tp revise --feedback \"<their words>\"` restarts planning with their input.")
+    plan, scope = _checked(wf, state)  # the plan under review must itself be clean
+    pr["round"] += 1
+    rnd = pr["round"]
+    if pr["status"] == "pending" or not pr.get("agent"):
+        pr["agent"] = _plan_reviewer(scope)
+    run = wf.root / "runs" / "plan"
+    run.mkdir(parents=True, exist_ok=True)
+    brief, result = run / f"brief-review-{rnd}.md", run / f"result-review-{rnd}.json"
+    if result.exists():
+        result.unlink()
+    reqs = [{"id": r["id"], "text": r["text"], "deliverables": r["deliverables"]}
+            for r in scope.get("requirements", [])]
+    ctx = {"plan_md": wf.root / "plan.md", "plan_json": wf.plan_json, "scope_md": wf.root / "scope.md",
+           "request": (wf.root / "request.md").read_text(errors="replace") if (wf.root / "request.md").exists() else "",
+           "requirements": reqs, "questions": plan.get("questions", []),
+           "noticed": [str(n) for n in wf.noticed_items()],
+           "prior_findings": pr.get("findings", []) if rnd > 1 else []}
+    brief.write_text(briefs.plan_review(rnd, ctx, result))
+    pr.update(status="in_flight", sha=state.get("plan_submitted_sha"), findings=[], dismissed={})
+    wf.save(state)
+    wf.event("plan_review", round=rnd, agent=pr["agent"])
+    call = briefs.dispatch_line(pr["agent"], f"plan review {rnd}",
+                                briefs.prompt(brief, result), pr.get("agent_id"), None)
+    return (f"PLAN REVIEW · round {rnd} · {pr['agent']}\nbrief: {brief}\nsend: {call}\n"
+            f"then, when it replies: tp plan record --agent-id <its agent id>")
+
+
+def cmd_plan_record(wf: Workflow, agent_id: Optional[str]) -> str:
+    """Validate the reviewer's hand-back: verdict, grounded findings, and one coverage entry per
+    scope requirement. Uncovered requirements and unresolved issues become findings themselves;
+    `pass` requires every requirement covered and nothing unresolved."""
+    state = wf.load()
+    if state["phase"] != "AWAITING_APPROVAL":
+        raise TPError(f"the workflow is {state['phase']}; a plan review records while the plan awaits review.")
+    pr = state.get("plan_review")
+    if not pr or pr["status"] != "in_flight":
+        raise TPError(f"no plan review round is in flight (status {pr and pr.get('status')}).")
+    rnd = pr["round"]
+    result = wf.root / "runs" / "plan" / f"result-review-{rnd}.json"
+    if not result.exists():
+        raise TPError(f"{result} is missing — the reviewer must write it before you record. Resume its "
+                      "`task` call and ask it to write the file.")
+    if agent_id:
+        pr["agent_id"] = agent_id
+    data = load_json(result, "the plan review")
+    scope = scopemod.load_scope(wf)
+    errs: List[str] = []
+    if not isinstance(data, dict):
+        raise TPError("the plan review result must be a JSON object.")
+    if data.get("review") != "plan" or data.get("round") != rnd:
+        errs.append(f"result must say review 'plan' and round {rnd}.")
+    if data.get("verdict") not in ("pass", "changes"):
+        errs.append("verdict must be pass or changes.")
+    findings = data.get("findings")
+    if not isinstance(findings, list):
+        errs.append("findings must be a list.")
+    for f in findings or []:
+        if not isinstance(f, dict) or not str(f.get("issue", "")).strip():
+            errs.append("each finding needs a complete `issue` sentence and the requirement it is about.")
+    req_ids = [r["id"] for r in scope.get("requirements", [])]
+    coverage = data.get("coverage")
+    if req_ids and not isinstance(coverage, list):
+        errs.append("coverage must be a list with one entry per scope requirement.")
+    covered: Dict[str, Optional[str]] = {r: None for r in req_ids}
+    for c in coverage or []:
+        if isinstance(c, dict) and c.get("requirement") in covered:
+            covered[c["requirement"]] = bool(c.get("covered"))
+    missing = [r for r, v in covered.items() if v is None]
+    if missing:
+        errs.append(f"coverage is missing entries for {', '.join(missing)}.")
+    if errs:
+        raise TPError(*[f"{result}: {e}" for e in errs],
+                      "Resume the reviewer's `task` call and have it fix the file, then record again.")
+    # An uncovered requirement or an unresolved question is a finding, whatever the verdict says.
+    found = list(findings or [])
+    for f in found:
+        f["blocking"] = True
+    for rid, ok in covered.items():
+        if not ok:
+            text = next((r["text"] for r in scope["requirements"] if r["id"] == rid), "")
+            found.append({"id": f"F{len(found) + 1}", "state": "missing",
+                          "requirement": rid,
+                          "issue": f"{rid} ({text}) is not covered: no task's acceptance "
+                                   "criteria can fail if it is unmet.",
+                          "fix": "serve it with a task whose criteria prove it, or settle it "
+                                 "with the human if it is not wanted.", "blocking": True})
+    pr["findings"] = found
+    pr["observations"] = [str(o) for o in data.get("observations", []) if str(o).strip()]
+    for o in pr["observations"]:
+        wf.noticed("plan review", o)
+    if data["verdict"] == "pass" and not pr["findings"] and not data.get("unresolved"):
+        pr["status"] = "pass"
+        wf.save(state)
+        wf.event("plan_review_record", round=rnd, verdict="pass", findings=0)
+        return (f"plan review round {rnd} passed — every requirement covered. `tp approve` enters execution. "
+                "No human approval is needed; they can still interject with `tp revise`.")
+    pr["status"] = "needs_triage"
+    wf.save(state)
+    wf.event("plan_review_record", round=rnd, verdict=data["verdict"], findings=len(pr["findings"]))
+    return (f"plan review round {rnd} returned {data['verdict']} with {len(pr['findings'])} finding(s).\n"
+            + "\n".join(f"  {f['id']} ({f.get('state')}) {f['requirement']}: {f['issue']}" for f in pr["findings"])
+            + "\nVerify each against the plan, then `tp plan triage --accept-all`, or "
+            "`--dismiss F# --reason \"...\"` for each you overrule (recorded, and shown at the report).")
+
+
+def cmd_plan_triage(wf: Workflow, accept_all: bool, dismiss: List[str]) -> str:
+    """Accept the confirmed findings (fix the plan, resubmit, re-review) or overrule them with a
+    recorded reason. Dismissals are manager decisions — the report carries them verbatim."""
+    state = wf.load()
+    pr = state.get("plan_review")
+    if not pr or pr["status"] != "needs_triage":
+        raise TPError(f"no plan-review findings await triage (status {pr and pr.get('status')}).")
+    reason_of = {}
+    for spec in dismiss:
+        fid, _, reason = spec.partition("=")
+        if not reason.strip():
+            raise TPError(f"--dismiss {spec}: use --dismiss F#=reason (or --accept-all).")
+        reason_of[fid] = reason
+    kept = [f for f in pr["findings"] if f["id"] not in reason_of]
+    if not (accept_all or reason_of):
+        raise TPError("Say what you decided: --accept-all, or --dismiss F#=\"reason\" for each finding you "
+                      "overrule.")
+    unknown = [fid for fid in reason_of if fid not in {f["id"] for f in pr["findings"]}]
+    if unknown:
+        raise TPError(f"{', '.join(unknown)} are not findings of round {pr['round']}.")
+    if kept and not accept_all:
+        raise TPError(f"{', '.join(f['id'] for f in kept)} are undismissed: --accept-all, or dismiss them too.")
+    pr["dismissed"].update(reason_of)
+    for fid, reason in reason_of.items():
+        wf.decision(f"plan review round {pr['round']} dismiss {fid}", reason, who="manager")
+    if kept:  # fix the plan, resubmit, re-review (the same reviewer, resumed)
+        pr["status"] = "changes"
+        wf.save(state)
+        wf.event("plan_triage", round=pr["round"], accepted=len(kept), dismissed=len(reason_of))
+        return ("Fix the plan for every accepted finding, then `tp plan check` and `tp plan submit` — "
+                "the review re-runs (round " + str(pr["round"] + 1) + ", the same reviewer resumed).\n"
+                + "\n".join(f"  {f['id']} ({f.get('state')}) {f['requirement']}: {f['issue']}"
+                            + (f" Fix: {f['fix']}" if f.get("fix") else "") for f in kept))
+    pr["status"] = "pass"  # every finding overruled with a recorded reason
+    wf.save(state)
+    wf.event("plan_triage", round=pr["round"], accepted=0, dismissed=len(reason_of))
+    return ("All findings dismissed with recorded reasons — the review stands passed. `tp approve` "
+            "enters execution.")
+

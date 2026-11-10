@@ -131,13 +131,20 @@ def author(task: Dict[str, Any], step: str, rnd: int, ctx: Dict[str, Any], resul
                 + f"`{task['test_cmd']}`. Touch no file outside the test paths — no production code, no "
                 "stubs, no 'temporary' implementations: the red check fails the step for tests that already "
                 "pass, and the implementation is the next agent's step.", ""]
+    elif step == "build" and task.get("test_mode") == "existing":
+        out += ["## This step: implement against the existing tests", "",
+                f"The current tests already prove this task's criteria — do not add tests. Make your change "
+                f"and keep `{task['test_cmd']}` green ({', '.join(f'`{p}`' for p in ctx['tests_paths'])} are "
+                "the tests that matter). Never weaken or delete one to make faulty work pass; if an existing "
+                "test is itself wrong, hand back `blocked` and say why.", ""]
     elif step == "build":
         mode = task.get("test_mode", "red")
         out += ["## This step: tests first, then the implementation — one round", "",
                 f"Write the tests for this task first, in {', '.join(f'`{p}`' for p in ctx['tests_paths'])}. "
                 + (f"Run `{task['test_cmd']}` and observe them failing for the reason the task names (red); "
                    f"save that failing run's full output to `{result.parent / f'red-build-{rnd}.log'}` — the "
-                   "pipeline checks that file for a real failure. "
+                   "pipeline checks that file for a real failure. A suite that fails to load — an import, "
+                   "build, or setup error — is not red: fix the fixture and rerun before implementing. "
                    if mode == "red" else
                    f"Run `{task['test_cmd']}` and observe today's behaviour pinned (tests pass); save that "
                    f"run's full output to `{result.parent / f'red-build-{rnd}.log'}`. ")
@@ -332,3 +339,61 @@ def dispatch_line(agent: str, desc: str, text: str, agent_id: Optional[str], mod
     extra = f", model={json.dumps(model)}" if model else ""
     return (f"task(subagent_type={json.dumps(agent)}, description={json.dumps(desc)}{extra}, "
             f"prompt={json.dumps(text)})")
+
+PLAN_REVIEW_SCHEMA = ('{{"review": "plan", "round": {rnd}, "verdict": "pass | changes", '
+                      '"findings": [{{"id": "F1", "state": "wrong | missing | unnecessary | infeasible | unresolved", '
+                      '"requirement": "<R# or request line>", "issue": "<what is wrong and what it ships or breaks>", '
+                      '"fix": "<what would make the plan right>"}}], '
+                      '"coverage": [{{"requirement": "R1", "covered": true, "note": "<the task(s) and criterion that prove it>"}}], '
+                      '"observations": ["<worthwhile, non-blocking>"]}}')
+
+
+def plan_review(rnd: int, ctx: Dict[str, Any], result: Path) -> str:
+    """The independent reviewer's brief: the plan against the original request, before execution.
+    The review is bound to this exact plan revision; a changed plan needs a new round."""
+    box = _estimate("the whole plan, one pass")
+    out = [f"# /task-pipeline plan-review brief — round {rnd}", "",
+           HEADER.format(box=box, in_flight=1), "",
+           "## What you are reviewing", "",
+           f"The delivery plan at `{ctx['plan_md']}` (rendered) and `{ctx['plan_json']}` (exact), against the "
+           f"original request (verbatim, below) and the settled scope at `{ctx['scope_md']}`. You did not write "
+           "this plan and will not implement it; your value is independence. Do not edit any file.", ""]
+    out += ["## The request, verbatim", "", "```", str(ctx["request"]), "```", ""]
+    if ctx.get("requirements"):
+        out += ["## The requirements ledger (from scope — every one must be covered)", ""]
+        out += [f"- **{r['id']}** — {r['text']} (→ {', '.join(r['deliverables'])})" for r in ctx["requirements"]]
+        out += [""]
+    if ctx.get("questions"):
+        out += ["## Questions the plan leaves open", ""] + [f"- {q}" for q in ctx["questions"]] + [""]
+    if ctx.get("noticed"):
+        out += ["## Noticed, not in the plan", ""] + [f"- {n}" for n in ctx["noticed"]] + [""]
+    if ctx.get("prior_findings"):
+        out += ["## Findings from the earlier round you are re-reviewing", ""]
+        out += [f"- {f}" for f in ctx["prior_findings"]]
+        out += ["", "The plan was revised since. Check each finding is addressed, and re-check the whole plan: "
+                "a revision can fix one gap and open another.", ""]
+    out += ["## Check, in order", "",
+            "1. **Coverage:** every requirement is served by at least one task whose acceptance criteria can "
+            "actually fail if that requirement is unmet. Coverage by task title is not coverage.",
+            "2. **Missing work:** anything the request or a requirement plainly needs that no task does — "
+            "including verification, integration, and the delivery destination the request names.",
+            "3. **Unnecessary work:** tasks that serve no requirement, however good an idea.",
+            "4. **Feasible verification:** every code task's `test_cmd` can run on these workspaces; its "
+            "`test_mode` matches the work (red for new behaviour, pin to preserve, existing when current tests "
+            "already prove the criterion); tasks without a mechanical check have criteria concrete enough to "
+            "verify by inspection.",
+            "5. **Structure:** dependencies acyclic and honest; parallel tasks write disjoint paths; shared "
+            "files have one owner; the scope's non-goals are respected.",
+            "6. **Unresolved issues:** any open question or noticed item the plan depends on but does not "
+            "answer.",
+            "",
+            "Ground every finding in a requirement or a request line you can quote; anything else is an "
+            "observation, not a finding. Finding nothing is a valid outcome — say so and pass the plan.", ""]
+    out += _style()
+    out += ["", "## Hand back", "",
+            f"Write `{result}`:", "", "```json", PLAN_REVIEW_SCHEMA.format(rnd=rnd), "```", "",
+            f"`coverage` needs one entry per requirement, `covered` true exactly when the plan proves it. "
+            "`verdict` is `pass` only with every requirement covered, feasible verification, and nothing "
+            "missing, unnecessary, or unresolved.",
+            "", f"Then reply with exactly one line: `RESULT {result}`. Nothing else — the file is the report.", ""]
+    return "\n".join(out) + "\n"

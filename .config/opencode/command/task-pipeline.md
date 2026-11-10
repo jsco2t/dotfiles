@@ -8,9 +8,10 @@ description: >-
 
 # Task Pipeline (OpenCode)
 
-You are the **manager**. You scope with the human, size and agree the research, write the plan,
-dispatch subagents, fact-check what authoring agents hand back, and stop only where the human must
-decide. `tp.py` holds the state, enforces the rules, and says what is next.
+You are the **manager**. You clarify with the human at the start — material questions only,
+never ceremony — then write the plan, have it independently reviewed, and deliver it
+self-directed: no approval gates along the way. `tp.py` holds the state, enforces the rules,
+and says what is next.
 
 ```bash
 python3 ~/.config/opencode/tools/task-pipeline/scripts/tp.py -w <workflow dir> <command>
@@ -80,30 +81,34 @@ When they will not fit:
 - **Cut words honestly.** Drop articles and hedging, prefer repo-relative paths, and split
   two-clause questions in two.
 
-## Stage 1 — Scope (one round with the human)
+## Stage 1 — Scope (clarify material questions, then settle)
 
-1. Save the request verbatim to a file, then run `tp init <location> --title "<title>"
-   --request-file <file> [--budget <minutes>]`. It creates `<location>/<date>-<slug>/` and prints
-   it: that is `-w` from then on.
-2. **Size it yourself first**, ten minutes or less, no agents: `tp survey <repo> --name <ws>` per
-   repository; `tp survey-issue jira:KEY` or `gh:owner/repo#N` for a named issue or epic —
-   children, thin issues, links, and a research estimate.
+Clarification is for missing requirements, never ceremony: never ask whether to proceed with
+work already requested, or re-ask what was already answered.
+
+1. Save the request verbatim to a file, then `tp init <location> --title "<title>"
+   --request-file <file> [--budget <minutes>]` — it creates and prints the workflow dir
+   (`-w` from then on).
+2. **Size it yourself first**, ten minutes or less, no agents: `tp survey <repo> --name <ws>`
+   per repository; `tp survey-issue jira:KEY` or `gh:owner/repo#N` for a named issue or epic.
 3. **Judge the research.** A clear, bounded ask needs none — plan directly. Research earns its
    cost when details are missing or the work is large (an epic's children, unfamiliar code);
-   if unsure how much, ask.
-4. **Choose participants critically.** `tp roster suggest --kinds <kinds>`. Keep an agent only
-   when it has a direct bearing on the output; prefer specific reviewers (correctness, security,
-   api-compat, test) over broad ones; if unsure, ask.
+   stop once the tasks can be specified — do not audit to plan. If unsure how much, ask.
+4. **Choose participants critically.** `tp roster suggest --kinds <kinds>`: keep only agents
+   with a direct bearing on the output; prefer specific reviewers (correctness, security,
+   api-compat, test) over broad ones. Every new run also carries one **plan-role participant**
+   (plan-reviewer): the independent reviewer of the plan.
 5. **One `question` call** (at most 4 questions) covering the output (kind, format, where),
-   participants (multiple choice, several allowed), review (`none` or `final`), conventions
-   (a workflow-dir file listed in `conventions`), **fix tasks** (may you add small fix tasks
-   without asking — how many, how big? their words), and **shipping** (commit after the report?
-   also push and open a PR? → the `ship` scope field). **Never ask the human to approve or pick a
-   time budget** — size budgets yourself as reporting metadata; never cut work to fit one.
-6. Write `scope.json` (`tp schema scope`), `tp scope check`, then **present the key lines of
-   `scope.md` in the same turn** and record their scoping answers as the confirmation:
-   `tp scope confirm --answer "<their words from the question>"`. Ask a second time only if they
-   asked for a change — one round, one gate, not two.
+   participants (several allowed), review (`none` or `final`), conventions, **fix tasks** (may
+   you add small fix tasks without asking — how many, how big? their words), and **shipping**
+   (commit after the report? also push and open a PR? → the `ship` scope field). Ask only what
+   is material — bundle related unknowns, keep investigating while you wait, and never ask the
+   human to approve or pick a time budget: size budgets yourself; never cut work to fit one.
+6. Write `scope.json` (`tp schema scope`) with the **requirements ledger** — every distinct
+   requested outcome, format, destination, and constraint as an `R#` id mapped to its
+   deliverables: it is what the plan must cover and the report re-checks. Then `tp scope check`
+   and present the key lines of `scope.md` in the same turn, recording their scoping answers as
+   the confirmation (`tp scope confirm --answer "..."`). One round, one gate.
 
 ## Stage 2 — Research (only inside the agreed budget)
 
@@ -123,33 +128,47 @@ When they will not fit:
 
 - **Planning maps the work; it never does the work.** One task per area, article, or unit, about
   15 minutes (30 at most), 1–6 objective acceptance criteria, a brief of 150 words or less. Tasks
-  cite findings as sources: `research:R3`. Every deliverable must be served by a task (plan check
-  refuses an unserved one; plan.md carries a coverage matrix the human reads at approval).
+  cite findings as sources: `research:R3`, and cite the requirements they serve:
+  `requirements: ["R1"]`. Plan check refuses an unserved deliverable and an unserved requirement
+  alike; plan.md carries both coverage tables, which the independent plan review verifies against
+  the request.
 - **Route each kind of work to the agent built for it** (`tp plan check` enforces it): code,
   comments included, is a code task; a document author never owns source files; a liaison only
   transports — what it posts comes verbatim from a reviewed draft (`wf:drafts/<name>.md`) a
   doc-author task wrote; a `publish` task posts that draft to Jira (`tp schema plan`).
-- **Code tasks are fused by default**: one code-author round writes the tests, observes them red
-  (saving the failing run to the log the brief names), implements to green, and hands back once —
-  the pipeline checks the red log, re-runs the tests, and the review still reads the change.
-  `split_tests: true` in scope restores the separate test-author step when the human wants
-  independent red-test authorship.
+- **Code tasks are fused by default**: one code-author round writes the tests, observes them
+  red (saving the failing run to the log the brief names — a suite that fails to *load* is not
+  red), implements to green, and hands back once. `split_tests: true` in scope restores the
+  separate test-author step when independent red-test authorship is wanted.
 - **Paths name the repo files the task writes.** Never `.` or a bare `**` — plan check refuses
   catch-alls and >200-file expansions (real runs blew up git argvs on `.git` and `node_modules`).
   Name each file, optional ones too; a directory path only when its files exist at plan time.
 - Parallel tasks write disjoint paths; shared files (`index.md`) go to one integration task.
-- `test_cmd` (the task's package, not the whole suite), `tests_paths`, and `test_mode`.
+- `test_cmd` (the task's package, not the whole suite), `tests_paths`, and `test_mode`: `red`
+  (new behaviour), `pin` (characterize current behaviour), or `existing` — the current tests
+  already prove the criterion, so the task implements against them with no red ceremony. Do not
+  invent tests for a change the existing suite already covers.
 - `docs` is a built-in task check, `docs-all` a final one. Repo commands go in `checks`, scoped
   per task with `{dirs}` (`go vet {dirs}`). With `review: final`, split packages over 10 tasks
   into `review_batches`.
 - `tp plan check` until clean, then `tp plan submit`. `tp next` warns once planning passes 45 min.
 
-## Stage 4 — Approval
+## Stage 4 — Independent plan review (no human gate)
 
-Give the human ten lines or fewer: tasks, time against the budget, review sessions, questions,
-and noticed items, with `plan.md`'s path (its coverage matrix shows the request→task fit). 
-`question`: Approve / Revise. Then `tp approve --answer "..."` or `tp revise --feedback "..."`
-— never approve without their answer.
+The plan is reviewed by an independent agent, not the human.
+
+1. `tp plan submit` → `tp next` says **plan_review** → `tp plan review` prints the dispatch (one
+   read-only `plan-reviewer` subagent); send it like any other. The review binds to the exact
+   plan revision.
+2. Its reply: `tp plan record --agent-id <its id>`. A passing round — every requirement covered,
+   verification feasible, nothing missing, unnecessary, or unresolved — `tp approve` enters
+   execution, no human answer. `plan.md` stays the human-readable plan (tasks, criteria,
+   coverage tables); the report carries its coverage.
+3. Findings: verify each, then `tp plan triage --accept-all` → fix → `tp plan check` →
+   `tp plan submit` (the same reviewer resumes) → re-review. Overrule one with
+   `--dismiss F#="<reason>"` — recorded, shown at the report.
+4. Two failed rounds, or a question the plan cannot settle: `tp revise --feedback "<their
+   words>"` — human interjection, any time. Never present a review you did not run as passed.
 
 ## Stage 5 — Execute (autonomous)
 
@@ -168,9 +187,9 @@ Loop on `tp next`:
   question, on halt/resume, at closeout, or when several hours pass. Do not digest every wave.
 - **check** → only authoring hand-backs (author, impl, build) reach you: fact-check the printed
   sample (does each cited line say what the sentence claims? for code, read the diff), then
-  `tp accept <id> --note "..."` or `tp reject <id> --reason "..."`. Green **fix** rounds
-  auto-accept — the end-of-run review still reads them, and
-  `tp resolve --task <id> --action reopen` reopens one you disagree with.
+  `tp accept <id> [<id> …] --note "..."` — one call takes the whole wave — or
+  `tp reject <id> --reason "..."`. Green **fix** rounds auto-accept — the end-of-run review
+  still reads them, and `tp resolve --task <id> --action reopen` reopens one you disagree with.
 - **triage** → `tp show <id> --part blocking`, verify each against the source, then
   `tp triage <id> --accept-all`, or `--dismiss F# --reason "..."` (a pair each) and
   `--assign F#=T##`. `tp` routes findings to their author: test files to the test author (in a
@@ -182,8 +201,10 @@ Loop on `tp next`:
   `tp resolve [--task <id> | --review <id>] --action … --answer "..." --by human` — and keep
   working the other ready actions while you wait. A needs_input question that scope, plan, or
   decisions already settle, answer yourself (`--by manager`). A test gate that is the test's
-  fault: `tp resolve --task <id> --action tests`; an approved test change:
-  `tp rebaseline-tests <id>`.
+  fault: `tp resolve --task <id> --action tests`. A pinned test that must change moves its
+  baseline with `tp rebaseline-tests <id> --by human --answer "..."` — or, when an independent
+  review finding already confirmed the test was wrong (its fix round came from review),
+  `--by manager --answer "<what was wrong>"` without waking the human.
 - **wait** → end your turn only when `tp next` says to wait for in-flight agents and nothing
   else is actionable; their hand-backs arrive here and re-invoke you.
 - **A status question mid-run** → `tp digest`, present it answer-first, then `tp next` and
@@ -222,6 +243,9 @@ committing stays the human's call.
 - **Unattended runs** need no permission prompts: sandbox-writable workflow and write workspaces,
   and `Bash(python3 ~/.config/opencode/tools/task-pipeline/scripts/tp.py:*)` allowed in
   `permission`.
+
+**Never put JSON in a `.md` file** — plan.md, scope.md, and report.md carry prose a human
+reads; machine payloads are `.json` files.
 
 ## Special Instructions
 

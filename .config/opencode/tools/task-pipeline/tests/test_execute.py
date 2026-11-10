@@ -94,7 +94,8 @@ class ConventionsTest(unittest.TestCase):
         h.write_json("plan.json", h.plan(conventions=["wf:conventions.md"]))
         h.tp("plan", "check")
         h.tp("plan", "submit")
-        h.tp("approve", "--answer", "approve")
+        h.plan_review_pass()
+        h.tp("approve")
 
     def tearDown(self) -> None:
         self.h.close()

@@ -894,7 +894,10 @@ def cmd_recheck(wf: Workflow, tid: str) -> str:
         ws = _ws(scope, task["workspace"])
         label = f"recheck-{ts['round']}"
         findings: List[str] = []
-        if effective == "impl":
+        if effective in ("impl", "build"):
+            # Whatever authoring step produced the tests — split impl or the fused build — a
+            # recheck must see them green now that the siblings have landed. (A build's red
+            # evidence was already verified in the round that blocked; it needs no re-check.)
             ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
             if not ok:
                 findings.append(f"The tests are not green: `{task['test_cmd']}` failed: {tail}")
@@ -1285,8 +1288,9 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
             # One fused round: tests first (observed red, logged), then the implementation (green).
             # The pipeline cannot re-create the red moment — the impl exists now — so red is the
             # agent's own saved log, checked for a real failure marker; the review still judges
-            # whether the tests prove the criteria.
-            red_log = wf.run_dir(tid) / f"red-{label}.log"
+            # whether the tests prove the criteria. A fix round has no red moment of its own — its
+            # goal is green — so the red evidence stays the build round's log, re-checked here.
+            red_log = wf.run_dir(tid) / ("red-build-0.log" if step == "fix" else f"red-{label}.log")
             if not red_log.exists():
                 findings.append(f"The red run's output is missing: save the failing `{task['test_cmd']}` run "
                                 f"to `{red_log}` (the brief names it) before implementing.")

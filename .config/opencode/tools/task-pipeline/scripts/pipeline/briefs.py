@@ -177,6 +177,12 @@ def _fix_step(ctx: Dict[str, Any], task: Dict[str, Any]) -> List[str]:
         return ["## This round: test files only", "",
                 f"Change only the test files ({tests}); `{task['test_cmd']}` must still pass. Do not touch "
                 "production code.", ""]
+    if ctx.get("fixing") == "build" and ctx.get("tests_paths"):
+        return ["## This round: fix the implementation — the tests stand", "",
+                f"The tests ({tests}) already prove the criteria, and their red moment was observed in the "
+                f"build round (`red-build-0.log`): there is no new red to record. Fix the production code "
+                f"until `{task['test_cmd']}` is green. Do not touch the test files — if a test itself is "
+                "wrong, dispute it in `disputes`.", ""]
     if ctx.get("fixing") == "impl" and ctx.get("tests_paths"):
         whose = ("the test author: do not edit them. If a test is wrong, dispute it in `disputes` and the "
                  "pipeline routes it to the test author."

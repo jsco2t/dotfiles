@@ -202,6 +202,46 @@ class FusedBuildTest(unittest.TestCase):
         self.assertIn("not green", out)
         self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
 
+    def test_a_correct_fix_after_a_failed_build_is_recorded(self) -> None:
+        """A fix round has no red moment of its own — its goal is green — so the red evidence
+        stays the build round's log; a correct fix must record, not be refused over a
+        red-fix-1.log no brief ever asked for."""
+        import subprocess
+        self.approve()
+        self.h.tp("dispatch", "T01")
+        (self.app / "test_calc.py").write_text(TEST_PY)
+        proc = subprocess.run(["python3", "-m", "unittest", "-q", "test_calc"], cwd=str(self.app),
+                              capture_output=True, text=True)
+        (self.h.run_dir("T01") / "red-build-0.log").write_text(proc.stdout + proc.stderr)
+        (self.app / "calc.py").write_text("def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a + b\n")
+        self.h.result("T01", "build", changed=["test_calc.py", "calc.py"])
+        self.h.tp("record", "T01", "--agent-id", "ca-1")
+        self.assertEqual(self.h.state()["tasks"]["T01"]["fixing"], "build")
+        self.h.tp("dispatch", "T01")
+        brief = (self.h.run_dir("T01") / "brief-fix-1.md").read_text()
+        self.assertIn("red-build-0.log", brief)      # the round-0 evidence, named
+        self.assertNotIn("red-fix", brief)           # no fresh red demanded
+        (self.app / "calc.py").write_text("def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n")
+        self.h.result("T01", "fix", changed=["calc.py"])
+        out = self.h.tp("record", "T01", "--agent-id", "ca-1").out
+        self.assertIn("red observed: red-build-0.log", out)
+        self.assertIn("green", out)
+        self.assertNotEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
+
+    def test_a_fix_round_after_a_missing_red_log_still_demands_the_build_rounds_log(self) -> None:
+        """When the build round failed partly because its red log was never saved, the fix
+        round's refusal names that same file — the honest path, consistent with the brief."""
+        self.approve()
+        out = self.build(implement=False, red_log=False)  # red never logged, tests still red
+        self.assertIn("missing", out)
+        self.h.tp("dispatch", "T01")
+        (self.app / "calc.py").write_text("def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n")
+        self.h.result("T01", "fix", changed=["calc.py"])
+        out = self.h.tp("record", "T01", "--agent-id", "ca-1").out
+        self.assertIn("FAIL", out)
+        self.assertIn("red-build-0.log", out)
+        self.assertNotIn("red-fix", out)
+
     def test_split_tests_restores_the_two_agent_flow(self) -> None:
         scope = dict(self.scope, split_tests=True)
         self.h.approved(plan=self.h.plan([self.task], final_checks=[]), **scope)

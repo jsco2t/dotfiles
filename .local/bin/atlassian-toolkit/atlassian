@@ -28,9 +28,11 @@ import getpass
 import html
 import http.client
 import json
+import mimetypes
 import os
 import platform
 import re
+import secrets
 import ssl
 import subprocess
 import sys
@@ -271,10 +273,12 @@ def _http_error(e, maybe_applied=False):
 
 
 def api_request(method, path, params=None, body=None, timeout=DEFAULT_TIMEOUT, expect_json=True, soft=False,
-                idempotent=None):
+                idempotent=None, raw=None, extra_headers=None):
     """Make an Atlassian API request. On error: die(), or if soft=True return None.
     A POST whose reply was lost may already be applied, so it is retried only when Jira provably never
-    processed it (429, connect/send failure); pass idempotent=True for read-only POSTs (JQL search)."""
+    processed it (429, connect/send failure); pass idempotent=True for read-only POSTs (JQL search).
+    `raw` sends a pre-encoded body (e.g. multipart) instead of a JSON `body`; `extra_headers` merge in
+    (e.g. the multipart Content-Type and X-Atlassian-Token)."""
     if idempotent is None:
         idempotent = method != "POST"
     base_url, email, token = load_auth()
@@ -283,10 +287,14 @@ def api_request(method, path, params=None, body=None, timeout=DEFAULT_TIMEOUT, e
         url += "?" + urllib.parse.urlencode(params, doseq=True)
     headers = {"Accept": "application/json",
                "Authorization": "Basic " + base64.b64encode(f"{email}:{token}".encode()).decode()}
+    if extra_headers:
+        headers.update(extra_headers)
     data = None
     if body is not None:
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
+    elif raw is not None:
+        data = raw
     ctx = build_ssl_context()
 
     last_err = None
@@ -938,6 +946,73 @@ def cmd_issue_remote_link_delete(args):
     print(f"remote link {args.id} deleted from {args.key}")
 
 
+# --------------------------------------------------------------------------- #
+# commands: jira - issue attachments (multipart, the one non-JSON write)
+# --------------------------------------------------------------------------- #
+
+def safe_attachment_filename(name):
+    """Basename, sane for a multipart Content-Disposition: no path, quotes or newlines."""
+    fn = os.path.basename(str(name).replace("\\", "/"))
+    if not fn or any(c in fn for c in ('"', "\r", "\n")):
+        die(EX_USAGE, f"attachment filename must be a non-empty basename without quotes/newlines, got: {name!r}")
+    return fn
+
+
+def multipart_file_body(filename, content, mime):
+    """Encode one `file` part for a multipart/form-data upload. Returns (body, content_type)."""
+    boundary = "----atlassian-toolkit-" + secrets.token_hex(12)
+    body = b"".join([
+        f"--{boundary}\r\n".encode(),
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode(),
+        f"Content-Type: {mime}\r\n\r\n".encode(),
+        content,
+        f"\r\n--{boundary}--\r\n".encode(),
+    ])
+    return body, f"multipart/form-data; boundary={boundary}"
+
+
+def cmd_issue_attachments(args):
+    res = api_request("GET", f"/rest/api/{API}/issue/{args.key}", params={"fields": "attachment"})
+    atts = (res.get("fields") or {}).get("attachment") or []
+    if args.json:
+        return jdump(atts)
+    if not atts:
+        print("(no attachments)")
+        return
+    for a in atts:
+        print(f"{a.get('id'):>7}  {a.get('filename')}  {a.get('size')} bytes  "
+              f"{name_of(a.get('author'))}  {short_time(a.get('created'))}")
+
+
+def cmd_issue_attach(args):
+    file = Path(args.file)
+    if not file.is_file():
+        die(EX_USAGE, f"attachment file not found: {args.file}")
+    content = file.read_bytes()
+    filename = safe_attachment_filename(args.filename or file.name)
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    path = f"/rest/api/{API}/issue/{args.key}/attachments"
+    if args.dry_run:
+        return jdump({"method": "POST", "path": path, "filename": filename,
+                      "size": len(content), "mimeType": mime})
+    data, ctype = multipart_file_body(filename, content, mime)
+    res = api_request("POST", path, raw=data,
+                      extra_headers={"Content-Type": ctype, "X-Atlassian-Token": "no-check"})
+    created = res[0] if isinstance(res, list) and res else res
+    if args.json:
+        return jdump(res)
+    print(f"attached {created.get('filename')} to {args.key} "
+          f"(id {created.get('id')}, {len(content)} bytes)")
+
+
+def cmd_issue_attach_delete(args):
+    path = f"/rest/api/{API}/attachment/{args.id}"
+    if args.dry_run:
+        return jdump(api_request("GET", path))
+    api_request("DELETE", path, expect_json=False)
+    print(f"attachment {args.id} deleted (it was attached to {args.key})")
+
+
 def cmd_issue_history(args):
     histories = api_get_all(f"/rest/api/{API}/issue/{args.key}/changelog", "values", {"maxResults": 100})
     want = (args.field or "").lower()  # a field name ("Fix Version") or id ("fixVersions", "customfield_10016")
@@ -1369,6 +1444,25 @@ def add_jira_commands(jp):
     ird.add_argument("id")
     ird.add_argument("--dry-run", action="store_true", help="read the selected remote link without deleting")
     ird.set_defaults(func=cmd_issue_remote_link_delete)
+
+    iat = isub.add_parser("attachments", help="list an issue's file attachments")
+    iat.add_argument("key")
+    iat.add_argument("--json", action="store_true")
+    iat.set_defaults(func=cmd_issue_attachments)
+
+    iau = isub.add_parser("attach", help="upload a file attachment")
+    iau.add_argument("key")
+    iau.add_argument("file", help="path to the file to attach")
+    iau.add_argument("--filename", help="upload under this name instead of the file's own")
+    iau.add_argument("--dry-run", action="store_true", help="show the upload that would run and stop")
+    iau.add_argument("--json", action="store_true")
+    iau.set_defaults(func=cmd_issue_attach)
+
+    iad = isub.add_parser("attach-delete", help="delete an attachment by ID (permanent)")
+    iad.add_argument("key")
+    iad.add_argument("id", help="attachment ID from `issue attachments`")
+    iad.add_argument("--dry-run", action="store_true", help="show the attachment that would be deleted and stop")
+    iad.set_defaults(func=cmd_issue_attach_delete)
 
     ics = isub.add_parser("comments", help="list comments")
     ics.add_argument("key")

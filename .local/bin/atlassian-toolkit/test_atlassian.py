@@ -9,6 +9,7 @@ are stubbed; no credentials, network access, or live writes are needed.
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -471,6 +472,85 @@ class JiraLinkManagementTest(CommandTest):
         calls, out = self.run_command(["jira", "issue", "get", "KUB-1", "--json"], [issue])
         self.assertIn("parent", calls[0].kwargs["params"]["fields"].split(","))
         self.assertEqual(json.loads(out)["parent"]["key"], "KUB-10")
+
+
+class AttachmentTest(CommandTest):
+    """`issue attach` is the one multipart write; it must encode a real file part, never JSON."""
+
+    def setUp(self):
+        import tempfile as _tf
+        self.tmp = _tf.NamedTemporaryFile(suffix=".md", delete=False)
+        self.tmp.write(b"# proposal\n")
+        self.tmp.close()
+        self.addCleanup(os.unlink, self.tmp.name)
+
+    def test_multipart_body_has_file_part_and_matching_boundary(self):
+        body, ctype = at.multipart_file_body("report.pdf", b"%PDF-1.7", "application/pdf")
+        self.assertTrue(ctype.startswith("multipart/form-data; boundary="))
+        boundary = ctype.split("boundary=", 1)[1].encode()
+        self.assertIn(b'Content-Disposition: form-data; name="file"; filename="report.pdf"', body)
+        self.assertIn(b"Content-Type: application/pdf\r\n\r\n%PDF-1.7\r\n", body)
+        self.assertTrue(body.endswith(b"--" + boundary + b"--\r\n"))
+        self.assertIn(b"--" + boundary + b"\r\n", body)
+
+    def test_attach_posts_multipart_with_xsrf_header(self):
+        calls, out = self.run_command(["jira", "issue", "attach", "KUB-1", self.tmp.name],
+                                      [[{"id": "9", "filename": "x.md"}]])
+        call = calls[-1]
+        self.assertEqual(call.args, ("POST", "/rest/api/3/issue/KUB-1/attachments"))
+        self.assertIsNone(call.kwargs.get("body"))  # no JSON body on a multipart write
+        raw = call.kwargs["raw"]
+        self.assertIn(b'name="file"; filename=', raw)
+        self.assertIn(self.tmp.name.rsplit("/", 1)[-1].encode(), raw)
+        self.assertTrue(call.kwargs["extra_headers"]["Content-Type"].startswith("multipart/form-data;"))
+        self.assertEqual(call.kwargs["extra_headers"]["X-Atlassian-Token"], "no-check")
+        self.assertIn("id 9", out)
+
+    def test_attach_dry_run_makes_no_api_call(self):
+        calls, out = self.run_command(["jira", "issue", "attach", "KUB-1", self.tmp.name, "--dry-run"], [])
+        self.assertEqual(calls, [])
+        plan = json.loads(out)
+        self.assertEqual(plan["method"], "POST")
+        self.assertEqual(plan["size"], len(b"# proposal\n"))
+
+    def test_attach_rejects_quoted_and_path_filenames(self):
+        for bad in ('say "hi".md', "two\rlines.md", ""):
+            with self.assertRaises(SystemExit):
+                at.safe_attachment_filename(bad)
+        self.assertEqual(at.safe_attachment_filename("dir/sub/report.md"), "report.md")
+        self.assertEqual(at.safe_attachment_filename("..\\..\\win.md"), "win.md")
+        # a bad explicit --filename exits before any API call
+        a = at.build_parser().parse_args(["jira", "issue", "attach", "KUB-1", self.tmp.name,
+                                          "--filename", 'say "hi".md'])
+        with mock.patch.object(at, "api_request") as req:
+            with self.assertRaises(SystemExit):
+                at.cmd_issue_attach(a)
+        req.assert_not_called()
+
+    def test_attach_missing_file_exits_without_api_call(self):
+        a = at.build_parser().parse_args(["jira", "issue", "attach", "KUB-1", "/nonexistent.md"])
+        with mock.patch.object(at, "api_request") as req:
+            with self.assertRaises(SystemExit):
+                at.cmd_issue_attach(a)
+        req.assert_not_called()
+
+    def test_attachments_list_reads_the_attachment_field(self):
+        issue = {"fields": {"attachment": [{"id": "5", "filename": "report.pdf", "size": 9,
+                    "author": {"displayName": "Jason"}, "created": "2026-11-10T01:02:03Z"}]}}
+        calls, out = self.run_command(["jira", "issue", "attachments", "KUB-1"], [issue])
+        self.assertEqual(calls[0].args, ("GET", "/rest/api/3/issue/KUB-1"))
+        self.assertEqual(calls[0].kwargs["params"]["fields"], "attachment")
+        self.assertIn("report.pdf", out)
+        empty = self.run_command(["jira", "issue", "attachments", "KUB-1"], [{"fields": {}}])[1]
+        self.assertIn("(no attachments)", empty)
+
+    def test_attach_delete_uses_attachment_endpoint(self):
+        calls, _ = self.run_command(["jira", "issue", "attach-delete", "KUB-1", "5"], [b""])
+        self.assertEqual(calls[-1].args, ("DELETE", "/rest/api/3/attachment/5"))
+        calls, out = self.run_command(["jira", "issue", "attach-delete", "KUB-1", "5", "--dry-run"],
+                                      [{"id": "5", "filename": "report.pdf"}])
+        self.assertEqual([c.args[0] for c in calls], ["GET"])
+        self.assertEqual(json.loads(out)["id"], "5")
 
 
 if __name__ == "__main__":

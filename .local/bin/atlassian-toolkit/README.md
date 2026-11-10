@@ -57,6 +57,9 @@ the file: `ATLASSIAN_SITE`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
 | `jira issue link-delete <KEY> <OTHER>` | Delete the issue link joining two issues — **permanent**; `--type` picks one when several join them, `--dry-run` shows it first | `jira issue link-delete FUZZ-1234 FUZZ-99 --type Blocks --dry-run` |
 | `jira issue remote-link <KEY> <URL> --title <TITLE>` | Create an external URL link; `--id` edits one preserving metadata | `jira issue remote-link FUZZ-1234 https://example.com/design --title Design` |
 | `jira issue remote-link-delete <KEY> <id>` | Delete an external link — **permanent** | `jira issue remote-link-delete FUZZ-1234 123 --dry-run` |
+| `jira issue attachments <KEY>` | List an issue's file attachments (ids shown here) | `jira issue attachments FUZZ-1234` |
+| `jira issue attach <KEY> <file>` | Upload a file attachment; `--filename` renames it, `--dry-run` first | `jira issue attach FUZZ-1234 report.pdf --dry-run` |
+| `jira issue attach-delete <KEY> <id>` | Delete an attachment — **permanent** | `jira issue attach-delete FUZZ-1234 123 --dry-run` |
 | `jira project list` | List visible projects | `jira project list --search fuzz` |
 | `jira project types <KEY>` | Issue types for a project | `jira project types FUZZ` |
 | `jira user <query>` | Look up a user's accountId | `jira user "jane"` |

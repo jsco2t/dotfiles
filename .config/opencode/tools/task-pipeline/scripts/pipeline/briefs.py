@@ -13,16 +13,23 @@ WORKING_RULES = ("**Working rules.** Batch independent reads and searches into o
                  "calls. Read each region once, in one window. Never re-run a suite or build the pipeline already "
                  "ran: read the log this brief names; run only a targeted check of what you changed.")
 HEADER = ("This dispatch comes from /task-pipeline. This brief is your complete contract: it replaces any "
-          "result format or report path your definition names. Do not start sub-agents with the `task` tool: "
-          "the pipeline runs at most 3 agents and you are one of them. "
+          "result format or report path your definition names. Do not use the task tool: the pipeline "
+          "runs at most {in_flight} agents and you are one of them. "
           "When you load a skill that can start sub-agents, pass it `--max-agents=0` and apply its lenses "
           "yourself, one after another. {box}\n\n" + WORKING_RULES)
 
 RESULT_SCHEMA = ('{{"task": "{tid}", "step": "{step}", "status": "done | blocked | needs_input", '
                  '"summary": "<= 80 words, answer-first", "changed": ["<paths relative to the workspace>"], '
-                 '"noticed": ["<one line per problem outside this task that someone must act on — not notes '
-                 'about your own work; never act on it>"], '
+                 '"acceptance": [{{"criterion": 1, "evidence": "<path:line, command and result, or where it shows>"}}], '
+                 '"noticed": ["<one line per problem outside this task that someone must act on — not notes about your own work; never act on it>"], '
                  '"questions": ["<only with needs_input>"], "disputes": [{{"finding": "F1", "why": "<evidence>"}}]}}')
+EVIDENCE_NOTE = ("With `done` from an authoring or implementation step, `acceptance` gives every numbered Done-when "
+                 "item its evidence; a hand-back that leaves one out is refused.")
+
+
+def _estimate(what: str) -> str:
+    """The minutes a step was planned at: an estimate for forecasting, never a deadline."""
+    return f"Estimate: about {what} — a planning figure, not a deadline."
 
 REVIEW_SCHEMA = ('{{"task": "{tid}", "verdict": "pass | changes", "findings": [{{"id": "F1", '
                  '"state": "wrong | missing | unclear | broken | gap | weak | cosmetic", "blocking": true, '
@@ -37,8 +44,10 @@ MAP_AREAS = ', "areas": [{"name": "...", "paths": ["..."], "size": "<files / lin
 BATCH_REVIEW_SCHEMA = ('{{"batch": "{bid}", "verdict": "pass | changes", "findings": [{{"id": "F1", '
                        '"state": "wrong | missing | unclear | broken | gap | weak | cosmetic", "blocking": true, '
                        '"confidence": 90, "where": "<workspace-relative path>:<line>", "task": "<T## if you know it>", '
+                       '"lens": "<the lens that found it, when you run several>", '
                        '"issue": "<complete sentence: what is wrong and what a reader or user would observe>", '
-                       '"fix": "<what would make it right>"}}], "noticed": []}}')
+                       '"fix": "<what would make it right>"}}], '
+                       '"near_misses": ["<path:line · confidence · the issue in one sentence>"], "noticed": []}}')
 
 VERIFY_SCHEMA = ('{{"batch": "{bid}", "verdict": "pass | changes", "findings": [<only findings still unresolved, '
                  'or new problems the fixes introduced, same shape as your first review>]}}')
@@ -54,9 +63,9 @@ PURPOSE_FRAMING = {
 }
 
 
-def _handback(path: Path, schema: str) -> List[str]:
-    return ["## Hand back", "", f"Write `{path}`:", "", "```json", schema, "```", "",
-            f"Then reply with exactly one line: `RESULT {path}`. Nothing else — the file is the report."]
+def _handback(path: Path, schema: str, note: str = "") -> List[str]:
+    return (["## Hand back", "", f"Write `{path}`:", "", "```json", schema, "```", ""] + ([note, ""] if note else [])
+            + [f"Then reply with exactly one line: `RESULT {path}`. Nothing else — the file is the report."])
 
 
 def _style() -> List[str]:
@@ -64,21 +73,22 @@ def _style() -> List[str]:
             "unless its own conventions differ)", "", style_core(), ""]
 
 
+def _decisions(ctx: Dict[str, Any]) -> List[str]:
+    """Answers given during the run (question → answer): they settle those questions and win where the
+    brief is silent or says otherwise. Nothing when there are none."""
+    if not ctx.get("decisions"):
+        return []
+    return (["## Decisions made during the run", "",
+             "Each settles its question. Answers marked (human) win where they differ from anything else in this "
+             "brief; any other answer clarifies it and never removes or loosens a Done-when item.", ""]
+            + [f"- {d}" for d in ctx["decisions"]] + [""])
+
+
 def _conventions_line(ctx: Dict[str, Any]) -> List[str]:
     if not ctx.get("conventions"):
         return []
     return ["", "Conventions every task followed (judge the work by them too): "
             + "; ".join(f"`{c}`" for c in ctx["conventions"]) + "."]
-
-
-def _decisions(ctx: Dict[str, Any]) -> List[str]:
-    """Answers given during the run (question → answer): they settle those questions and win where
-    the brief is silent or says otherwise. Nothing when there are none."""
-    if not ctx.get("decisions"):
-        return []
-    return (["## Decisions made during the run", "",
-             "Each settles its question; follow it where it differs from anything else in this brief.", ""]
-            + [f"- {d}" for d in ctx["decisions"]] + [""])
 
 
 def _task_body(task: Dict[str, Any], ctx: Dict[str, Any]) -> List[str]:
@@ -89,47 +99,95 @@ def _task_body(task: Dict[str, Any], ctx: Dict[str, Any]) -> List[str]:
     if ctx["readonly"]:
         out += ["Read-only (never modify, build into, or leave files in): "
                 + "; ".join(f"`{p}`" for p in ctx["readonly"]) + "."]
-    out += ["", "## Start from", ""] + [f"- `{c}` (conventions for every task: read first)"
-                                        for c in ctx.get("conventions", [])]
-    out += [f"- `{s}`" for s in ctx["sources"]]
+    conventions = ctx.get("conventions", [])
+    out += ["", "## Start from", ""] + [f"- `{c}` (conventions for every task: read first)" for c in conventions]
+    out += [f"- `{s}`" for s in ctx["sources"] if s not in conventions]
     out += ["", "Read anything in the read-only workspaces that an acceptance criterion needs (callers, "
             "tests, docs); the fence is on what you write, not on what you read."]
     if ctx.get("logs"):
         out += ["", "Logs the pipeline already produced (read them; do not re-run these commands): "
                 + "; ".join(f"`{p}`" for p in ctx["logs"]) + "."]
-    out += ["", "## Done when", ""] + [f"- {a}" for a in task["acceptance"]]
+    out += ["", "## Done when", ""] + [f"{i}. {a}" for i, a in enumerate(task["acceptance"], 1)]
     if ctx["checks"]:
         out += ["", "The pipeline then checks your work and fails the step unless: " + "; ".join(ctx["checks"]) + "."]
+    out += ["", "If the brief is ambiguous in a way that changes what you deliver, hand back `needs_input` with the "
+            "question instead of guessing."]
     return out + [""]
 
 
 def author(task: Dict[str, Any], step: str, rnd: int, ctx: Dict[str, Any], result: Path) -> str:
-    box = f"Time box: about {task['estimate_min']} min. If the task cannot fit, stop and hand back `blocked`."
-    title = {"author": "author", "tests": "tests first", "impl": "implementation"}[step]
-    out = [f"# /task-pipeline brief — {task['id']} {title}", "", HEADER.format(box=box), ""]
+    box = (_estimate(f"{task['estimate_min']} min") + " Do the whole task. If it turns out bigger than its brief "
+           "(files, behaviour, or topics the brief does not name), stop and hand back `blocked` saying what — "
+           "never cut it down to fit, and never grow it.")
+    title = {"author": "author", "tests": "tests first", "impl": "implementation",
+             "build": "tests first, then the implementation"}[step]
+    out = [f"# /task-pipeline brief — {task['id']} {title}", "", HEADER.format(box=box, in_flight=limit("max_in_flight")), ""]
     if step == "tests":
         mode = task.get("test_mode", "red")
         out += ["## This step: tests only", "",
                 f"Write the tests for this task first, in {', '.join(f'`{p}`' for p in ctx['tests_paths'])}. "
                 + ("They must fail now, for the reason the task names (red): "
                    if mode == "red" else "They pin today's behaviour and must pass now: ")
-                + f"`{task['test_cmd']}`. Touch no file outside the test paths — no production code, "
-                "no stubs, no 'temporary' implementations; the red check fails the step for any "
-                "production edit, and premature implementation has cost real runs their dispatch.", ""]
+                + f"`{task['test_cmd']}`. Touch no file outside the test paths — no production code, no "
+                "stubs, no 'temporary' implementations: the red check fails the step for tests that already "
+                "pass, and the implementation is the next agent's step.", ""]
+    elif step == "build":
+        mode = task.get("test_mode", "red")
+        out += ["## This step: tests first, then the implementation — one round", "",
+                f"Write the tests for this task first, in {', '.join(f'`{p}`' for p in ctx['tests_paths'])}. "
+                + (f"Run `{task['test_cmd']}` and observe them failing for the reason the task names (red); "
+                   f"save that failing run's full output to `{result.parent / f'red-build-{rnd}.log'}` — the "
+                   "pipeline checks that file for a real failure. "
+                   if mode == "red" else
+                   f"Run `{task['test_cmd']}` and observe today's behaviour pinned (tests pass); save that "
+                   f"run's full output to `{result.parent / f'red-build-{rnd}.log'}`. ")
+                + f"Then implement until `{task['test_cmd']}` passes (green). You may add tests while "
+                "implementing, but never remove or loosen one; if a test you wrote turns out wrong, hand back "
+                "`blocked` and say why instead of quietly changing it. Work test-first honestly: shaping the "
+                "tests around what you already implemented defeats the step's purpose, and the review "
+                "checks whether the tests actually prove the criteria.", ""]
     elif step == "impl":
         out += ["## This step: implementation", "",
                 f"Make the tests pass: `{task['test_cmd']}` must succeed. Do not edit the tests "
                 f"({', '.join(f'`{p}`' for p in ctx['tests_paths'])}); if one is wrong, hand back `blocked` "
                 "and say why.", ""]
+    elif ctx.get("kind") == "integration":
+        out += INTEGRATION
     out += _task_body(task, ctx) + _style()
-    return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step=step))) + "\n"
+    return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step=step), EVIDENCE_NOTE)) + "\n"
+
+
+def _fix_step(ctx: Dict[str, Any], task: Dict[str, Any]) -> List[str]:
+    """What kind of fix round this is, when the review routed it: test files only, or a failing
+    test first for a behaviour bug the code author fixes next."""
+    tests = ", ".join(f"`{p}`" for p in ctx.get("tests_paths", []))
+    if ctx.get("fix_expect") == "red":
+        return ["## This round: a failing test first", "",
+                f"For each finding below, write a test in {tests} that fails on the current code because of the "
+                f"finding (red): `{task['test_cmd']}` must fail, for that reason. Do not touch production code — the "
+                "code author fixes it next, against your test. If a finding is not a real bug, dispute it.", ""]
+    if ctx.get("fix_expect") == "green":
+        return ["## This round: test files only", "",
+                f"Change only the test files ({tests}); `{task['test_cmd']}` must still pass. Do not touch "
+                "production code.", ""]
+    if ctx.get("fixing") == "impl" and ctx.get("tests_paths"):
+        whose = ("the test author: do not edit them. If a test is wrong, dispute it in `disputes` and the "
+                 "pipeline routes it to the test author."
+                 if ctx.get("split_tests") else
+                 "your own build round: fix the production code, not the tests. If a test itself is wrong, "
+                 "dispute it in `disputes`.")
+        return ["## This round: production code only", "",
+                f"The test files ({tests}) belong to {whose}", ""]
+    return []
 
 
 def fix(task: Dict[str, Any], rnd: int, ctx: Dict[str, Any], findings: List[str], result: Path,
         same_agent: bool) -> str:
     out = [f"# /task-pipeline brief — {task['id']} fix round {rnd}", ""]
     if not same_agent:
-        out += [HEADER.format(box=f"Time box: about {task['estimate_min']} min."), ""]
+        out += [HEADER.format(box=_estimate(f"{task.get('estimate_min', 5)} min"),
+                        in_flight=limit("max_in_flight")), ""]
+    out += _fix_step(ctx, task)
     out += ["## Fix", "", f"Round {rnd} of {ctx.get('cap', limit('max_fix_rounds'))}. Address every blocking item below: fix it, or "
             "dispute it with evidence in `disputes`. Change nothing else.", ""]
     out += [f"- {f}" for f in findings] + [""]
@@ -137,12 +195,13 @@ def fix(task: Dict[str, Any], rnd: int, ctx: Dict[str, Any], findings: List[str]
         out += _task_body(task, ctx) + _style()
     else:
         out += _decisions(ctx) + ["Your task, paths, and style are unchanged from your first brief.", ""]
-    return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step="fix"))) + "\n"
+    return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step="fix"), EVIDENCE_NOTE)) + "\n"
 
 
 def review(task: Dict[str, Any], n: int, ctx: Dict[str, Any], result: Path) -> str:
     out = [f"# /task-pipeline brief — {task['id']} review {n}", "",
-           HEADER.format(box="Time box: about 10 min."), "", "## Review", "",
+           HEADER.format(box=_estimate("10 min") + " Review fully.",
+                        in_flight=limit("max_in_flight")), "", "## Review", "",
            f"Task under review: {task['title']}. {task['brief']}", "", "Deliverables:"]
     out += [f"- `{p}`" for p in ctx["write_paths"]]
     out += ["", "Check claims against:"] + [f"- `{s}`" for s in ctx["sources"]]
@@ -160,11 +219,20 @@ def review(task: Dict[str, Any], n: int, ctx: Dict[str, Any], result: Path) -> s
     return "\n".join(out + _handback(result, REVIEW_SCHEMA.format(tid=task["id"]))) + "\n"
 
 
+INTEGRATION = ["## This step: integration (transport only)", "",
+               "You move approved content between systems; you never write or verify it. Take the content "
+               "verbatim from the files this brief names (accepted task results, documents at HEAD, `wf:` drafts). "
+               "Use the `bash` tool only for the toolkit CLI and for reading files: never run builds, tests, fixtures, or "
+               "scripts against the repository, and never compose new technical claims — if the content looks "
+               "wrong or stale, hand back `needs_input` saying what. Dry run first; the write happens only after "
+               "the human's OK reaches you.", ""]
+
+
 def research(rid: str, item: Dict[str, Any], scope_md: Path, surveys: List[Path], result: Path) -> str:
     purpose = item.get("purpose", "map")
     minutes = item.get("minutes", limit("research_item_minutes"))
-    box = f"Time box: {minutes} min, hard. Planning research ({purpose}): {PURPOSE_FRAMING[purpose]}"
-    out = [f"# /task-pipeline research brief — {rid}", "", HEADER.format(box=box), "", "## Questions", ""]
+    box = _estimate(f"{minutes} min") + f" Planning research ({purpose}): {PURPOSE_FRAMING[purpose]}"
+    out = [f"# /task-pipeline research brief — {rid}", "", HEADER.format(box=box, in_flight=limit("max_in_flight")), "", "## Questions", ""]
     out += [f"{i}. {q}" for i, q in enumerate(item["questions"], 1)]
     out += ["", f"Done when: {item['done_when']}", "",
             "Answer these questions and nothing else. When you find something that needs more investigation, "
@@ -178,31 +246,53 @@ def research(rid: str, item: Dict[str, Any], scope_md: Path, surveys: List[Path]
     return "\n".join(out) + "\n"
 
 
+def _lenses(ctx: Dict[str, Any]) -> List[str]:
+    """A packed session's lenses: each reviewer's own definition, applied as its own full pass."""
+    if not ctx.get("lenses"):
+        return []
+    out = ["## Your lenses — run each as its own full pass", "",
+           "Apply every lens below to the whole change, one after another, each with its whole responsibility "
+           "list and full rigour. Sharing what you have read between lenses is the point; blending two lenses "
+           "into one vaguer pass, or skipping one, is not. Name each lens in every finding (`lens`), and report "
+           "a lens that found nothing as `<lens>: no issues found` in `noticed`.", ""]
+    for name, text in ctx["lenses"]:
+        out += [f"### Lens: {name}", "", text.strip(), ""]
+    return out
+
+
+def _report_floor(ctx: Dict[str, Any]) -> List[str]:
+    full, near = ctx.get("full_floor", 70), ctx.get("near_floor", 60)
+    return [f"Report only what triage can use: full findings at confidence {full} or more; {near}–{full - 1} as one "
+            f"line each in `near_misses` (`path:line · confidence · one sentence`); nothing lower. A near miss is "
+            "never routed to an author.", ""]
+
+
 def _shared_files(ctx: Dict[str, Any]) -> List[str]:
-    """The change and the pipeline's own logs, so a reviewer runs no git and no suite of its own."""
     out = []
     if ctx.get("diff_file"):
-        out.append(f"The change as one diff (tracked changes against the approval baseline, then new files "
-                   f"in full): `{ctx['diff_file']}` — read it in as few calls as you can instead of running "
-                   "git yourself.")
+        out.append(f"The change as one diff (tracked changes against the approval baseline, then new files in "
+                   f"full): `{ctx['diff_file']}` — read it in as few calls as you can instead of running git yourself.")
     if ctx.get("logs"):
         out.append("The pipeline already ran each task's tests and checks; their logs: "
-                   + "; ".join(f"`{p}`" for p in ctx["logs"]) + ". Read them instead of re-running the suite; "
-                   "write any targeted throwaway test under `$TMPDIR`, never in a workspace.")
+                   + "; ".join(f"`{p}`" for p in ctx["logs"]) + ". Read them instead of re-running the suite; write "
+                   "any targeted throwaway test under `$TMPDIR`, never in a workspace.")
     return out + ([""] if out else [])
 
 
 def batch_review(bid: str, reviewer: str, tasks: List[Dict[str, Any]], ctx: Dict[str, Any], result: Path) -> str:
     out = [f"# /task-pipeline review brief — {bid} · {reviewer}", "",
-           HEADER.format(box="Time box: about 20 min for the batch."), "", "## Review this batch as a whole", "",
-           f"Every task below is finished and accepted. Review them together, through your lens only, in one pass. "
-           f"The change, as a structured file: `{ctx['changes']}` (files, and the exact diff command for each "
-           "workspace under version control).", ""]
+           HEADER.format(box=_estimate("20 min for the batch") + " Review fully.",
+                        in_flight=limit("max_in_flight")), "",
+           "## Review this batch as a whole", "",
+           "Every task below is finished and accepted. Review them together, "
+           + ("through each lens below, " if ctx.get("lenses") else "through your lens only, ")
+           + f"in one pass. The change, as a structured file: `{ctx['changes']}` (files, and the exact diff command "
+           "for each workspace under version control).", ""]
     out += _shared_files(ctx)
     out += ["Deliverables, by task:"]
     for t in tasks:
         out.append(f"- {t['id']} {t['title']}: " + ", ".join(f"`{p}`" for p in ctx["paths"][t["id"]]))
-        out += [f"  - done when: {a}" for a in t["acceptance"]]
+        out += [f"  - done when: {a}" for a in t.get("acceptance", [])]
     if ctx.get("decisions"):
         out += [""] + _decisions(ctx)[:-1]
     out += _conventions_line(ctx)
@@ -212,6 +302,7 @@ def batch_review(bid: str, reviewer: str, tasks: List[Dict[str, Any]], ctx: Dict
             "misses a criterion, or would mislead or break things for its reader or user. `verdict` is `changes` "
             "exactly when a finding is blocking. Verify each finding against the source before you report it. "
             "Anything outside these deliverables is one line in `noticed`.", ""]
+    out += _report_floor(ctx) + _lenses(ctx)
     out += _style()
     return "\n".join(out + _handback(result, BATCH_REVIEW_SCHEMA.format(bid=bid))) + "\n"
 
@@ -220,14 +311,12 @@ def verify(bid: str, reviewer: str, findings: List[Dict[str, Any]], ctx: Dict[st
            same_agent: bool) -> str:
     out = [f"# /task-pipeline verification brief — {bid} · {reviewer}", ""]
     if not same_agent:
-        out += [HEADER.format(box="Time box: about 8 min."), ""]
+        out += [HEADER.format(box=_estimate("8 min"), in_flight=limit("max_in_flight")), ""]
     out += ["## Verify the fixes", "",
-            "The authors have addressed the findings below that the manager accepted. For each one, check whether "
-            "it is resolved; do not start a new review. Report only findings that are still unresolved, and any new "
-            f"problem the fixes themselves introduced. The change: `{ctx['changes']}`. Do not edit any file.", ""]
+           "The authors have addressed the findings below that the manager accepted. For each one, check whether "
+           "it is resolved; do not start a new review. Report only findings that are still unresolved, and any new "
+           f"problem the fixes themselves introduced. The change: `{ctx['changes']}`. Do not edit any file.", ""]
     out += _shared_files(ctx)
-    if ctx.get("decisions"):
-        out += _decisions(ctx)
     out += [f"- {f['id']} ({f['state']}) at {f['where']}: {f['issue']}" for f in findings] + [""]
     return "\n".join(out + _handback(result, VERIFY_SCHEMA.format(bid=bid))) + "\n"
 

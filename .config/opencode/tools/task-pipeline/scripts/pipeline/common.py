@@ -18,6 +18,42 @@ STYLE_PATH = SKILL.parents[1] / "output-styles" / "answer-first-core.md"
 TP_SCRIPT = SKILL / "scripts" / "tp.py"
 
 PHASES = ("SCOPING", "PLANNING", "AWAITING_APPROVAL", "EXECUTING", "DONE")
+# A noticed.md item: `- (<source>[, ×<repeats>]) <text>`.
+_NOTICED_LINE = re.compile(r"- \((.*?)(?:, ×(\d+))?\) (.*)$")
+_LINE_REF = re.compile(r":\d+(?:-\d+)?")
+
+
+def noticed_key(text: str) -> str:
+    """What makes two noticed items the same: their words, with line numbers left out. Later fix
+    rounds re-notice a gap after the lines moved (`LICENSING.md:329` becomes `:340`)."""
+    return " ".join(_LINE_REF.sub(":N", str(text)).lower().split())
+
+
+def agent_context_tokens(agent_id: Optional[str]) -> Optional[int]:
+    """The context an agent carried on its last turn (input plus cached tokens); None when the
+    agent cannot be found. Every resumed turn re-reads all of it. OpenCode's agent ids are
+    subagent session ids, so the numbers come from its store (read-only)."""
+    if not agent_id or not re.fullmatch(r"[\w-]+", agent_id):
+        return None
+    if not agent_id.startswith("ses_"):
+        return None
+    db = Path(os.environ.get("TP_OPENCODE_DB") or "~/.local/share/opencode/opencode.db").expanduser()
+    if not db.exists():
+        return None
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2.0)
+        try:
+            row = con.execute(
+                "select tokens_input, tokens_cache_read, tokens_cache_write from session_v2 "
+                "where id = ?", (agent_id,)).fetchone()
+        finally:
+            con.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return sum(int(v or 0) for v in row)
 
 
 class TPError(Exception):
@@ -44,25 +80,61 @@ def minutes_since(ts: Optional[str], until: Optional[str] = None) -> float:
     return max(0.0, (end - parse_iso(ts)).total_seconds() / 60.0)
 
 
-def agent_minutes(wf: "Workflow", state: Dict[str, Any]) -> float:
-    """Agent-minutes actually spent: the sum of per-hand-back minutes the record gate logged.
-    Wall-clock since creation reads a conversation's idle time as work; this does not."""
-    if "agent_minutes" in state:
-        return float(state["agent_minutes"])
-    # Older workflows without the tally: derive it from the event log.
-    return float(sum(e.get("minutes", 0.0) for e in wf.events() if e["kind"] == "record"))
+def gap_minutes(start: Optional[str], end: Optional[str], gaps: List[List[Optional[str]]]) -> float:
+    """Minutes of [start, end] (end None: now) inside the union of `gaps` — [from, to] pairs, to None
+    for a gap still open. Overlapping gaps count once."""
+    if not start:
+        return 0.0
+    now = datetime.now(timezone.utc)
+    lo, hi = parse_iso(start), parse_iso(end) if end else now
+    spans = []
+    for a, b in gaps:
+        if a:
+            a_, b_ = max(parse_iso(a), lo), min(parse_iso(b) if b else now, hi)
+            if b_ > a_:
+                spans.append((a_, b_))
+    total, cur = 0.0, None
+    for a, b in sorted(spans):
+        if cur and a <= cur[1]:
+            cur = (cur[0], max(cur[1], b))
+            continue
+        if cur:
+            total += (cur[1] - cur[0]).total_seconds()
+        cur = (a, b)
+    if cur:
+        total += (cur[1] - cur[0]).total_seconds()
+    return total / 60.0
 
 
-def dead_minutes(state: Dict[str, Any]) -> float:
-    """Clock frozen out of the meter: lost dispatches (session/harness died mid-flight) and
-    stall time the manager flagged with `--dead-minutes`. Backend stalls used to bill ~400
-    dead minutes to a run as if agents had worked; this keeps them out of the budget meter."""
-    return float(state.get("dead_minutes", 0.0))
+def waiting_gaps(state: Dict[str, Any]) -> List[List[Optional[str]]]:
+    """Spans in which nothing ran and the work waited on the human: halts and blocks (kept by
+    Workflow.save), plus each halt's own record for workflows older than that."""
+    gaps = [list(g) for g in state.get("idle", [])]
+    if state.get("idle_since"):
+        gaps.append([state["idle_since"], None])
+    for h in state.get("halts", []) + ([state["halt"]] if state.get("halt") else []):
+        if h.get("halted"):
+            gaps.append([h["halted"], h.get("resumed")])
+    return gaps
 
 
-def net_agent_minutes(wf: "Workflow", state: Dict[str, Any]) -> float:
-    """The meter the budget is held against: gross hand-back minutes minus dead clock."""
-    return max(0.0, agent_minutes(wf, state) - dead_minutes(state))
+def _waiting_on_human(state: Dict[str, Any]) -> bool:
+    if state.get("phase") != "EXECUTING" or state.get("in_flight"):
+        return False
+    return bool(state.get("halt") or state.get("blocked")
+                # A task waiting on its siblings' red tests waits on the manager's work, not the human.
+                or any(t.get("status") == "blocked" and (t.get("blocked") or {}).get("kind") != "sibling"
+                       for t in state.get("tasks", {}).values())
+                or any(s.get("status") == "blocked" for s in state.get("reviews", {}).values()))
+
+
+def _tick_idle(state: Dict[str, Any]) -> None:
+    waiting, since = _waiting_on_human(state), state.get("idle_since")
+    if waiting and not since:
+        state["idle_since"] = now_iso()
+    elif since and not waiting:
+        state.setdefault("idle", []).append([since, now_iso()])
+        del state["idle_since"]
 
 
 def sha_file(path: Path) -> Optional[str]:
@@ -89,8 +161,29 @@ def catalog() -> Dict[str, Any]:
     return _catalog
 
 
+_limit_overrides: Dict[str, int] = {}
+
+
+def set_limit_overrides(overrides: Any) -> None:
+    """scope.json `limits`: the human's per-workflow values, which win over the catalog's."""
+    _limit_overrides.clear()
+    if isinstance(overrides, dict):
+        for name, value in overrides.items():
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                _limit_overrides[str(name)] = value
+
+
 def limit(name: str) -> int:
+    if name in _limit_overrides:
+        return _limit_overrides[name]
     return int(catalog()["limits"][name])
+
+
+def auto_accept(step: str) -> bool:
+    """Whether a green hand-back of this step is accepted without the manager's fact-check:
+    a list limit (catalog `auto_accept_steps`), with the same scope/limits override path."""
+    steps = _limit_overrides.get("auto_accept_steps") or catalog()["limits"].get("auto_accept_steps") or []
+    return step in steps
 
 
 def style_core() -> str:
@@ -106,15 +199,6 @@ def style_core() -> str:
 
 def words(text: str) -> int:
     return len(str(text).split())
-
-
-_LINE_REF = re.compile(r":\d+(?:-\d+)?")
-
-
-def noticed_key(text: str) -> str:
-    """What makes two noticed items the same: their words, with line numbers left out. Later fix
-    rounds re-notice a gap after the lines moved (`LICENSING.md:329` becomes `:340`)."""
-    return " ".join(_LINE_REF.sub(":N", str(text)).lower().split())
 
 
 class Workflow:
@@ -141,15 +225,42 @@ class Workflow:
         return self.state_path.exists()
 
     # --- state -----------------------------------------------------------------
+    @property
+    def guard_path(self) -> Path:
+        """Where the last write's sequence number is kept, outside the workflow folder: a copy of
+        the folder restored over itself rolls back state.json and events.jsonl together, so only a
+        record kept elsewhere can tell."""
+        base = os.environ.get("TP_GUARD_DIR") or str(
+            Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "task-pipeline" / "guard")
+        return Path(base) / (hashlib.sha1(str(self.root).encode()).hexdigest()[:16] + ".json")
+
     def load(self) -> Dict[str, Any]:
         if not self.exists():
             raise TPError(f"No /task-pipeline workflow at {self.root} (run `tp.py -w <dir> init`).")
-        return json.loads(self.state_path.read_text())
+        state = json.loads(self.state_path.read_text())
+        try:
+            guard = json.loads(self.guard_path.read_text())
+        except (OSError, ValueError):
+            guard = None
+        if isinstance(guard, dict) and int(guard.get("seq", 0)) > int(state.get("seq", 0)):
+            raise TPError(f"{self.state_path} was rolled back: it holds write {state.get('seq', 0)}, but this "
+                          f"workflow last wrote {guard['seq']} (at {guard.get('ts', '?')}). Something replaced the "
+                          "workflow folder with an older copy — work recorded since then is missing from it. "
+                          "Restore the newer state, or, to continue from this one knowingly, delete "
+                          f"{self.guard_path} and re-record what was lost.")
+        return state
 
     def save(self, state: Dict[str, Any]) -> None:
+        _tick_idle(state)  # every state change opens or closes a span of waiting on the human
+        state["seq"] = int(state.get("seq", 0)) + 1
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
         os.replace(tmp, self.state_path)
+        try:
+            self.guard_path.parent.mkdir(parents=True, exist_ok=True)
+            self.guard_path.write_text(json.dumps({"root": str(self.root), "seq": state["seq"], "ts": now_iso()}))
+        except OSError:
+            pass  # a guard that cannot be written only loses the rollback check
 
     @contextlib.contextmanager
     def locked(self) -> Iterator[None]:
@@ -174,7 +285,7 @@ class Workflow:
         return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
 
     def decision(self, what: str, text: str, who: Optional[str] = "human") -> None:
-        """who=None records the decision without attributing it."""
+        """who=None records the decision without attributing it (`tp resolve` without --by)."""
         path = self.root / "decisions.md"
         if not path.exists():
             path.write_text("# Decisions\n\nEvery human answer and every manager ruling, verbatim, in order.\n\n")
@@ -189,42 +300,19 @@ class Workflow:
         clean = " ".join(str(text).split())
         lines = path.read_text().splitlines()
         for i, ln in enumerate(lines):
-            if not ln.startswith("- ") or "RESOLVED:" in ln or ") " not in ln:
-                continue
-            # Merge repeats: each later fix round re-notices the same gap, and a pile of
-            # duplicates hides the real decisions (184 lines once carried 173 unique items).
-            # Line numbers are left out of the comparison: a re-noticed gap cites moved lines.
-            marker, seen = ln[2:].split(") ", 1)
-            if noticed_key(seen) == noticed_key(clean):
-                m = re.search(r", ×(\d+)$", marker)
-                count = int(m.group(1)) + 1 if m else 2
-                lines[i] = f"- ({re.sub(r', ×\d+$', '', marker)}, ×{count}) {seen}"
+            m = _NOTICED_LINE.match(ln)
+            # Merge repeats: later fix rounds and reviews re-notice the same gap, and a pile of
+            # duplicates buries the decisions the closeout must put to the human.
+            if m and noticed_key(m.group(3)) == noticed_key(clean):
+                count = int(m.group(2) or 1) + 1
+                lines[i] = f"- ({m.group(1)}, ×{count}) {m.group(3)}"
                 path.write_text("\n".join(lines) + "\n")
                 return
         with open(path, "a") as handle:
             handle.write(f"- ({source}) {clean}\n")
 
     def noticed_items(self) -> List[str]:
-        """Open (unresolved) noticed items — resolved ones are struck through, not listed."""
         path = self.root / "noticed.md"
         if not path.exists():
             return []
-        return [ln[2:] for ln in path.read_text().splitlines()
-                if ln.startswith("- ") and "RESOLVED:" not in ln]
-
-    def noticed_resolve(self, n: int, answer: str) -> Optional[str]:
-        """Mark the nth open noticed item (1-based) settled: it is struck through with the
-        decision so reports stop presenting it as open. Returns the item text, or None
-        when there is no such item."""
-        path = self.root / "noticed.md"
-        if not path.exists():
-            return None
-        lines = path.read_text().splitlines()
-        idx = [i for i, ln in enumerate(lines) if ln.startswith("- ")]
-        if not 1 <= n <= len(idx):
-            return None
-        i = idx[n - 1]
-        item = lines[i][2:].strip()
-        lines[i] = f"- ~~{item}~~ RESOLVED: {answer.strip()}"
-        path.write_text("\n".join(lines) + "\n")
-        return item
+        return [ln[2:] for ln in path.read_text().splitlines() if ln.startswith("- ")]

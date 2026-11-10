@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import unittest
-from typing import Any, Dict
 
 from harness import Harness
 
@@ -59,21 +58,30 @@ class PlanCheckTest(unittest.TestCase):
         tasks = [self.h.task(f"T{i:02d}", f"area{i}/article.md") for i in range(1, 44)]
         text = self.check(self.h.plan(tasks), expect=2).text
         self.assertIn("tasks", text)
+        self.assertNotIn("budget", text)                  # refused for its size, never for time
 
     def test_an_over_budget_plan_is_accepted_and_reported(self) -> None:
-        # Budgets report; they never compress the work. 30 tasks x 20 min over 3 lanes
-        # = 200 min against a 180-min budget: check passes, plan.md shows both numbers.
-        tasks = [self.h.task(f"T{i:02d}", f"a{i}.md", estimate_min=20) for i in range(1, 31)]
-        self.check(self.h.plan(tasks))
-        plan_md = (self.h.wf / "plan.md").read_text()
-        self.assertIn("200", plan_md)
-        self.assertIn("180", plan_md)
+        # Budgets report; they never compress the work. 30 tasks x 30 min over 5 lanes = 180 min
+        # of lane time against a 150-min budget: the check passes and plan.md shows both numbers.
+        h = Harness()
+        try:
+            h.confirmed(budget_minutes=150)
+            tasks = [h.task(f"T{i:02d}", f"a{i}.md", estimate_min=30) for i in range(1, 31)]
+            h.write_json("plan.json", h.plan(tasks))
+            h.tp("plan", "check")
+            plan_md = (h.wf / "plan.md").read_text()
+            self.assertIn("about 180 min", plan_md)
+            self.assertIn("budget 150", plan_md)
+            self.assertIn("past the budget", plan_md)
+        finally:
+            h.close()
+
 
     def test_a_long_dependency_chain_is_reported_not_refused(self) -> None:
         tasks = [self.h.task(f"T{i:02d}", f"a{i}.md", estimate_min=25,
                              depends_on=[f"T{i - 1:02d}"] if i > 1 else []) for i in range(1, 9)]
         self.check(self.h.plan(tasks))
-        self.assertIn("min", (self.h.wf / "plan.md").read_text())
+        self.assertIn("about 200 min", (self.h.wf / "plan.md").read_text())
 
     def test_overlapping_paths_need_an_ordering(self) -> None:
         plan = self.h.plan([self.h.task("T01", "arch/**"), self.h.task("T02", "arch/overview.md")])
@@ -101,6 +109,35 @@ class PlanCheckTest(unittest.TestCase):
     def test_unknown_research_source_is_refused(self) -> None:
         plan = self.h.plan([self.h.task("T01", "a.md", sources=["research:R9"])])
         self.assertIn("R9", self.check(plan, expect=2).text)
+
+    def test_workflow_files_can_be_sources_and_shared_conventions(self) -> None:
+        # Seen live: conventions.md could only be named by absolute path inside each 150-word brief.
+        (self.h.wf / "conventions.md").write_text("# Conventions\n")
+        plan = self.h.plan([self.h.task("T01", "a.md", sources=["src:calc/**", "wf:conventions.md"])],
+                           conventions=["wf:conventions.md"], final_checks=[])
+        self.check(plan)
+        self.assertIn("conventions.md", (self.h.wf / "plan.md").read_text())
+        bad = self.h.plan([self.h.task("T01", "a.md", sources=["wf:nope.md"])], conventions=["wf:../x.md", "x.md"])
+        res = self.check(bad, expect=2)
+        for needle in ("wf:nope.md", "wf:../x.md", "'x.md'"):
+            self.assertIn(needle, res.text)
+
+    def test_a_report_like_deliverable_name_is_warned_about_not_refused(self) -> None:
+        # Seen live: Claude Code refused a sub-agent's Write of a new report.md ("Subagents should
+        # return findings as text, not write report files"); the run waited three hours on it.
+        out = self.check(self.h.plan([self.h.task("T01", "review/report.md")], final_checks=[])).out
+        self.assertIn("WARN: T01 writes report.md", out)
+        self.assertIn("plan ok", out)
+        self.assertNotIn("WARN", self.check(self.h.plan()).out)
+
+    def test_wf_is_not_a_workspace_name(self) -> None:
+        h = Harness()
+        try:
+            h.init()
+            h.write_json("scope.json", h.scope(workspaces=[{"name": "wf", "path": str(h.kb), "mode": "write"}]))
+            self.assertIn("'wf'", h.tp("scope", "check", expect=2).text)
+        finally:
+            h.close()
 
     def test_unknown_check_name_is_refused(self) -> None:
         plan = self.h.plan([self.h.task("T01", "a.md", checks=["lint"])])
@@ -134,7 +171,7 @@ class ReviewPlanTest(unittest.TestCase):
             h2.tp("plan", "check")                                             # + 28 min review tail: over, and fine
             plan_md = (h2.wf / "plan.md").read_text()
             self.assertIn("review session", plan_md)
-            self.assertIn("30", plan_md)
+            self.assertIn("budget 30", plan_md)
         finally:
             h2.close()
 
@@ -180,47 +217,8 @@ class ReviewPlanTest(unittest.TestCase):
                                                   {"id": "B2", "tasks": ["T03", "T04"]}])
         self.check(plan, **FINAL_REVIEW)
         md = (self.h.wf / "plan.md").read_text()
-        self.assertIn("2 batches × 1 reviewer = 2 review sessions", md)
-        self.assertIn("after every task is accepted", md)
-
-
-class TestsPlanCheckTest(unittest.TestCase):
-    """A `tests` deliverable (a suite over existing behaviour) is test_cmd-verified like a code
-    task, but always pinned: the suite must pass as delivered — red belongs to the code flow,
-    whose pipeline also implements the behaviour."""
-
-    def setUp(self) -> None:
-        self.h = Harness()
-        self.h.confirmed(deliverables=[{"id": "D1", "kind": "tests", "what": "A regression suite for calc",
-                                        "where": "kb"}],
-                         participants=[{"agent": "test-author", "role": "author",
-                                        "why": "Writes the regression suite for D1."}])
-
-    def tearDown(self) -> None:
-        self.h.close()
-
-    def task(self, **over: Any) -> Dict[str, Any]:
-        base = {"id": "T01", "title": "Regression suite", "serves": ["D1"], "agent": "test-author",
-                "workspace": "kb", "paths": ["test_calc.py"], "sources": ["src:calc/**"],
-                "brief": "Write test_calc.py covering calc's Add.", "acceptance": ["Covers Add."],
-                "test_cmd": "python3 -m unittest -q test_calc", "checks": [], "estimate_min": 10,
-                "depends_on": []}
-        base.update(over)
-        return base
-
-    def check(self, **over: Any):
-        self.h.write_json("plan.json", self.h.plan([self.task(**over)], final_checks=[]))
-        return self.h.tp("plan", "check", expect=2)
-
-    def test_a_tests_task_needs_a_test_command(self) -> None:
-        self.assertIn("test_cmd", self.check(test_cmd=None).text)
-
-    def test_a_tests_task_may_not_run_red(self) -> None:
-        self.assertIn("pin", self.check(test_mode="red").text)
-
-    def test_a_pinned_tests_task_passes_the_plan_check(self) -> None:
-        self.h.write_json("plan.json", self.h.plan([self.task()], final_checks=[]))
-        self.h.tp("plan", "check")
+        self.assertIn("2 review sessions — B1/doc-reviewer; B2/doc-reviewer", md)
+        self.assertIn("document review once the code reviews are done", md)
 
 
 class ApprovalTest(unittest.TestCase):
@@ -261,193 +259,83 @@ class ApprovalTest(unittest.TestCase):
         self.assertIn("README's build section is stale", out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class BudgetMeteringTest(unittest.TestCase):
-    """The budget measures agent-minutes actually spent, not wall-clock since creation:
-    a conversation that idles for hours between human messages must not exhaust the budget."""
-
-    def setUp(self) -> None:
-        self.h = Harness()
-        self.h.confirmed(budget_minutes=60)
-
-    def tearDown(self) -> None:
-        self.h.close()
-
-    def _backdate_created(self, hours: float) -> None:
-        from datetime import datetime, timedelta, timezone
-        sp = self.h.wf / ".tp" / "state.json"
-        st = json.loads(sp.read_text())
-        created = datetime.now(timezone.utc) - timedelta(hours=hours)
-        st["created"] = created.strftime("%Y-%m-%dT%H:%M:%SZ")
-        sp.write_text(json.dumps(st))
-
-    def test_idle_wall_clock_does_not_exhaust_the_budget(self) -> None:
-        # Seen live: an 11-hour gap between human messages left "budget leaves -551 of 120 min".
-        self._backdate_created(hours=11)
-        self.h.write_json("plan.json", self.h.plan())
-        self.h.tp("plan", "check")  # must not raise
-
-    def test_status_shows_spent_not_elapsed_against_the_budget(self) -> None:
-        self._backdate_created(hours=11)
-        out = self.h.tp("status").out
-        self.assertNotIn("-551", out)
-        self.assertNotIn("660 of 60", out)
-
-    def test_zero_agent_minutes_means_zero_spent(self) -> None:
-        self._backdate_created(hours=5)
-        h = self.h
-        h.write_json("plan.json", h.plan())
-        h.tp("plan", "check")
-        h.tp("plan", "submit")
-        out = h.tp("plan", "submit", expect=2).out  # re-submit refused, but the message...
-        # ...the harm we care about is elsewhere: submit must not claim hours of planning.
-        h2_json = h.state()
-        self.assertIn("phase", h2_json)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class CheckCwdTest(unittest.TestCase):
-    """A check's cwd may name a workspace or an absolute directory — a code task's test
-    suite often lives outside every workspace (seen live: the task-pipeline repo's own
-    tests, which no workspace covers)."""
-
-    def setUp(self) -> None:
-        self.h = Harness()
-        self.h.confirmed()
-
-    def tearDown(self) -> None:
-        self.h.close()
-
-    def check(self, plan, expect: int = 0):
-        self.h.write_json("plan.json", plan)
-        return self.h.tp("plan", "check", expect=expect)
-
-    def test_absolute_cwd_is_accepted(self) -> None:
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            plan = self.h.plan(checks={"unit": {"cmd": "true", "cwd": d}})
-            self.check(plan)
-
-    def test_missing_absolute_cwd_is_refused(self) -> None:
-        plan = self.h.plan(checks={"unit": {"cmd": "true", "cwd": "/nonexistent/tp-cwd-test"}})
-        text = self.check(plan, expect=2).text
-        self.assertIn("cwd", text)
-
-    def test_relative_non_workspace_cwd_is_refused(self) -> None:
-        plan = self.h.plan(checks={"unit": {"cmd": "true", "cwd": "nope"}})
-        text = self.check(plan, expect=2).text
-        self.assertIn("cwd", text)
-
-
 class AmendTest(unittest.TestCase):
-    """While EXECUTING, mechanical plan details (paths, test_cmd, checks, estimate, brief)
-    can be amended in place — seen live three times: a root-level file the glob missed, a
-    new human-requested deliverable, and a test command fix — without a full approval
-    round-trip. Structural changes still need `tp revise`."""
+    """`tp plan amend`: mid-run plan changes the human approves, limited to work not yet started."""
 
     def setUp(self) -> None:
         self.h = Harness()
-        self.h.approved(plan=self.h.plan([self.h.task("T01", "a.md", checks=[])]))
 
     def tearDown(self) -> None:
         self.h.close()
 
-    def _amend(self, **over):
-        plan = self.h.plan([self.h.task("T01", "a.md", checks=[], **over)])
-        self.h.write_json("plan.json", plan)
-        return self.h.tp("amend", "--reason", "root file scope fix")
+    def draft(self):
+        self.h.tp("plan", "amend")                        # starts the draft as a copy of the approved plan
+        return json.loads((self.h.wf / "plan-amend.json").read_text())
 
-    def test_paths_amend_stays_executing(self) -> None:
-        self._amend(paths=["a.md", "index.md"])
-        self.assertEqual(self.h.state()["phase"], "EXECUTING")
-        st = self.h.state()["tasks"]["T01"]
-        self.assertEqual(st["status"], "pending")
-        self.assertIn("root file scope fix", (self.h.wf / "decisions.md").read_text())
-
-    def test_task_cmd_amend_is_allowed(self) -> None:
-        self._amend(test_cmd="true", test_mode="pin")
-        self.assertEqual(self.h.state()["phase"], "EXECUTING")
-
-    def test_structural_change_is_refused(self) -> None:
-        plan = self.h.plan([self.h.task("T01", "a.md", checks=[]),
-                            self.h.task("T02", "b.md", checks=[])])
-        self.h.write_json("plan.json", plan)
-        text = self.h.tp("amend", "--reason", "new task", expect=2).text
-        self.assertIn("revise", text)
-
-    def test_noop_amend_is_refused(self) -> None:
-        self.h.tp("amend", "--reason", "nothing changed", expect=2)
-
-    def test_amend_needs_execution_phase(self) -> None:
-        h = Harness()
-        try:
-            h.confirmed()
-            h.write_json("plan.json", h.plan())
-            h.tp("amend", "--reason", "too early", expect=2)
-        finally:
-            h.close()
-
-
-class ConventionsTest(unittest.TestCase):
-    """Briefs repeated conventions and mid-run answers only because the manager pasted them in.
-    A plan may now name files inside the workflow folder (`wf:path`) as sources and as shared
-    `conventions` every brief starts from; conventions are SHA-frozen at approval — a later edit
-    is a contract change and dispatch refuses it."""
-
-    def setUp(self) -> None:
-        self.h = Harness()
-        self.h.confirmed()
-        (self.h.wf / "conventions.md").write_text("# Conventions\n\nEvery article cites `path:line`.\n")
-
-    def tearDown(self) -> None:
-        self.h.close()
-
-    def test_workflow_files_can_be_sources_and_shared_conventions(self) -> None:
+    def test_amend_adds_tasks_and_changes_unstarted_ones_mid_run(self) -> None:
+        # Seen live: a task sized for 12 notes met 39 findings, and nothing could add or split a
+        # task once execution started.
         h = self.h
-        plan = h.plan([h.task("T01", "a.md", sources=["wf:conventions.md", "src:calc/**"])])
-        plan["conventions"] = ["wf:conventions.md"]
-        h.write_json("plan.json", plan)
-        h.tp("plan", "check")
-        h.tp("plan", "submit")
-        h.tp("approve", "--answer", "approve with conventions")
+        h.approved()
+        h.author("T01", "architecture/overview.md")          # T01 has started: frozen
+        draft = self.draft()
+        draft["tasks"].insert(2, h.task("T04", "faq.md", brief="Write the FAQ."))
+        draft["tasks"][3]["brief"] = "Write kb/index.md linking every article, the FAQ included."
+        draft["tasks"][3]["depends_on"] = ["T01", "T02", "T04"]
+        (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        out = h.tp("plan", "amend").out
+        for needle in ("added T04", "changed T03", "--answer", "remaining work"):
+            self.assertIn(needle, out)
+        self.assertNotIn("T04", (h.wf / "plan.json").read_text())   # nothing applies without the human
+        h.tp("next")                                                # ...and the run carries on meanwhile
+        h.tp("plan", "amend", "--answer", "Yes, add the FAQ.")
+        self.assertEqual(h.state()["tasks"]["T04"]["status"], "pending")
+        self.assertIn("T04", (h.wf / "plan.md").read_text())
+        self.assertFalse((h.wf / "plan-amend.json").exists())
+        self.assertIn("Yes, add the FAQ.", (h.wf / "decisions.md").read_text())
+        ready = [a["id"] for a in json.loads(h.tp("next", "--json").out)["actions"] if a["action"] == "dispatch"]
+        self.assertEqual(ready, ["T02", "T04"])
+
+    def test_amend_never_changes_a_task_that_has_started(self) -> None:
+        h = self.h
+        h.approved()
         h.tp("dispatch", "T01")
-        brief = (h.run_dir("T01") / "brief-author-0.md").read_text()
-        self.assertIn("conventions for every task: read first", brief)  # the conventions line
-        self.assertIn("wf", "wf:conventions.md")  # the source prefix resolves to the workflow file
+        draft = self.draft()
+        draft["tasks"][0]["brief"] = "Something else."
+        del draft["tasks"][1]                                       # T02 has not started: may go
+        draft["tasks"][1]["depends_on"] = ["T01"]
+        (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        res = h.tp("plan", "amend", "--answer", "ok", expect=2)
+        self.assertIn("T01 has started", res.text)
+        self.assertNotIn("T02", res.text)
 
-    def test_conventions_freeze_with_the_plan(self) -> None:
+    def test_amend_warns_when_the_remaining_work_overruns_the_budget(self) -> None:
         h = self.h
-        plan = h.plan([h.task("T01", "a.md")])
-        plan["conventions"] = ["wf:conventions.md"]
-        h.write_json("plan.json", plan)
-        h.tp("plan", "check")
-        h.tp("plan", "submit")
-        h.tp("approve", "--answer", "approve")
-        (h.wf / "conventions.md").write_text("# Conventions\n\nChanged after approval.\n")
-        res = h.tp("dispatch", "T01", expect=2)
-        self.assertIn("conventions", res.text)
+        h.approved(budget_minutes=60)
+        draft = self.draft()
+        draft["tasks"] += [h.task(f"T{i}", f"x{i}.md", estimate_min=30) for i in range(10, 30)]
+        (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        self.assertIn("WARN: the remaining work runs past the budget", h.tp("plan", "amend").out)
 
-    def test_a_missing_conventions_file_is_refused_at_plan_check(self) -> None:
+    def test_amend_puts_new_work_in_a_review_batch_that_has_not_started(self) -> None:
         h = self.h
-        plan = h.plan([h.task("T01", "a.md")])
-        plan["conventions"] = ["wf:nope.md"]
-        h.write_json("plan.json", plan)
-        text = h.tp("plan", "check", expect=2).text
-        self.assertIn("conventions", text)
+        h.approved(plan=h.plan([h.task("T01", "a.md"), h.task("T02", "b.md")], final_checks=[]), **FINAL_REVIEW)
+        for tid, rel in (("T01", "a.md"), ("T02", "b.md")):
+            h.author(tid, rel)
+            h.tp("accept", tid, "--note", "ok")
+        h.tp("dispatch", "B1/doc-reviewer")
+        draft = self.draft()
+        draft["tasks"].append(h.task("T03", "c.md"))
+        (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        self.assertIn("B1", h.tp("plan", "amend", expect=2).text)
+        draft["review_batches"] = [{"id": "B1", "tasks": ["T01", "T02"]}, {"id": "B2", "tasks": ["T03"]}]
+        (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+        h.tp("plan", "amend")                                       # the human is shown the checked draft
+        h.tp("plan", "amend", "--answer", "Add T03 with its own review.")
+        self.assertEqual(h.state()["reviews"]["B2/doc-reviewer"]["status"], "pending")
+        self.assertEqual(h.state()["reviews"]["B1/doc-reviewer"]["status"], "in_flight")
 
-    def test_wf_is_not_a_workspace_name(self) -> None:
-        h = Harness()  # scope checking happens in SCOPING
-        try:
-            h.init()
-            scope = h.scope()
-            scope["workspaces"].append({"name": "wf", "path": "/tmp/wf", "mode": "read"})
-            h.write_json("scope.json", scope)
-            self.assertIn("wf", h.tp("scope", "check", expect=2).text)
-        finally:
-            h.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

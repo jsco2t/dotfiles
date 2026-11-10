@@ -1,8 +1,8 @@
-"""Planning research: small, narrowly scoped items, each a few questions answered in a small
-JSON file within its own time box (the stall-detection unit). The research budget is the
-manager's own reporting metadata — not a human approval and never a refusal. Anything that
-needs more investigation comes back as a followup, which the manager pursues (a new item) or
-dismisses. State lives under state["recon"] (the name older workflows use)."""
+"""Planning research: small, narrowly scoped items, each answering at most three questions in a
+small JSON file within its own time box (what keeps an item small). The research budget is the
+manager's reporting metadata — never a human approval and never a refusal. Anything that needs
+more investigation comes back as a followup, which the manager pursues (a new item) or dismisses.
+State lives under state["recon"] (the name older workflows use)."""
 from __future__ import annotations
 
 import json
@@ -15,17 +15,9 @@ from . import scope as scopemod
 from .common import TPError, Workflow, limit, load_json, minutes_since, now_iso, words
 
 PURPOSES = ("map", "requirements", "investigate")
-# A bounding modifier ("every cited file", "all listed commands") names a set the input
-# already specifies, so the question verifies a bounded set — planning research's job.
-# Only an open-set enumeration of the codebase ("every file", "every Go file", "all
-# packages") is content the task that writes it must research. (Seen live: confirming a
-# review's file:line citations against the repo was refused as content.)
-_BOUNDED = (r"cited|referenced|listed|named|mentioned|linked|given|quoted|recorded|pinned|"
-            r"specified|declared|mirrored|copied")
-_ENUM_NOUNS = (r"files?|flags?|functions?|symbols?|packages?|commands?|fields?|"
-               r"endpoints?|lines?|options?|types?")
 _CONTENT = [
-    re.compile(r"\b(every|all)\s+(?!(?:" + _BOUNDED + r")\s+)(\w+\s+)?(" + _ENUM_NOUNS + r")\b", re.I),
+    re.compile(r"\b(every|all)\s+(\w+\s+)?(files?|flags?|functions?|symbols?|packages?|commands?|fields?|"
+               r"endpoints?|lines?|options?|types?)\b", re.I),
     re.compile(r"\bcomplete\s+(\w+\s+){0,2}(list|tree|inventory|reference|catalog(ue)?|walkthrough)\b", re.I),
     re.compile(r"\bexhaustive(ly)?\b", re.I),
 ]
@@ -65,7 +57,8 @@ def summary(state: Dict[str, Any], scope: Dict[str, Any]) -> Optional[str]:
     done = sum(i["status"] == "done" for i in its)
     open_ = sum(f["status"] == "open" for i in its for f in i.get("followups", []))
     spent = sum(i.get("actual_minutes", 0) for i in its)
-    return (f"research budget: {reserved(state)} of {total} agent-min reserved · {done} of "
+    meter = f"{reserved(state)} of {total}" if total else f"{reserved(state)} (no budget set)"
+    return (f"research budget: {meter} agent-min reserved · {done} of "
             f"{sum(i['status'] != 'dropped' for i in its)} items answered ({spent:.0f} min spent) · "
             f"{open_} followups undecided")
 
@@ -96,7 +89,7 @@ def _find_followup(state: Dict[str, Any], ref: str) -> Dict[str, Any]:
 
 
 def cmd_add(wf: Workflow, rid: str, agent: str, purpose: Optional[str], questions_file: Path, done_when: str,
-            minutes: Optional[int], from_ref: Optional[str]) -> str:
+            minutes: Optional[int], from_ref: Optional[str], model: Optional[str] = None) -> str:
     with wf.locked():
         state = wf.load()
         if state["phase"] != "PLANNING":
@@ -134,36 +127,38 @@ def cmd_add(wf: Workflow, rid: str, agent: str, purpose: Optional[str], question
                     errs.append(f"{from_ref} is already decided.")
             except TPError as exc:
                 errs += exc.lines
-        if not errs:
-            total = budget(state, scope)
-            if reserved(state) + box > total:
-                # The budget is reporting metadata: note the overdraw, refuse nothing. The
-                # per-item time box (≤ research_item_minutes) stays the stall-detection unit.
-                wf.noticed("manager", f"research overdraw: {reserved(state) + box} of {total or 0} agent-min "
-                           f"reserved after {rid} — raise the reporting budget with `tp research extend` if the "
-                           "estimate should grow.")
         if errs:
             raise TPError(*errs)
         items(state)[rid] = {"agent": agent, "purpose": purpose, "questions": questions, "done_when": done_when,
-                             "minutes": box, "status": "pending", "from": from_ref}
+                             "minutes": box, "status": "pending", "from": from_ref,
+                             **({"model": model} if model else {})}
         if from_ref:
             f = _find_followup(state, from_ref)
             f.update(status="pursued", by=rid)
         wf.save(state)
         wf.event("research_add", id=rid, agent=agent, purpose=purpose, minutes=box, source=from_ref)
-        return f"{rid} added ({purpose}, {box} min). {summary(state, scope)}. `tp dispatch {rid}` when ready."
+        out = f"{rid} added ({purpose}, {box} min). {summary(state, scope)}. `tp dispatch {rid}` when ready."
+        total = budget(state, scope)
+        if total and reserved(state) > total:
+            # Reported, never refused: the item keeps its own small box, and the estimate is yours
+            # to raise. Not a noticed item — it is metadata, not work the closeout must decide.
+            out += (f"\nResearch now runs past the research budget ({reserved(state)} of {total} agent-min) — "
+                    "if the estimate should grow, `tp research extend --minutes N --note \"...\"`.")
+        return out
 
 
-def cmd_extend(wf: Workflow, minutes: int, answer: Optional[str] = None,
-               note: Optional[str] = None) -> str:
+def cmd_extend(wf: Workflow, minutes: int, answer: Optional[str], note: Optional[str]) -> str:
+    """Raise the research budget: the manager's re-estimate, recorded with its reason; the human's
+    words when they volunteered them."""
+    if not (answer or note):
+        raise TPError("say why: --note \"<your re-estimate>\", or --answer \"<the human's words>\" if they gave one.")
     with wf.locked():
         state = wf.load()
         if state["phase"] != "PLANNING" or minutes < 1:
             raise TPError("The research budget grows only while PLANNING, by a positive number of minutes.")
         state["research_extra"] = int(state.get("research_extra", 0)) + minutes
         wf.save(state)
-        wf.decision(f"research extend +{minutes} min", answer or note or "manager re-estimate",
-                    who="human" if answer else "manager")
+        wf.decision(f"research extend +{minutes} min", str(answer or note), who="human" if answer else "manager")
         return f"research budget +{minutes} agent-min (reporting metadata). {summary(state, scopemod.load_scope(wf))}."
 
 
@@ -210,7 +205,7 @@ def dispatch(wf: Workflow, state: Dict[str, Any], rid: str, slots) -> str:
                                "porcelain": _porcelain(scopemod.load_scope(wf))}
     wf.save(state)
     wf.event("dispatch", id=rid, step="research", agent=item["agent"])
-    call = briefs.dispatch_line(item["agent"], f"{rid} research", briefs.prompt(brief, result), None, None)
+    call = briefs.dispatch_line(item["agent"], f"{rid} research", briefs.prompt(brief, result), None, item.get("model"))
     return (f"DISPATCH {rid} · research ({item.get('purpose', 'map')}) · {item['agent']} · "
             f"box {item.get('minutes', limit('research_item_minutes'))} min\nbrief: {brief}\nsend: {call}\n"
             f"then: tp record {rid}")
@@ -240,8 +235,7 @@ def record(wf: Workflow, state: Dict[str, Any], rid: str) -> str:
     size = path.stat().st_size
     if size > limit("research_output_bytes"):
         raise TPError(f"{path.name} is {size} bytes; the cap is {limit('research_output_bytes')} — ask the same agent "
-                      "to cut it to what the questions need (resume it: a new `task` call with its task_id), "
-                      "then record again.")
+                      "to cut it to what the questions need (resume its `task` call), then record again.")
     data = load_json(path, "research result")
     errs = _validate(data)
     if errs:

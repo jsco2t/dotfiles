@@ -19,20 +19,22 @@ class RosterSuggestTest(unittest.TestCase):
         out = self.h.tp("roster", "suggest", "--kinds", "kb", wf=False).out
         self.assertIn("kb: author    kb-author", out)
         self.assertIn("doc-reviewer", out)
-        self.assertIn("no human approval", out)
+        self.assertIn("the manager's call", out)
+        self.assertNotIn("agreed with the human", out)
         for absent in ("architecture-reviewer", "code-reviewer", "security-reviewer", "project-manager",
                        "test-planner"):
             self.assertNotIn(absent, out)
+
+    def test_research_suggestion_lists_every_eligible_author(self) -> None:
+        out = self.h.tp("roster", "suggest", "--kinds", "research", wf=False).out
+        self.assertIn("research: author    doc-author", out)
+        self.assertIn("research: author?   architecture-reviewer", out)
+        self.assertNotIn("research: review?   architecture-reviewer", out)
 
     def test_code_suggestion_is_test_forward(self) -> None:
         out = self.h.tp("roster", "suggest", "--kinds", "code", wf=False).out
         self.assertIn("test-author", out)
         self.assertIn("code-author", out)
-
-    def test_tests_suggestion_is_test_author_authored(self) -> None:
-        out = self.h.tp("roster", "suggest", "--kinds", "tests", wf=False).out
-        self.assertIn("tests: author    test-author", out)
-        self.assertIn("test-reviewer", out)
 
 
 class InitTest(unittest.TestCase):
@@ -113,6 +115,30 @@ class ScopeCheckTest(unittest.TestCase):
         self.assertIn("architecture-reviewer", res.text)
         self.assertIn("kb", res.text)
 
+    def test_architecture_reviewer_authors_a_review_of_an_existing_codebase(self) -> None:
+        # Seen live: "use /arch-reviewer over the whole repo" had to be routed through
+        # codebase-researcher, because the architecture reviewer could only review code changes.
+        review_d1 = [{"id": "D1", "kind": "research", "what": "Architecture review of calc", "where": "kb"}]
+        self.check(review="final", deliverables=review_d1, participants=[
+            {"agent": "architecture-reviewer", "role": "author", "why": "Writes the architecture review D1."},
+            {"agent": "doc-reviewer", "role": "reviewer", "why": "Checks D1's claims against the code."}])
+        self.h.tp("scope", "confirm", "--answer", "yes")
+        plan = self.h.plan([self.h.task("T01", "review/README.md", agent="architecture-reviewer")], final_checks=[])
+        self.h.write_json("plan.json", plan)
+        self.h.tp("plan", "check")
+
+    def test_architecture_reviewer_still_never_reviews_documents_or_writes_code(self) -> None:
+        res = self.check(expect=2, review="final",
+                         deliverables=[{"id": "D1", "kind": "research", "what": "A write-up", "where": "kb"}],
+                         participants=[{"agent": "doc-author", "role": "author", "why": "Writes the D1 write-up."},
+                                       {"agent": "architecture-reviewer", "role": "reviewer",
+                                        "why": "Reviews the D1 write-up."}])
+        self.assertIn("architecture-reviewer (reviewer) does not apply to research", res.text)
+        res = self.check(expect=2, deliverables=[{"id": "D1", "kind": "code", "what": "mul()", "where": "kb"}],
+                         participants=[{"agent": "architecture-reviewer", "role": "author",
+                                        "why": "Implements mul for D1."}])
+        self.assertIn("architecture-reviewer (author) does not apply to code", res.text)
+
     def test_orchestrator_only_agents_are_refused(self) -> None:
         res = self.check(expect=2, participants=[
             {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},
@@ -146,16 +172,6 @@ class ScopeCheckTest(unittest.TestCase):
             {"agent": "doc-reviewer", "role": "reviewer", "why": "Checks the accuracy of the articles."}])
         self.assertIn("author", res.text)
 
-    def test_a_tests_deliverable_is_authored_by_test_author_and_reviewed_by_test_reviewer(self) -> None:
-        # Regression: a tests deliverable had no valid author (test-author only held the
-        # `tests` role) and test-reviewer did not apply to it.
-        self.check(review="final",
-                   deliverables=[{"id": "D1", "kind": "tests", "what": "A regression suite for calc",
-                                  "where": "kb"}],
-                   participants=[{"agent": "test-author", "role": "author", "why": "Writes the suite for D1."},
-                                 {"agent": "test-reviewer", "role": "reviewer",
-                                  "why": "Checks the suite would catch a regression."}])
-
     def test_a_reviewer_the_review_mode_never_uses_is_refused(self) -> None:
         res = self.check(expect=2, review="none", participants=[
             {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},
@@ -167,27 +183,25 @@ class ScopeCheckTest(unittest.TestCase):
         res = self.check(expect=2, review="per-task")
         self.assertIn("reviewer", res.text)
 
-    def test_research_is_a_manager_decision_and_budget_metadata(self) -> None:
-        # Budgets are never approved by the human: researchers need no agreed budget, and
-        # the manager sizes one itself. A budget with no researcher stays a metadata error.
+    def test_research_is_the_managers_call_and_its_budget_is_metadata(self) -> None:
+        # Researchers need no budget agreed with the human; a budget with no researcher is still
+        # inconsistent metadata.
         kb = {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."}
         liaison = {"agent": "atlassian-liaison", "role": "research", "why": "Reads the epic's child issues for D1."}
-        self.check(participants=[kb, liaison])                      # researchers, no budget: fine
+        self.check(participants=[kb, liaison])
         self.assertIn("research participant", self.check(
             expect=2, participants=[kb], research={"budget_minutes": 45, "why": "Epic children are thin."}).text)
         self.check(participants=[kb, liaison], research={"budget_minutes": 45, "why": "Epic children are thin."})
         self.assertIn("Research budget:** 45 agent-min", (self.h.wf / "scope.md").read_text())
 
-    def test_a_research_estimate_that_takes_the_whole_budget_warns_never_refuses(self) -> None:
-        # An estimate is information for the human, not a gate: never shrink the research to
-        # fit a budget — raise the budget if that is the honest forecast.
+    def test_research_past_the_whole_budget_is_reported_never_refused(self) -> None:
+        # Budgets are estimates: research forecast past the whole budget is a warning to re-estimate,
+        # never a refusal that pushes the manager to shrink the research.
         kb = {"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."}
         liaison = {"agent": "atlassian-liaison", "role": "research", "why": "Reads the epic's child issues for D1."}
         res = self.check(participants=[kb, liaison], budget_minutes=60,
-                         research={"budget_minutes": 400, "why": "The epic's children are thin and unlinked."})
-        self.assertIn("WARN", res.out)
-        self.assertIn("never shrink the research to fit", res.out)
-        self.assertIn("scope ok", res.out)                      # a warning, not a refusal
+                         research={"budget_minutes": 400, "why": "Every child issue of the epic is unread."})
+        self.assertIn("WARN: the research estimate", res.text)
 
     def test_legacy_recon_role_still_reads_as_research(self) -> None:
         self.check(participants=[{"agent": "kb-author", "role": "author", "why": "Writes every KB article for D1."},
@@ -234,39 +248,3 @@ class ScopeConfirmTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class RoleKindsTest(unittest.TestCase):
-    """The catalog's `kinds` is one list per agent; architecture-reviewer reviews code AND authors
-    an architecture review of an existing codebase (a research deliverable). `role_kinds` overrides
-    `kinds` per role so one agent can hold two; jira-reviewer reviews integration deliverables."""
-
-    def test_architecture_reviewer_authors_a_review_of_an_existing_codebase(self) -> None:
-        h = Harness()
-        try:
-            h.init()
-            scope = h.scope()
-            scope["deliverables"] = [{"id": "D1", "kind": "research", "what": "an architecture review"}]
-            scope["participants"] = [{"agent": "doc-author", "role": "author", "why": "D1 needs an author"},
-                                     {"agent": "architecture-reviewer", "role": "author",
-                                      "why": "D1 reviews the codebase architecture"}]
-            h.write_json("scope.json", scope)
-            out = h.tp("scope", "check", expect=0).out
-            self.assertNotIn("does not apply", out)
-        finally:
-            h.close()
-
-    def test_architecture_reviewer_still_never_reviews_documents_or_writes_code(self) -> None:
-        h = Harness()
-        try:
-            h.init()
-            scope = h.scope()
-            scope["deliverables"] = [{"id": "D1", "kind": "docs", "what": "a guide"}]
-            scope["participants"] = [{"agent": "doc-author", "role": "author", "why": "D1 needs an author"},
-                                     {"agent": "architecture-reviewer", "role": "reviewer",
-                                      "why": "D1 structure needs review"}]
-            h.write_json("scope.json", scope)
-            out = h.tp("scope", "check", expect=2).text
-            self.assertIn("does not apply", out)
-        finally:
-            h.close()

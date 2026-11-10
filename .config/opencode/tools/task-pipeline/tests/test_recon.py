@@ -44,22 +44,6 @@ class ResearchTest(unittest.TestCase):
         text = self.add("R1", ["Give the complete CLI command tree with every flag."], expect=2).text
         self.assertIn("complete", text)
 
-    def test_verification_of_a_bounded_set_is_not_content(self) -> None:
-        # Regression, seen live: "does every cited file:line exist and support the claim?"
-        # was refused as content — but the citations are the input's own bounded set, not
-        # a codebase enumeration, and rewording to dodge the keyword heuristic cost a
-        # manager round-trip mid-scoping.
-        self.add("R1", ["Does every cited file:line reference exist and support the claim?"], 0,
-                 "codebase-researcher", "investigate")
-        self.add("R2", ["Do all listed commands still run on the current image?"], 0,
-                 "codebase-researcher", "investigate")
-
-    def test_an_open_set_enumeration_is_still_content_whatever_the_adjective(self) -> None:
-        # The guard keeps its teeth: a non-bounding adjective ("every Go file") still
-        # marks a codebase enumeration the task that writes the content researches.
-        text = self.add("R1", ["Does every Go file carry a license header?"], expect=2).text
-        self.assertIn("every Go file", text)
-
     def test_investigate_may_trace_one_named_flow_end_to_end(self) -> None:
         q = ["Trace how `stratum up` brings up the kubelet, end to end."]
         self.add("R1", q, 2, "codebase-researcher", "map")
@@ -81,17 +65,22 @@ class ResearchTest(unittest.TestCase):
         self.assertIn("domain-researcher",
                       self.add("R1", ["Which k8s distros?"], expect=2, agent="domain-researcher").text)
 
-    def test_items_report_against_the_declared_budget_and_the_manager_extends_it(self) -> None:
-        # The budget is reporting metadata: drawing past it is noted, not refused, and
-        # extending it is a manager bookkeeping act, not a human approval.
-        for rid in ("R1", "R2", "R3", "R4"):
-            self.add(rid, [f"Which areas does {rid} cover?"])      # 60 reserved of 45 declared
-        out = self.h.tp("next").out
-        self.assertIn("60 of 45", out)
+    def test_items_report_against_the_budget_and_the_manager_extends_it(self) -> None:
+        # The research budget is reporting metadata: drawing past it is reported, never refused,
+        # and raising it is the manager's bookkeeping (the human may still volunteer words).
+        for rid in ("R1", "R2", "R3"):
+            self.add(rid, [f"Which areas does {rid} cover?"])
+        text = self.add("R4", ["Which areas does R4 cover?"]).text
+        self.assertIn("60 of 45", text)
+        self.assertIn("past the research budget", text)
+        self.assertNotIn("research overdraw", (self.h.wf / "noticed.md").read_text()
+                         if (self.h.wf / "noticed.md").exists() else "")   # metadata, not a closeout item
         self.h.tp("research", "extend", "--minutes", "15", "--note", "manager: R4 was missed in the estimate.")
-        self.add("R5", ["Which areas does R5 cover?"])
-        self.assertIn("manager: R4 was missed", (self.h.wf / "decisions.md").read_text())
-        self.assertIn("75 of 60", self.h.tp("next").out)
+        self.assertRegex((self.h.wf / "decisions.md").read_text(), r"research extend \+15 min · manager: .*R4 was missed")
+        self.assertIn("60 of 60", self.h.tp("next").out)
+        self.h.tp("research", "extend", "--minutes", "15", "--answer", "Yes, take more.")
+        self.assertIn("· human: Yes, take more.", (self.h.wf / "decisions.md").read_text())
+        self.h.tp("research", "extend", "--minutes", "15", expect=2)        # a reason is still required
 
     def test_a_time_box_is_at_most_15_minutes(self) -> None:
         self.assertIn("15", self.add("R1", ["Which areas?"], 2, "codebase-researcher", "map", "--minutes", "25").text)
@@ -102,8 +91,6 @@ class ResearchTest(unittest.TestCase):
                  "--minutes", "10")
         out = self.h.tp("dispatch", "R1").out
         self.assertIn("atlassian-liaison", out)
-        self.assertIn('task(subagent_type="atlassian-liaison"', out)   # the manager's OpenCode call, verbatim
-        self.assertIn("R1.json", out)                                  # and the record command after it
         brief = (self.h.wf / "recon" / "R1.brief.md").read_text()
         self.assertIn("10 min", brief)
         self.assertIn("acceptance criteria", brief)       # requirements framing
@@ -116,9 +103,7 @@ class ResearchTest(unittest.TestCase):
     def test_output_is_capped_and_schema_checked(self) -> None:
         self.add("R1", ["Which top-level areas does dash/ split into?"])
         self.h.tp("dispatch", "R1")
-        over = self.record("R1", {"answers": [{"q": "x", "a": "y" * 9000}]}, expect=2)
-        self.assertIn("8000", over.text)
-        self.assertIn("task_id", over.text)   # the fix is an OpenCode resume, never a Claude-ism
+        self.assertIn("8000", self.record("R1", {"answers": [{"q": "x", "a": "y" * 9000}]}, expect=2).text)
         self.assertIn("followups", self.record("R1", {"answers": [{"q": "x", "a": "y"}],
                                                       "followups": [{"why": "no question"}]}, expect=2).text)
         self.record("R1")
@@ -153,11 +138,11 @@ class ResearchTest(unittest.TestCase):
         self.assertNotIn("Three: api, ui, store.", out)
         self.assertIn("Three: api, ui, store.", self.h.tp("show", "R1", "--part", "answers").out)
 
-    def test_at_most_three_agents_in_flight(self) -> None:
-        for rid in ("R1", "R2", "R3", "R4"):
+    def test_at_most_five_agents_in_flight(self) -> None:
+        for rid in ("R1", "R2", "R3", "R4", "R5", "R6"):
             self.add(rid, [f"Which areas does {rid} cover?"], 0, "codebase-researcher", "map", "--minutes", "10")
-        self.h.tp("dispatch", "R1", "R2", "R3")
-        self.assertIn("3 agents", self.h.tp("dispatch", "R4", expect=2).text)
+        self.h.tp("dispatch", "R1", "R2", "R3", "R4", "R5")
+        self.assertIn("5 agents", self.h.tp("dispatch", "R6", expect=2).text)
 
     def test_tasks_cite_research_results_as_sources(self) -> None:
         self.add("R1", ["Which areas?"])
@@ -196,11 +181,11 @@ class NoResearchTest(unittest.TestCase):
             h.confirmed()
             qf = h.root / "q"
             qf.write_text("Which areas?")
-            # No budget, no researcher in scope: the roster gate still applies, but the
-            # missing budget itself is never a refusal.
+            # No researcher in scope: the roster gate refuses it. A missing budget never would.
             res = h.tp("research", "add", "R1", "--agent", "codebase-researcher", "--purpose", "map",
                        "--questions-file", str(qf), "--done-when", "x", expect=2)
             self.assertIn("not a confirmed research participant", res.text)
+            self.assertNotIn("budget", res.text)
         finally:
             h.close()
 

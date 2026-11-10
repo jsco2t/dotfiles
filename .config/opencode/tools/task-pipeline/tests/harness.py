@@ -72,7 +72,7 @@ class Harness:
 
     def tp(self, *args: str, expect: Optional[int] = 0, wf: bool = True) -> Result:
         cmd = [PY, str(TP)] + (["-w", str(self.wf)] if wf else []) + list(args)
-        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", TP_GUARD_DIR=str(self.root / "guard"))
         res = Result(subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120))
         if expect is not None and res.code != expect:
             raise AssertionError(f"tp {' '.join(args)} exited {res.code}, expected {expect}:\n{res.text}")
@@ -98,6 +98,7 @@ class Harness:
                 {"name": "src", "path": str(self.src), "mode": "read"},
             ],
             "answers": [{"q": "What output do you want?", "a": "Markdown KB articles."}],
+            "fix_tasks": {"allow": 0, "answer": "No, ask me every time."},
         }
         base.update(over)
         return base
@@ -169,16 +170,18 @@ class Harness:
         data = {"task": tid, "step": step, "status": status, "summary": summary,
                 "changed": extra.pop("changed", []), "noticed": extra.pop("noticed", []),
                 "questions": extra.pop("questions", [])}
+        acceptance = extra.pop("acceptance", "auto")  # None: the agent left it out
+        if acceptance == "auto" and status == "done" and step in ("author", "impl", "fix", "build"):
+            # A compliant agent: one piece of evidence per Done-when item of the task.
+            task = next((t for t in self.read_json("plan.json")["tasks"] if t["id"] == tid), {})
+            acceptance = [{"criterion": i, "evidence": f"{tid} criterion {i}: shown in the deliverable"}
+                          for i in range(1, len(task.get("acceptance", [])) + 1)]
+        if isinstance(acceptance, list):
+            data["acceptance"] = acceptance
         data.update(extra)
         d = self.run_dir(tid)
         d.mkdir(parents=True, exist_ok=True)
         (d / f"result-{step}.json").write_text(json.dumps(data))
-
-    def noticed(self, source: str, text: str) -> None:
-        """A mid-run observation outside the plan, as an agent's result or review would add."""
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-        from pipeline.common import Workflow
-        Workflow(self.wf).noticed(source, text)
 
     def review(self, tid: str, n: int, verdict: str, findings: Optional[List[Dict[str, Any]]] = None) -> None:
         d = self.run_dir(tid)
@@ -191,12 +194,13 @@ class Harness:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"# {title}\n\n`Add` returns the sum of two ints (`calc/calc.go:5`).\n")
 
-    def author(self, tid: str, rel: str, step: str = "author", agent_id: str = "agent-1") -> Result:
-        """Dispatch, write a good article, hand back, and record."""
+    def author(self, tid: str, rel: str, step: str = "author", agent_id: Optional[str] = None) -> Result:
+        """Dispatch, write a good article, hand back, and record. Each task gets its own agent
+        unless told otherwise: tp refuses one agent for two tasks."""
         self.tp("dispatch", tid)
         self.good_article(rel)
         self.result(tid, step, changed=[rel])
-        return self.tp("record", tid, "--agent-id", agent_id)
+        return self.tp("record", tid, "--agent-id", agent_id or f"agent-{tid}")
 
 
 def deep(d: Dict[str, Any]) -> Dict[str, Any]:

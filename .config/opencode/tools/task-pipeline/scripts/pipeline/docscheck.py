@@ -143,13 +143,15 @@ def citations(doc: Path, lines: List[str]) -> List[Citation]:
     return out
 
 
-def _identifiers(sentence: str) -> Set[str]:
+def _identifiers(sentence: str, skip: Iterable[str] = ()) -> Set[str]:
     """Single code tokens the sentence names (lower-cased): what a supporting line should mention.
-    Multi-word spans (commands, prose) and paths are skipped — too loose to match reliably."""
+    Multi-word spans (commands, prose), paths, and the spans in `skip` are skipped — too loose to
+    match reliably."""
     names: Set[str] = set()
+    skip = set(skip)
     for span in SPAN_RE.findall(sentence):
         span = span.strip().strip("'\"")
-        if " " in span or parse_cite(span) or CONTINUATION_RE.match(span):
+        if " " in span or span in skip or parse_cite(span) or CONTINUATION_RE.match(span):
             continue
         if "/" in span:  # a qualified name such as internal/version.StratumVersion; a bare path names nothing
             span = span.rstrip("/").rsplit("/", 1)[-1]
@@ -233,8 +235,9 @@ def supported(c: Citation, src_lines: List[str]) -> Tuple[bool, Set[str]]:
     """Whether a name the sentence mentions appears near the cited lines, or on the definition
     that encloses them (a citation into a function's body supports a sentence about the function).
     Composite names also match near misses: separator-free spellings (maxReplicas vs max_replicas)
-    and, via _fragment_match, wildcard/placeholder tokens and mangled call spans."""
-    names = _identifiers(c.sentence)
+    and, via _fragment_match, wildcard/placeholder tokens and mangled call spans.
+    Naming the cited file itself (`go.mod` beside `go.mod:30`) is not a claim about its lines."""
+    names = _identifiers(c.sentence, skip={c.path, c.path.rsplit("/", 1)[-1]})
     if not names:
         return True, names
     lo = max(0, c.start - 1 - WINDOW)
@@ -270,33 +273,46 @@ def doubtful(cites: List[Tuple[Citation, List[str]]]) -> List[Tuple[Citation, Se
 
 
 def check(paths: Sequence[Path], repos: Dict[str, Path], root: Optional[Path] = None,
-          root_warn: bool = False) -> Tuple[List[str], List[str], Dict[str, int]]:
+          root_warn: bool = False, report_only: Optional[Set[Path]] = None,
+          removed: Optional[Set[Path]] = None) -> Tuple[List[str], List[str], Dict[str, int]]:
     """(errors, warnings, stats). Errors are certain (broken link, missing file, line past the end,
     ambiguous file name, unreachable article); warnings are the support heuristic. With root_warn,
     unreachable documents are warnings too: a README.md is an entry page, not a nav index, so a
     code repo's unlinked notes and ADRs are surfaced, never blocking. Only a deliberate index.md
-    makes reachability an error."""
+    makes reachability an error.
+
+    report_only, when given, is the set of resolved paths to judge. Every document still feeds
+    the link graph, so an unchanged index still reaches a changed article, but only these are
+    checked and counted, and only these can be reported unreachable. removed is the set of
+    resolved paths the work deleted or renamed away: a link to one is reported in any document,
+    judged or not, because removing the file is what broke it."""
     errors: List[str] = []
     warnings: List[str] = []
     stats = {"files": 0, "links": 0, "citations": 0}
     docs = md_files(paths)
+    judged = [d for d in docs if report_only is None or d in report_only]
     graph: Dict[Path, Set[Path]] = {}
     for doc in docs:
-        stats["files"] += 1
+        report = report_only is None or doc in report_only
+        if report:
+            stats["files"] += 1
         lines = prose_lines(doc.read_text(errors="replace"))
         graph[doc] = set()
         for n, line in enumerate(lines, 1):
             for target in LINK_RE.findall(line):
                 if SCHEME_RE.match(target) or target.startswith("#") or target.startswith("/"):
                     continue
-                stats["links"] += 1
                 rel = target.split("#", 1)[0].split("?", 1)[0]
                 dest = (doc.parent / rel).resolve()
-                if not dest.exists():
-                    errors.append(f"{doc}:{n}: broken link {target}")
-                elif dest.suffix == ".md":
+                if report:
+                    stats["links"] += 1
+                    if not dest.exists():
+                        errors.append(f"{doc}:{n}: broken link {target}")
+                elif removed and dest in removed and not dest.exists():
+                    errors.append(f"{doc}:{n}: broken link {target} (its target was removed)")
+                if dest.exists() and dest.suffix == ".md":
                     graph[doc].add(dest)
-        if not repos:
+        if not repos or not report:
             continue
         valid: List[Tuple[Citation, List[str]]] = []
         for c in citations(doc, lines):
@@ -324,7 +340,7 @@ def check(paths: Sequence[Path], repos: Dict[str, Path], root: Optional[Path] = 
                 if nxt not in seen:
                     seen.add(nxt)
                     todo.append(nxt)
-        for doc in docs:
+        for doc in judged:
             if doc not in seen:
                 miss = f"{doc} is not reachable from {root.name} by links"
                 (warnings if root_warn else errors).append(miss)

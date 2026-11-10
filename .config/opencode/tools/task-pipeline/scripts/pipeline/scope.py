@@ -1,14 +1,15 @@
 """Scope: what will be delivered, who works on it, the time budget, and the research budget —
-checked, rendered, and frozen when the human confirms it."""
+checked, rendered, and frozen when the human confirms it. Budgets are the manager's reporting
+metadata: they forecast and report, and never gate or shrink the work."""
 from __future__ import annotations
 
 import json
 import math
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
-from .common import TPError, Workflow, catalog, limit, load_json, now_iso, sha_file
+from .common import TPError, Workflow, catalog, limit, load_json, now_iso, set_limit_overrides, sha_file
 
 REVIEW_MODES = ("none", "final", "per-task", "both")
 WORK_ROLES = ("author", "tests", "reviewer")
@@ -19,6 +20,7 @@ def load_scope(wf: Workflow) -> Dict[str, Any]:
     data = load_json(wf.scope_json, "the scope")
     if not isinstance(data, dict):
         raise TPError(f"{wf.scope_json} must hold a JSON object.")
+    set_limit_overrides(data.get("limits"))
     return data
 
 
@@ -51,11 +53,77 @@ def research_budget(scope: Dict[str, Any]) -> int:
     return int(research.get("budget_minutes") or 0) if isinstance(research, dict) else 0
 
 
+def fix_tasks(scope: Dict[str, Any]) -> Dict[str, Any]:
+    """The human's standing answer on fix tasks: how many small fix tasks the manager may add
+    without asking, and how big each may be. A scope from before the question allows none."""
+    fx = scope.get("fix_tasks")
+    return fx if isinstance(fx, dict) else {"allow": 0}
+
+
+FIX_TASKS_ASK = ("Ask the human, in the scope question, whether you may add small fix tasks without asking them each "
+                 "time (a doc that needs one clarifying sentence, a stale comment) — and if so how many, and how many "
+                 "minutes each — then record their words: \"fix_tasks\": {\"allow\": 2, \"max_minutes\": 15, "
+                 "\"answer\": \"<their words>\"} (allow 0: every fix task is asked).")
+
+
+def _fix_task_errors(scope: Dict[str, Any]) -> List[str]:
+    fx = scope.get("fix_tasks")
+    if not isinstance(fx, dict):
+        return ["scope.json needs `fix_tasks`. " + FIX_TASKS_ASK]
+    errs = []
+    allow, cap = fx.get("allow"), limit("max_delegated_fix_tasks")
+    if not isinstance(allow, int) or not 0 <= allow <= cap:
+        errs.append(f"fix_tasks.allow must be a whole number from 0 to {cap}.")
+    elif allow:
+        minutes = fx.get("max_minutes")
+        if not isinstance(minutes, int) or not 1 <= minutes <= limit("max_task_minutes"):
+            errs.append(f"fix_tasks.max_minutes must be a whole number from 1 to {limit('max_task_minutes')}: how big "
+                        "one fix task may be.")
+    if len(str(fx.get("answer", "")).strip()) < 2:
+        errs.append("fix_tasks.answer must hold the human's words, verbatim. " + FIX_TASKS_ASK)
+    return errs
+
+
 def final_reviewers(scope: Dict[str, Any]) -> List[str]:
     return participants(scope, "reviewer") if scope.get("review") in ("final", "both") else []
 
 
-def validate(scope: Dict[str, Any]) -> List[str]:
+def review_units(scope: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The final review's sessions per batch: each catalog pack whose confirmed members number two
+    or more runs as one session of its runner agent (each member a lens); every other confirmed
+    reviewer runs as itself. kinds: what the unit reviews (its members' reviewer kinds)."""
+    reviewers = final_reviewers(scope)
+    units, packed = [], set()
+    for runner, members in catalog().get("review_packs", {}).items():
+        if runner.startswith("_"):
+            continue
+        chosen = [r for r in reviewers if r in members]
+        if len(chosen) >= 2:
+            packed |= set(chosen)
+            units.append({"name": runner, "agent": runner, "lenses": chosen,
+                          "kinds": sorted({k for r in chosen for k in agent_kinds(r, "reviewer")})})
+    for r in reviewers:
+        if r not in packed:
+            units.append({"name": r, "agent": r, "lenses": [], "kinds": agent_kinds(r, "reviewer")})
+    return units
+
+
+def roles() -> Dict[str, Any]:
+    return catalog().get("roles", {})
+
+
+def is_transport(agent: Optional[str]) -> bool:
+    return agent in roles().get("transport", [])
+
+
+def is_code_file(path: str) -> bool:
+    return Path(str(path)).suffix.lower() in roles().get("code_extensions", [])
+
+
+def validate(scope: Dict[str, Any], require_fix_tasks: bool = True) -> List[str]:
+    """require_fix_tasks: False for a scope confirmed before the fix-task question existed — a
+    revision or amendment of it must not force that question on the human mid-run (it allows
+    no delegated fix tasks)."""
     cat = catalog()
     agents = cat["agents"]
     errs: List[str] = []
@@ -84,7 +152,8 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     for w in scope["workspaces"]:
         name, path, mode = w.get("name", ""), w.get("path", ""), w.get("mode")
         if not re.fullmatch(r"[a-z0-9_-]+", str(name)) or name in names or name in ("research", "recon", "wf"):
-            errs.append(f"workspace name {name!r} must be unique, lowercase, [a-z0-9_-], and not 'research' or 'wf'.")
+            errs.append(f"workspace name {name!r} must be unique, lowercase, [a-z0-9_-], and not 'research' or "
+                        "'wf' (source prefixes for research items and the workflow folder).")
         names.add(name)
         if mode not in ("write", "read"):
             errs.append(f"workspace {name}: mode must be write or read.")
@@ -124,7 +193,7 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     if reviewers > limit("max_reviewers"):
         errs.append(f"{reviewers} reviewers; the limit is {limit('max_reviewers')} — keep the lenses this change needs.")
 
-    for kind in sorted(kinds):
+    for kind in sorted(kinds - {"integration"}):  # tp publish posts integration work; a liaison is optional
         authors = [a for a in participants(scope, "author") if kind in agent_kinds(a, "author")]
         if not authors:
             who = ", ".join(d["id"] for d in scope["deliverables"] if d.get("kind") == kind)
@@ -138,12 +207,13 @@ def validate(scope: Dict[str, Any]) -> List[str]:
                     "drop it or choose a review mode.")
     elif mode != "none" and not reviewers:
         errs.append(f"review '{mode}' needs a reviewer participant.")
+    if mode == "none" and "code" in deliverable_kinds(scope):
+        errs.append("code deliverables are always reviewed: set review to final (or per-task) and confirm a reviewer "
+                    "(`tp roster suggest --kinds code`).")
 
     budget = scope.get("budget_minutes")
     if budget is not None and (not isinstance(budget, int) or not 15 <= budget <= 2880):
         errs.append("budget_minutes must be a whole number of minutes between 15 and 2880 (or null).")
-    # A null budget is fine and needs nothing from the human: the manager sizes budgets
-    # itself, as reporting metadata and stall-detection context — never an approval.
     research = scope.get("research")
     rb = research_budget(scope)
     researchers = participants(scope, "research")
@@ -158,6 +228,32 @@ def validate(scope: Dict[str, Any]) -> List[str]:
     for t in scope.get("terms", []):
         if not t.get("term") or not t.get("means"):
             errs.append("each term needs `term` and `means` (and ideally `not`).")
+    if require_fix_tasks or "fix_tasks" in scope:
+        errs += _fix_task_errors(scope)
+    errs += _limits_and_ignore_errors(scope)
+    return errs
+
+
+def _limits_and_ignore_errors(scope: Dict[str, Any]) -> List[str]:
+    """`limits`: the human's per-workflow overrides of catalog limits (positive integers, known
+    names). `ignore`: workspace-relative patterns for files no task writes, such as a sandbox's
+    per-command mount points."""
+    errs: List[str] = []
+    known = {k for k in catalog()["limits"] if not k.startswith("_")}
+    limits = scope.get("limits")
+    if limits is not None:
+        if not isinstance(limits, dict):
+            errs.append("limits must be an object of {limit name: positive integer}.")
+        else:
+            for name, value in limits.items():
+                if name not in known:
+                    errs.append(f"limits.{name} is not a known limit; known: {', '.join(sorted(known))}.")
+                elif not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                    errs.append(f"limits.{name} must be a positive integer.")
+    ignore = scope.get("ignore")
+    if ignore is not None and (not isinstance(ignore, list) or not all(isinstance(p, str) and p.strip()
+                                                                       for p in ignore)):
+        errs.append("ignore must be a list of workspace-relative path patterns (for example \"$HOME/**\").")
     return errs
 
 
@@ -180,7 +276,7 @@ def render(scope: Dict[str, Any]) -> str:
     out += [f"**Budget:** {budget} min, planning included." if budget else "**Budget:** none set.",
             f"**Research budget:** {rb} agent-min — {scope['research'].get('why', '')}" if rb
             else "**Research:** none — the work is specified well enough to plan directly.",
-            f"**Review:** {scope['review']}.", "", "## Deliverables"]
+            f"**Review:** {scope['review']}.", _fix_tasks_line(scope), "", "## Deliverables"]
     out += [f"- {d['id']} ({d['kind']}): {d['what']}" + (f" — in `{d['where']}`" if d.get("where") else "")
             for d in scope["deliverables"]]
     if scope.get("terms"):
@@ -193,9 +289,25 @@ def render(scope: Dict[str, Any]) -> str:
     out += [f"- {p['agent']} ({role_of(p)}): {p['why']}" for p in scope["participants"]]
     out += ["", "## Workspaces"]
     out += [f"- {w['name']} ({w['mode']}): `{w['path']}`" for w in scope["workspaces"]]
+    # What the gates enforce differently in this workflow: the human confirms these too.
+    if scope.get("ignore"):
+        out += ["", "**Ignored by the gates:** " + ", ".join(f"`{p}`" for p in scope["ignore"])]
+    if scope.get("limits"):
+        defaults = catalog()["limits"]
+        out += ["", "**Limits changed:** " + ", ".join(f"{k} {v} (default {defaults.get(k)})"
+                                                         for k, v in sorted(scope["limits"].items()))]
     if scope.get("answers"):
         out += ["", "## Human answers"] + [f"- {a['q']} — {a['a']}" for a in scope["answers"]]
     return "\n".join(out) + "\n"
+
+
+def _fix_tasks_line(scope: Dict[str, Any]) -> str:
+    fx = fix_tasks(scope)
+    said = f" Your answer: {fx['answer']}" if fx.get("answer") else ""
+    if fx.get("allow"):
+        return (f"**Fix tasks:** the manager may add up to {fx['allow']} fix tasks of {fx['max_minutes']} min or less "
+                f"without asking (each one is listed in the report).{said}")
+    return f"**Fix tasks:** none without asking — every fix task outside the plan is put to the human.{said}"
 
 
 def cmd_check(wf: Workflow) -> str:
@@ -204,7 +316,7 @@ def cmd_check(wf: Workflow) -> str:
         raise TPError(f"Scope is checked in SCOPING; the workflow is {state['phase']}.",
                       "To change a confirmed scope, the human must ask: `tp revise --scope --feedback ...`.")
     scope = load_scope(wf)
-    errs = validate(scope)
+    errs = validate(scope, require_fix_tasks=not state.get("scope_confirmed"))
     if errs:
         raise TPError(*errs)
     (wf.root / "scope.md").write_text(render(scope))
@@ -212,10 +324,10 @@ def cmd_check(wf: Workflow) -> str:
     state["budget_minutes"] = scope.get("budget_minutes")
     wf.save(state)
     wf.event("scope_check")
-    return ("".join(f"WARN: {w}\n" for w in warnings(scope))
-            + f"scope ok — rendered {wf.root / 'scope.md'}.\n"
-            "Present it to the human (including the research budget, or that there is none) and ask them to "
-            "confirm (AskUserQuestion). On yes: `tp scope confirm --answer \"<their words>\"`.")
+    return ("".join(f"WARN: {w}\n" for w in warnings(scope)) + f"scope ok — rendered {wf.root / 'scope.md'}.\n"
+            "Present it to the human and ask them to confirm (the `question` tool); the budgets in it are your "
+            "own estimates, shown for information, not for approval. On yes: "
+            "`tp scope confirm --answer \"<their words>\"`.")
 
 
 def cmd_confirm(wf: Workflow, answer: str) -> str:
@@ -227,19 +339,48 @@ def cmd_confirm(wf: Workflow, answer: str) -> str:
     state["scope_sha"] = state["scope_checked_sha"]
     state["phase"] = "PLANNING"
     state["scope_confirmed"] = now_iso()
+    kept = _keep_approved_plan(wf, state)
     wf.save(state)
     wf.decision("scope confirm", answer)
     wf.event("scope_confirm")
+    if kept:
+        wf.decision("plan approval kept", "plan.json is unchanged since the human approved it and still fits the "
+                    "confirmed scope, so that approval stands", who=None)
+        wf.event("plan_approval_kept")
+        return ("scope confirmed and frozen. The approved plan is unchanged and still fits it, so its approval stands: "
+                "EXECUTING — run `tp next`.")
     return "scope confirmed and frozen. Now PLANNING — run `tp next`."
 
 
-def cmd_budget_extend(wf: Workflow, minutes: int, answer: Optional[str] = None,
-                      note: Optional[str] = None) -> str:
-    """Set the whole-job budget while PLANNING or EXECUTING. Budgets are the manager's own
-    reporting/stall-detection metadata — sizing or raising one is bookkeeping, never a human
-    approval; when the human volunteers words, they are recorded verbatim."""
+def _keep_approved_plan(wf: Workflow, state: Dict[str, Any]) -> bool:
+    """After `tp revise --scope` mid-run, the plan the human approved stays approved when plan.json
+    is byte-identical and still valid under the newly confirmed scope: asking them to approve it
+    again would approve nothing new. Otherwise planning resumes as usual."""
+    from . import plan as planmod
+    from . import review
+    revised = state.pop("revised_from", None)
+    if not revised or not revised.get("plan_sha") or sha_file(wf.plan_json) != revised["plan_sha"]:
+        return False
+    plan, scope = planmod.load_plan(wf), load_scope(wf)
+    if planmod.validate(plan, scope, state, wf.root, {t["id"] for t in plan["tasks"]}):
+        return False
+    state["plan_approved_sha"] = state["plan_submitted_sha"] = revised["plan_sha"]
+    state["phase"] = "EXECUTING"
+    planmod.merge_baselines(wf, state, scope)
+    state["reviews"] = review.new_reviews(plan, scope, state.get("reviews", {}))
+    state["integration"] = review.integration_ids(plan, scope)
+    (wf.root / "plan.md").write_text(planmod.render(plan, scope, wf))
+    return True
+
+
+def cmd_budget_extend(wf: Workflow, minutes: int, answer: Optional[str], note: Optional[str]) -> str:
+    """Raise the whole-job budget while PLANNING or EXECUTING. It is the manager's re-estimate —
+    bookkeeping that keeps the forecast and the report honest, never a human approval and never a
+    gate; when the human volunteers words, they are recorded as theirs."""
     if minutes < 1:
         raise TPError("budget extend needs a positive number of minutes.")
+    if not (answer or note):
+        raise TPError("say why: --note \"<your re-estimate>\", or --answer \"<the human's words>\" if they gave one.")
     with wf.locked():
         state = wf.load()
         if state["phase"] not in ("PLANNING", "EXECUTING"):
@@ -250,17 +391,17 @@ def cmd_budget_extend(wf: Workflow, minutes: int, answer: Optional[str] = None,
         if new > 2880:
             raise TPError(f"budget_minutes would reach {new}; the cap is 2880.")
         scope["budget_minutes"] = new
-        scope.pop("budget_declined", None)
-        wf.scope_json.write_text(json.dumps(scope, indent=1) + "\n")
+        wf.scope_json.write_text(json.dumps(scope, indent=2) + "\n")
+        (wf.root / "scope.md").write_text(render(scope))
+        # The frozen scope moves with the number, or every later check would read it as tampered.
         state["budget_minutes"] = new
         state["scope_sha"] = state["scope_checked_sha"] = sha_file(wf.scope_json)
         wf.save(state)
-        why = answer or note or "manager re-estimate"
-        wf.decision(f"budget extend +{minutes} min", f"{old or 'none'} → {new}: {why}",
+        wf.decision(f"budget extend +{minutes} min", f"{old or 'none'} → {new}: {answer or note}",
                     who="human" if answer else "manager")
         wf.event("budget_extend", minutes=minutes, budget=new)
-        return (f"budget metadata is now {new} agent-min (was {old or 'none'}) — it reports in the "
-                "meter, the digest, and the report, and gates nothing.")
+        return (f"budget is now {new} min (was {old or 'none'}) — reported in `tp next`, `tp digest`, and the "
+                "report; it gates nothing.")
 
 
 def cmd_suggest(kinds: List[str]) -> str:
@@ -274,6 +415,9 @@ def cmd_suggest(kinds: List[str]) -> str:
             out.append(f"  {kind}: author    {s['author']} — {cat['agents'][s['author']]['use']}")
         else:
             out.append(f"  {kind}: author    ask the human which system and which liaison writes to it")
+        for agent, entry in cat["agents"].items():
+            if agent != s.get("author") and "author" in entry["roles"] and kind in agent_kinds(agent, "author"):
+                out.append(f"  {kind}: author?   {agent} — {entry['use']}")
         if s.get("tests"):
             out.append(f"  {kind}: tests     {s['tests']} — {cat['agents'][s['tests']]['use']}")
         for agent in s.get("ask", []):
@@ -281,7 +425,7 @@ def cmd_suggest(kinds: List[str]) -> str:
         for agent in s.get("research", []):
             out.append(f"  {kind}: research? {agent} — {cat['agents'][agent]['use']}")
     out.append("Reviewers run once, at the end, in bulk — choose only the lenses this change needs.")
-    out.append("Researchers are the manager's call — no human approval; size the research budget yourself as "
+    out.append("Research is the manager's call, and a clear, small ask needs none; size its budget yourself as "
                "reporting metadata. Other research agents: "
                + ", ".join(sorted(a for a, e in cat["agents"].items() if "research" in e["roles"])) + ".")
     return "\n".join(out)

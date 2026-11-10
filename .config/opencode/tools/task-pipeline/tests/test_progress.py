@@ -887,3 +887,27 @@ class ShipTest(unittest.TestCase):
         log = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(self.m.app), capture_output=True, text=True).stdout
         self.assertIn("Calc KB plan", log)   # the plan title carries into the commit message
 
+    def test_ship_stages_only_the_runs_task_paths(self) -> None:
+        """A repo-wide add would sweep in unrelated edits and sandbox leftovers; ship stages
+        what the plan's tasks wrote, and leaves — visibly — everything else."""
+        import subprocess
+        self.scope_ship()
+        (self.m.app / "scratch-notes.txt").write_text("sandbox leftover, not the run's work")
+        out = self.m.h.tp("ship", "--answer", "ship it").out
+        self.assertIn("committed", out)
+        self.assertIn("left uncommitted", out)          # the leftover is reported, not hidden
+        st = subprocess.run(["git", "status", "--porcelain"], cwd=str(self.m.app),
+                            capture_output=True, text=True).stdout
+        self.assertIn("scratch-notes.txt", st)           # and still uncommitted
+        committed = subprocess.run(["git", "show", "--name-only", "--format=", "HEAD"],
+                                   cwd=str(self.m.app), capture_output=True, text=True).stdout
+        self.assertNotIn("scratch-notes.txt", committed)
+        self.assertIn("docs/calc.md", committed)         # the run's work did ship
+
+    def test_a_dry_run_shows_what_stays_outside_the_run(self) -> None:
+        self.scope_ship()
+        (self.m.app / "scratch-notes.txt").write_text("sandbox leftover")
+        out = self.m.h.tp("ship").out
+        self.assertIn("NOT committed", out)
+        self.assertIn("scratch-notes.txt", out)
+

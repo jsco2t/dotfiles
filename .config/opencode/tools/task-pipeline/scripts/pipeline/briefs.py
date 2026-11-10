@@ -142,8 +142,10 @@ def author(task: Dict[str, Any], step: str, rnd: int, ctx: Dict[str, Any], resul
         out += ["## This step: tests first, then the implementation — one round", "",
                 f"Write the tests for this task first, in {', '.join(f'`{p}`' for p in ctx['tests_paths'])}. "
                 + (f"Run `{task['test_cmd']}` and observe them failing for the reason the task names (red); "
-                   f"save that failing run's full output to `{result.parent / f'red-build-{rnd}.log'}` — the "
-                   "pipeline checks that file for a real failure. A suite that fails to load — an import, "
+                   f"save that failing run's full output to `{result.parent / f'red-build-{rnd}.log'}`, ending "
+                   "the file with its exit status — run it as "
+                   f"`({task['test_cmd']}); echo \"exit $?\"` — so the log proves itself. The pipeline checks "
+                   "that file for a real failure marker. A suite that fails to load — an import, "
                    "build, or setup error — is not red: fix the fixture and rerun before implementing. "
                    if mode == "red" else
                    f"Run `{task['test_cmd']}` and observe today's behaviour pinned (tests pass); save that "

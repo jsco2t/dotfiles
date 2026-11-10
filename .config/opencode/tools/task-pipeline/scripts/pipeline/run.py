@@ -377,6 +377,21 @@ def _headline(state: Dict[str, Any]) -> str:
     return " · ".join(p for p in parts if p)
 
 
+# A genuinely red log carries a concrete failure signal — a status word, a non-zero failure
+# count, an abort, or the run's exit status — never the mere word "error", which "0 errors"
+# contains. The build brief has the agent end the log with `exit $?`, the one marker the agent
+# cannot write by accident.
+RED_MARK = re.compile(
+    r"\bFAILED\b"                                          # unittest / pytest summary line
+    r"|^--- FAIL\b|^FAIL\b"                                # go test status lines
+    r"|^ERROR\b"                                           # unittest / pytest per-test error header
+    r"|\b[1-9]\d* +(?:failed|Failed|failures?|errors?|Errors?)\b"   # "2 failed", "1 error"
+    r"|\b(?:[Ff]ailures?|[Ee]rrors?) *[:=] *[1-9]\d*\b"   # "failures=1", "Errors: 2"
+    r"|\bAssertionError\b|\bpanic:|\bfatal error\b|\bFATAL\b"
+    r"|✗|✕|^not ok\b"                                      # TAP
+    r"|\bexit (?:code )?[1-9]\d*\b",                       # the brief's self-proving last line
+    re.M)
+
 _GROUP_LABEL = {"code": "coding", "tests": "coding", "build": "coding", "kb": "writing", "docs": "writing", "tutorial": "writing",
                 "education": "writing"}
 
@@ -1298,7 +1313,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
                 red = red_log.read_text(errors="replace")
                 if not red.strip():
                     findings.append(f"`{red_log.name}` is empty — the red run's full output goes in it.")
-                elif not re.search(r"fail|error|panic|assert|fatal|not ok|✗|exit (code )?[1-9]", red, re.I):
+                elif not RED_MARK.search(red):
                     findings.append(f"`{red_log.name}` shows no failure: the tests were never observed red, so they "
                                     "do not prove the new behaviour.")
                 else:
@@ -2317,18 +2332,39 @@ def cmd_ship(wf: Workflow, answer: Optional[str]) -> str:
             if not status:
                 results.append(f"{wname}: clean, nothing to commit")
                 continue
+            # Stage only what this run's tasks wrote: unrelated edits, sandbox leftovers, and
+            # anything else living in the workspace stay uncommitted — visible, never swept in
+            # by a repo-wide `git add -A`.
+            owned = sorted({p for t in tasks.values() if t.get("workspace") == wname
+                           for p in t.get("paths", []) if not str(p).startswith("wf:")})
+            if not owned:
+                results.append(f"{wname}: no task paths in this workspace — its changes are not this run's "
+                               "to commit; commit them yourself")
+                continue
+            lines = status.splitlines()
+            owned_paths = [ln[3:].split(" -> ")[-1].strip('"').rstrip("/") for ln in lines]
+            mine = [ln for ln, p in zip(lines, owned_paths)
+                    if any(p == o or p.startswith(o + "/") or o.startswith(p + "/") for o in owned)]
+            others = [ln for ln in lines if ln not in mine]
             if not answer:
                 results.append(f"{wname} ({ws}, branch {subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=str(ws), capture_output=True, text=True).stdout.strip()}):\n"
-                               + "\n".join(f"  {line}" for line in status.splitlines()[:20]))
+                               + "\n".join(f"  {line}" for line in mine[:20])
+                               + (f"\n  also present, NOT committed (outside this run's task paths):\n"
+                                  + "\n".join(f"    {line}" for line in others[:10]) if others else ""))
                 continue
-            r = subprocess.run(["git", "add", "-A"], cwd=str(ws), capture_output=True, text=True)
+            if not mine:
+                results.append(f"{wname}: the run's task paths show no changes; "
+                               + (f"{len(others)} uncommitted change(s) outside them stay yours" if others else "clean"))
+                continue
+            r = subprocess.run(["git", "add", "-A", "--", *owned], cwd=str(ws), capture_output=True, text=True)
             if r.returncode != 0:
                 raise TPError(f"{wname}: git add failed: {r.stderr.strip()[:200]}")
             r = subprocess.run(["git", "commit", "-q", "-m", msg], cwd=str(ws), capture_output=True, text=True)
             if r.returncode != 0:
                 raise TPError(f"{wname}: git commit failed: {r.stderr.strip()[:200]}")
             head = _git_head(ws) or ""
-            results.append(f"{wname}: committed {head[:10]} ({len(status.splitlines())} paths)")
+            results.append(f"{wname}: committed {head[:10]} ({len(mine)} of the run's paths)"
+                           + (f"; {len(others)} change(s) outside the task paths left uncommitted" if others else ""))
             if conf["pr"]:
                 branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(ws),
                                         capture_output=True, text=True).stdout.strip()
@@ -2351,7 +2387,8 @@ def cmd_ship(wf: Workflow, answer: Optional[str]) -> str:
         if not answer:
             wf.event("ship_dry_run")
             return ("SHIP DRY RUN — exactly this runs on `tp ship --answer \"<the human's words>\"` "
-                    f"(git add -A + commit{' + push + PR' if conf['pr'] else ''} per write workspace; never a rebase):\n"
+                    f"(stages only the run's task paths + commit{' + push + PR' if conf['pr'] else ''} per write "
+                    "workspace; never a rebase; anything else in the workspace stays uncommitted):\n"
                     + "\n".join(results) + f"\nCommit message:\n  {msg.splitlines()[0]}\nShow the human, ask once.")
         wf.event("ship", pr=conf["pr"])
         state.setdefault("closeout", {})["shipped"] = {"ts": now_iso(), "answer": answer}

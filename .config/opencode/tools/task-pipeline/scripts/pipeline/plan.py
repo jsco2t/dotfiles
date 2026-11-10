@@ -1175,6 +1175,12 @@ def cmd_revise(wf: Workflow, feedback: str, to_scope: bool) -> str:
     state["phase"] = "SCOPING" if to_scope else "PLANNING"
     for key in ("plan_submitted_sha", "plan_approved_sha"):
         state.pop(key, None)
+    pr = state.get("plan_review")
+    if pr is not None:
+        # A revision restarts the review contract: the new plan gets the full round allowance
+        # again (a round counter that survived the revise would dead-end the next review at
+        # the cap). The reviewer stays attached — its context of the old plan is useful.
+        pr.update(round=0, status="pending", sha=None, findings=[], dismissed={}, observations=[])
     wf.save(state)
     wf.decision("revise scope" if to_scope else "revise plan", feedback)
     wf.event("revise", scope=to_scope)
@@ -1191,6 +1197,12 @@ def _plan_reviewer(scope: Dict[str, Any]) -> str:
         raise TPError("no plan-role participant in scope.json — the independent plan reviewer "
                       "(plan-reviewer) must be confirmed with the scope.")
     return who[0]
+
+
+def _finding_line(f: Dict[str, Any]) -> str:
+    """A finding the way a reader needs it — not a raw dict the reviewer's JSON produced."""
+    return (f"{f.get('id', '?')} ({f.get('state', '?')}) {f.get('requirement', '?')}: {f.get('issue', '')}"
+            + (f" Fix: {f['fix']}" if f.get("fix") else ""))
 
 
 def cmd_plan_review(wf: Workflow) -> str:
@@ -1229,7 +1241,7 @@ def cmd_plan_review(wf: Workflow) -> str:
            "request": (wf.root / "request.md").read_text(errors="replace") if (wf.root / "request.md").exists() else "",
            "requirements": reqs, "questions": plan.get("questions", []),
            "noticed": [str(n) for n in wf.noticed_items()],
-           "prior_findings": pr.get("findings", []) if rnd > 1 else []}
+           "prior_findings": [_finding_line(f) for f in pr.get("findings", [])] if rnd > 1 else []}
     brief.write_text(briefs.plan_review(rnd, ctx, result))
     pr.update(status="in_flight", sha=state.get("plan_submitted_sha"), findings=[], dismissed={})
     wf.save(state)
@@ -1269,9 +1281,26 @@ def cmd_plan_record(wf: Workflow, agent_id: Optional[str]) -> str:
     findings = data.get("findings")
     if not isinstance(findings, list):
         errs.append("findings must be a list.")
+    seen_ids: Set[str] = set()
     for f in findings or []:
-        if not isinstance(f, dict) or not str(f.get("issue", "")).strip():
-            errs.append("each finding needs a complete `issue` sentence and the requirement it is about.")
+        if not isinstance(f, dict):
+            errs.append("each finding must be a JSON object.")
+            continue
+        fid = str(f.get("id", "")).strip()
+        if not fid:
+            errs.append("each finding needs an `id` (F1, F2, ...).")
+        elif fid in seen_ids:
+            errs.append(f"finding ids must be unique: {fid} appears twice.")
+        else:
+            seen_ids.add(fid)
+        if not str(f.get("requirement", "")).strip():
+            errs.append(f"{fid or '(unnamed)'}: each finding names the requirement (R#) or request line "
+                        "it is about.")
+        if not str(f.get("issue", "")).strip():
+            errs.append(f"{fid or '(unnamed)'}: each finding needs a complete `issue` sentence.")
+    if data.get("verdict") == "changes" and isinstance(findings, list) and not findings:
+        errs.append("verdict 'changes' must name at least one finding — the reviewer's reason for "
+                     "refusing the plan is exactly what triage needs.")
     req_ids = [r["id"] for r in scope.get("requirements", [])]
     coverage = data.get("coverage")
     if req_ids and not isinstance(coverage, list):
@@ -1315,7 +1344,7 @@ def cmd_plan_record(wf: Workflow, agent_id: Optional[str]) -> str:
     return (f"plan review round {rnd} returned {data['verdict']} with {len(pr['findings'])} finding(s).\n"
             + "\n".join(f"  {f['id']} ({f.get('state')}) {f['requirement']}: {f['issue']}" for f in pr["findings"])
             + "\nVerify each against the plan, then `tp plan triage --accept-all`, or "
-            "`--dismiss F# --reason \"...\"` for each you overrule (recorded, and shown at the report).")
+            "`--dismiss F#=\"<reason>\"` for each you overrule (recorded, and shown at the report).")
 
 
 def cmd_plan_triage(wf: Workflow, accept_all: bool, dismiss: List[str]) -> str:
@@ -1325,6 +1354,8 @@ def cmd_plan_triage(wf: Workflow, accept_all: bool, dismiss: List[str]) -> str:
     pr = state.get("plan_review")
     if not pr or pr["status"] != "needs_triage":
         raise TPError(f"no plan-review findings await triage (status {pr and pr.get('status')}).")
+    if not pr["findings"]:  # malformed rounds are refused at record; triage never sees an empty set
+        raise TPError(f"round {pr['round']} has no findings to triage — `tp plan review` if a round is due.")
     reason_of = {}
     for spec in dismiss:
         fid, _, reason = spec.partition("=")

@@ -229,8 +229,9 @@ straight to final. With a deferral, `tp closeout --ask` renders the decision bri
 report as pre-existing), writes `report.md`; present it answer-first.
 
 With `ship` in scope: `tp ship` (a dry run), ask once, `tp ship --answer "<their words>"` —
-it commits (and with `ship.pr`, pushes and opens the PR); it never rebases. Without `ship`,
-committing stays the human's call.
+it commits the run's task paths (and with `ship.pr`, pushes and opens the PR); it never
+rebases, and anything else in the workspace stays uncommitted. Without `ship`, committing
+stays the human's call.
 
 ## Halt, resume, status
 

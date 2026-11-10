@@ -82,7 +82,10 @@ class PlanReviewFlowTest(unittest.TestCase):
         out = self.h.tp("plan", "review").out
         self.assertIn("round 2", out)
         self.assertIn('task(task_id="pr-1"', out)          # the same reviewer, resumed
-        self.assertIn("Findings from the earlier round", (self.h.wf / "runs" / "plan" / "brief-review-2.md").read_text())
+        brief2 = (self.h.wf / "runs" / "plan" / "brief-review-2.md").read_text()
+        self.assertIn("Findings from the earlier round", brief2)
+        self.assertIn("F1 (missing) R1:", brief2)          # readable, one line per finding
+        self.assertNotIn("{'id'", brief2)                  # never a raw dict dump
         self.review("pass")
         self.h.tp("approve")
         self.assertEqual(self.h.state()["phase"], "EXECUTING")
@@ -136,6 +139,62 @@ class PlanReviewFlowTest(unittest.TestCase):
         self.assertIn("tp revise", res.text)
         self.h.tp("revise", "--feedback", "Drop the second article; keep it minimal.")
         self.assertEqual(self.h.state()["phase"], "PLANNING")
+
+    def test_revise_resets_the_round_allowance(self) -> None:
+        """The revise path must not dead-end: after the cap, the human's feedback restarts
+        planning, and the new plan gets the full round allowance again."""
+        for _ in range(2):
+            self.review("changes", findings=[{"id": "F1", "state": "missing", "requirement": "R1",
+                                              "issue": "Still wrong.", "fix": "Fix it."}])
+            self.h.tp("plan", "triage", "--accept-all")
+            plan = self.h.read_json("plan.json")
+            plan["tasks"][0]["title"] += " (revised)"
+            self.h.write_json("plan.json", plan)
+            self.h.tp("plan", "check")
+            self.h.tp("plan", "submit")
+        self.h.tp("plan", "review", expect=2)
+        self.h.tp("revise", "--feedback", "Rewrite it around the first article only.")
+        plan = self.h.read_json("plan.json")
+        plan["tasks"][0]["title"] = "Rewritten article"
+        self.h.write_json("plan.json", plan)
+        self.h.tp("plan", "check")
+        self.h.tp("plan", "submit")
+        out = self.h.tp("plan", "review").out          # the allowance was reset, not inherited
+        self.assertIn("round 1", out)
+        self.assertEqual(self.h.state()["plan_review"]["round"], 1)
+        self.review("pass")
+        self.h.tp("approve")
+        self.assertEqual(self.h.state()["phase"], "EXECUTING")
+
+    def test_a_malformed_finding_is_refused_not_crashed(self) -> None:
+        """A finding without its id or requirement is refused with a message that names the
+        gap — a KeyError crash would lose the round and the reviewer's context."""
+        h = self.h
+        h.tp("plan", "review")
+        rnd = h.state()["plan_review"]["round"]
+        h.write_json(f"runs/plan/result-review-{rnd}.json",
+                     {"review": "plan", "round": rnd, "verdict": "changes",
+                      "findings": [{"state": "missing", "issue": "T01 does not prove the request."}],
+                      "coverage": [{"requirement": "R1", "covered": True, "note": "T01"}],
+                      "observations": []})
+        res = h.tp("plan", "record", "--agent-id", "pr-1", expect=2)
+        self.assertIn("needs an `id`", res.text)
+        self.assertIn("names the requirement", res.text)
+        self.assertEqual(h.state()["plan_review"]["status"], "in_flight")  # the round is recoverable
+
+    def test_a_changes_verdict_with_no_findings_is_refused(self) -> None:
+        """'changes' with nothing named cannot become a pass through --accept-all: the verdict
+        is exactly as malformed as the finding that justifies it."""
+        h = self.h
+        h.tp("plan", "review")
+        rnd = h.state()["plan_review"]["round"]
+        h.write_json(f"runs/plan/result-review-{rnd}.json",
+                     {"review": "plan", "round": rnd, "verdict": "changes", "findings": [],
+                      "coverage": [{"requirement": "R1", "covered": True, "note": "T01"}],
+                      "observations": []})
+        res = h.tp("plan", "record", "--agent-id", "pr-1", expect=2)
+        self.assertIn("must name at least one finding", res.text)
+        self.assertEqual(h.state()["plan_review"]["status"], "in_flight")
 
     def test_the_reviewer_result_file_must_exist(self) -> None:
         self.h.tp("plan", "review")

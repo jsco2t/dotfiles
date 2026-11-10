@@ -196,6 +196,34 @@ class FusedBuildTest(unittest.TestCase):
         self.assertIn("never observed red", out)
         self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
 
+    def test_a_zero_error_log_is_not_red(self) -> None:
+        """A passing run's log that merely mentions '0 errors' is not a red observation — the
+        proof is a concrete failure marker, which a clean summary never contains."""
+        self.approve()
+        self.h.tp("dispatch", "T01")
+        (self.app / "test_calc.py").write_text(TEST_PY)
+        (self.h.run_dir("T01") / "red-build-0.log").write_text(
+            "...\nRan 3 tests\n\nOK\n\n0 errors, 0 warnings\nexit code 0\n")
+        (self.app / "calc.py").write_text("def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n")
+        self.h.result("T01", "build", changed=["test_calc.py", "calc.py"])
+        out = self.h.tp("record", "T01").out
+        self.assertIn("never observed red", out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
+
+    def test_the_exit_status_line_proves_red(self) -> None:
+        """The brief has the agent end the red log with its exit status — the one marker a
+        passing run's output cannot contain."""
+        self.approve()
+        self.h.tp("dispatch", "T01")
+        (self.app / "test_calc.py").write_text(TEST_PY)
+        (self.h.run_dir("T01") / "red-build-0.log").write_text(
+            "quiet runner: something did not add up\nexit 1\n")
+        (self.app / "calc.py").write_text("def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n")
+        self.h.result("T01", "build", changed=["test_calc.py", "calc.py"])
+        out = self.h.tp("record", "T01").out
+        self.assertIn("red observed: red-build-0.log", out)
+        self.assertIn("green", out)
+
     def test_an_implementation_that_stays_red_is_not_green(self) -> None:
         self.approve()
         out = self.build(implement=False)

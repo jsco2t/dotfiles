@@ -50,7 +50,12 @@ class Result:
 class Harness:
     """One workflow with a `kb` (write) and `src` (read) workspace."""
 
-    def __init__(self) -> None:
+    def __init__(self, legacy: bool = False) -> None:
+        # legacy: a workflow from before contract 2 (human approval, no ledger, no plan review).
+        self.legacy = legacy
+        # follow_on: accept, triage, resolve... dispatch what they unblock (the real behaviour).
+        # Older scenarios step by hand, so it is off unless a test turns it on.
+        self.follow_on = os.environ.get("TP_TEST_FOLLOW_ON") == "1"
         self.root = Path(tempfile.mkdtemp(prefix="tp-test-", dir=os.environ.get("TMPDIR")))
         self.kb = self.root / "kb"
         self.kb.mkdir()
@@ -71,8 +76,15 @@ class Harness:
     # --- CLI -------------------------------------------------------------
 
     def tp(self, *args: str, expect: Optional[int] = 0, wf: bool = True) -> Result:
+        if (args and args[0] == "approve" and expect == 0 and wf and not self.legacy
+                and self.state().get("phase") == "AWAITING_APPROVAL"
+                and self.state().get("plan_review", {}).get("status") != "pass"):
+            # Older scenarios approve by hand: on contract 2 the independent review passes first.
+            self.plan_review_pass()
+            args = ("approve",)
         cmd = [PY, str(TP)] + (["-w", str(self.wf)] if wf else []) + list(args)
-        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", TP_GUARD_DIR=str(self.root / "guard"))
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", TP_GUARD_DIR=str(self.root / "guard"),
+                   TP_FOLLOW_ON="1" if self.follow_on else "0")
         res = Result(subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120))
         if expect is not None and res.code != expect:
             raise AssertionError(f"tp {' '.join(args)} exited {res.code}, expected {expect}:\n{res.text}")
@@ -99,8 +111,13 @@ class Harness:
             ],
             "answers": [{"q": "What output do you want?", "a": "Markdown KB articles."}],
             "fix_tasks": {"allow": 0, "answer": "No, ask me every time."},
+            # The suite's code-flow tests exercise the two-agent flow; fused rounds have their own.
+            "split_tests": True,
         }
         base.update(over)
+        if "requirements" not in over and not self.legacy:
+            base["requirements"] = [{"id": "R1", "text": "A KB for the calc repo", "source": "Build a KB for the calc repo",
+                                     "deliverables": [d["id"] for d in base.get("deliverables", [])]}]
         return base
 
     def task(self, tid: str, path: str, **over: Any) -> Dict[str, Any]:
@@ -111,6 +128,8 @@ class Harness:
             "acceptance": ["Explains what Add does, citing src path:line."],
             "checks": ["docs"], "estimate_min": 15, "depends_on": [],
         }
+        if not self.legacy:
+            base["requirements"] = ["R1"]
         base.update(over)
         return base
 
@@ -128,7 +147,14 @@ class Harness:
         base.update(over)
         return base
 
-    def write_json(self, name: str, data: Dict[str, Any]) -> None:
+    def write_json(self, name: str, data: Dict[str, Any], cite: bool = True) -> None:
+        if cite and not self.legacy and name in ("plan.json", "plan-amend.json") and isinstance(data, dict):
+            # Contract 2 plans cite the scope's requirements; tests that build tasks by hand get the
+            # harness's one requirement unless they say otherwise (cite=False).
+            data = copy.deepcopy(data)
+            for t in data.get("tasks", []):
+                if isinstance(t, dict) and "requirements" not in t:
+                    t["requirements"] = ["R1"]
         (self.wf / name).write_text(json.dumps(data, indent=2))
 
     def read_json(self, name: str) -> Any:
@@ -146,6 +172,10 @@ class Harness:
             args += ["--budget", str(budget)]
         out = self.tp(*args, wf=False).out
         self.wf = Path(out.splitlines()[0].split("workflow: ", 1)[1])
+        if self.legacy:
+            st = self.state()
+            st.pop("contract", None)
+            (self.wf / ".tp" / "state.json").write_text(json.dumps(st))
 
     def confirmed(self, **scope_over: Any) -> None:
         self.init()
@@ -158,7 +188,27 @@ class Harness:
         self.write_json("plan.json", plan or self.plan())
         self.tp("plan", "check")
         self.tp("plan", "submit")
-        self.tp("approve", "--answer", "approve")
+        if self.legacy:
+            self.tp("approve", "--answer", "approve")
+        else:
+            self.plan_review_pass()
+            self.tp("approve")
+
+    def plan_review_pass(self, verdict: str = "pass", findings: Optional[List[Dict[str, Any]]] = None,
+                         coverage: Optional[List[Dict[str, Any]]] = None, record: bool = True) -> Result:
+        """Simulate the independent plan reviewer: dispatch it, write its result, record it."""
+        if self.state().get("plan_review", {}).get("status") != "in_flight":
+            self.tp("plan", "review")
+        rnd = self.state()["plan_review"]["round"]
+        reqs = self.read_json("scope.json").get("requirements", [])
+        cov = coverage if coverage is not None else [
+            {"requirement": r["id"], "covered": True, "tasks": ["T01"], "note": "T01's first criterion"} for r in reqs]
+        d = self.wf / "runs" / "plan"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"result-review-{rnd}.json").write_text(json.dumps(
+            {"review": "plan", "round": rnd, "verdict": verdict, "findings": findings or [], "coverage": cov,
+             "observations": []}))
+        return self.tp("plan", "record", "--agent-id", "plan-rev-1", expect=0 if record else None)
 
     # --- simulated agents ----------------------------------------------------
 
@@ -171,7 +221,7 @@ class Harness:
                 "changed": extra.pop("changed", []), "noticed": extra.pop("noticed", []),
                 "questions": extra.pop("questions", [])}
         acceptance = extra.pop("acceptance", "auto")  # None: the agent left it out
-        if acceptance == "auto" and status == "done" and step in ("author", "impl", "fix"):
+        if acceptance == "auto" and status == "done" and step in ("author", "impl", "fix", "build"):
             # A compliant agent: one piece of evidence per Done-when item of the task.
             task = next((t for t in self.read_json("plan.json")["tasks"] if t["id"] == tid), {})
             acceptance = [{"criterion": i, "evidence": f"{tid} criterion {i}: shown in the deliverable"}

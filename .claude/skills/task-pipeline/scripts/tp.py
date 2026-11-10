@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tp — the /task-pipeline state CLI. The manager session runs it; agents never do.
+"""tp — the /task-pipeline state CLI. The manager session runs it; agents run only `tp red`.
 
 Every workflow command takes `-w <workflow dir>`. `tp next` always says what to do next.
 Refusals print `ERROR: ...` and exit 2."""
@@ -16,7 +16,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pipeline import docscheck, issuesurvey, publish, research, review, run, schemas, survey  # noqa: E402
+from pipeline import docscheck, issuesurvey, publish, questions, research, review, run, schemas, survey  # noqa: E402
 from pipeline import plan as planmod  # noqa: E402
 from pipeline import scope as scopemod  # noqa: E402
 from pipeline.common import TPError, Workflow, now_iso  # noqa: E402
@@ -46,13 +46,16 @@ def cmd_init(location: Path, args: argparse.Namespace) -> str:
     wf = Workflow(root)
     wf.meta.mkdir(parents=True)
     shutil.copyfile(args.request_file, wf.root / "request.md")
-    state = {"version": 1, "title": args.title, "phase": "SCOPING", "created": now_iso(),
+    # contract 2: questions settled before the plan, a requirements ledger, an independent plan
+    # review instead of the human's approval, and fused code rounds. Older workflows keep theirs.
+    state = {"version": 1, "contract": 2, "title": args.title, "phase": "SCOPING", "created": now_iso(),
              "budget_minutes": args.budget, "tasks": {}, "recon": {}, "in_flight": {}}
     wf.save(state)
     wf.event("init", title=args.title, location=str(location))
     return (f"workflow: {wf.root}\n"
             f"Created under {location} (SCOPING). Use `-w {wf.root}` for every later command.\n"
-            f"Next: `tp -w {wf.root} survey <repo> --name <ws>` for each source repo, then draft scope.json.")
+            f"Next: `tp -w {wf.root} survey <repo> --name <ws>` for each source repo (and `survey-issue` for a "
+            "named ticket), then put what is unclear to the human in one round (`tp ask`), and draft scope.json.")
 
 
 def cmd_survey(wf: Workflow, args: argparse.Namespace) -> str:
@@ -167,6 +170,17 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--reason", action="append", default=[],
                    help="why: one reason for every --dismiss, or one per --dismiss flag, in the same order")
     s.add_argument("--assign", action="append", default=[], help="F#=T## for a finding no task path matched")
+    s.add_argument("--route", action="append", default=[],
+                   help="F#=impl|tests-green|tests-red: who fixes it, when the automatic routing is wrong")
+
+    s = sub.add_parser("ask", help="record questions for the human (timestamped; parks only what they are about)")
+    s.add_argument("--question", action="append", required=True, help="one question (repeat for several)")
+    s.add_argument("--about", help="the task or review session it is about (T05, B1/code-reviewer)")
+    s = sub.add_parser("answer", help="record the answer to a question, verbatim")
+    s.add_argument("id", help="Q#")
+    s.add_argument("--answer", required=True)
+    s.add_argument("--by", choices=["human", "manager"], default="human",
+                   help="manager: the evidence (scope, plan, research) already settles it")
 
     s = sub.add_parser("halt", aliases=["hault"], help="stop at the next clean point and record where")
     s.add_argument("--reason", default="halt requested by the human")
@@ -174,26 +188,33 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--answer", required=True)
 
     s = sub.add_parser("schema", help="print an example of a workflow file")
-    s.add_argument("name", choices=["scope", "plan", "research", "result", "review"])
+    s.add_argument("name", choices=["scope", "plan", "research", "result", "review", "plan-review"])
 
-    s = sub.add_parser("plan", help="check or submit plan.json; amend it mid-run (plan-amend.json)")
-    s.add_argument("what", choices=["check", "submit", "amend"])
+    s = sub.add_parser("plan", help="check or submit plan.json; its independent review (review, record, triage); "
+                                     "amend it mid-run (plan-amend.json)")
+    s.add_argument("what", choices=["check", "submit", "amend", "review", "record", "triage"])
+    s.add_argument("--agent-id", help="record: the plan reviewer's agent id")
+    s.add_argument("--accept-all", action="store_true", help="triage: accept every finding not dismissed")
+    s.add_argument("--dismiss", action="append", default=[], metavar='F#="reason"',
+                   help="triage: overrule one finding, with the reason the reviewer will weigh next round")
+    s.add_argument("--reason", action="append", default=[],
+                   help="triage: the reason for each bare --dismiss F# (one for all, or one each, in order)")
     s.add_argument("--answer", help="amend: the human's agreement, verbatim (without it, amend only checks)")
     s.add_argument("--delegated", action="store_true", help="amend: apply a checked draft inside the human's standing "
                                                             "fix-task delegation (scope fix_tasks), without a question")
     s.add_argument("--note", help="amend --delegated: what is wrong and why it needs fixing, in plain words")
 
     s = sub.add_parser("widen", help="add a file the same deliverable needs to one task's write set while EXECUTING, "
-                                     "even after acceptance (two per task on your say-so; more takes the human)")
+                                     "even after acceptance (a test file also joins its tests_paths)")
     s.add_argument("id")
     s.add_argument("--path", action="append", required=True, help="one file to add (repeatable)")
     s.add_argument("--reason", required=True, help="the finding or correction that needs it")
-    s.add_argument("--answer", help="the human's words, verbatim: needed past two files for the task")
-    s = sub.add_parser("rebaseline-tests", help="accept a code task's tests as they are now, on the human's say-so "
-                                                "(a test change made outside the test step that the human approved)")
+    s.add_argument("--answer", help="the human's words, verbatim, when they decided it")
+    s = sub.add_parser("rebaseline-tests", help="accept a code task's tests as they are now: an honest test "
+                                                "correction (the old baseline is kept for the final review)")
     s.add_argument("id")
-    s.add_argument("--answer", required=True, help="the human's words, verbatim")
-    s.add_argument("--by", choices=["human", "manager"], required=True, help="only the human may move a test baseline")
+    s.add_argument("--answer", required=True, help="what was wrong with the old tests (or the human's words)")
+    s.add_argument("--by", choices=["human", "manager"], required=True)
     s = sub.add_parser("budget", help="the time budget: reporting metadata that gates nothing")
     bs = s.add_subparsers(dest="what", required=True)
     be = bs.add_parser("extend", help="raise the whole-job budget (your re-estimate; no human approval needed)")
@@ -206,8 +227,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--summary", required=True, help="what happened, and the evidence")
     sub.add_parser("baseline", help="record which final checks already fail before the run (right after approval)")
 
-    s = sub.add_parser("approve", help="record the human's approval")
-    s.add_argument("--answer", required=True)
+    s = sub.add_parser("approve", help="enter execution: after a passing independent plan review (new runs), or "
+                                       "with the human's approval (runs from before it)")
+    s.add_argument("--answer", help="the human's words, verbatim (required only for runs from before plan review)")
     s = sub.add_parser("revise", help="record the human's revision request")
     s.add_argument("--feedback", required=True)
     s.add_argument("--scope", action="store_true", help="the scope itself changes (back to SCOPING)")
@@ -227,11 +249,21 @@ def parser() -> argparse.ArgumentParser:
                                        "with the human's words, the post itself, then a read-back")
     s.add_argument("id")
     s.add_argument("--answer", help="the human's OK, verbatim, given after they saw the dry run")
+    s = sub.add_parser("red", help="(the code author, inside a fused build round) run the task's tests after writing "
+                                   "them and before any production code: the pipeline records red")
+    s.add_argument("id")
+    s = sub.add_parser("head-moved", help="declare that a workspace's HEAD moved under the agents in flight (the "
+                                          "human rebased or committed): its commits are not those agents' edits")
+    s.add_argument("workspace")
+    s.add_argument("--reason", required=True)
+    s.add_argument("--answer", required=True, help="the human's words: they moved HEAD")
     s = sub.add_parser("recheck", help="rerun a sibling-waiting task's tests and checks once its siblings land")
     s.add_argument("id")
-    s = sub.add_parser("accept", help="accept a task after your fact check")
-    s.add_argument("id")
+    s = sub.add_parser("accept", help="accept task(s) after your fact check — one call takes the whole wave")
+    s.add_argument("ids", nargs="+", metavar="id")
     s.add_argument("--note", required=True)
+    s.add_argument("--override", action="store_true",
+                   help="accept although a gate failed it: the note gives the evidence the gate is wrong")
     s = sub.add_parser("reject", help="reject a task after your fact check (a fix round)")
     s.add_argument("id")
     s.add_argument("--reason", required=True)
@@ -294,6 +326,13 @@ def cmd_show(wf: Workflow, tid: str, part) -> str:
     return f"{tid} {data.get('step')} {data.get('status')}: {data.get('summary')}"
 
 
+def _then(wf: Workflow, out: str) -> str:
+    """A state change, then the calls it makes ready: every command that can unblock work ends in
+    what to send next, so the manager never needs `tp next` + `tp dispatch` after it."""
+    rest = run.follow_on(wf)
+    return out + ("\n\n" + rest if rest else "")
+
+
 def dispatch(args: argparse.Namespace) -> str:
     if args.cmd == "roster":
         return scopemod.cmd_suggest([k.strip() for k in args.kinds.split(",") if k.strip()])
@@ -320,9 +359,13 @@ def dispatch(args: argparse.Namespace) -> str:
         return run.cmd_closeout(wf, args.item, args.cls, args.note, args.decide, args.answer, args.ask,
                                 args.items, args.all)
     if c == "widen":
-        return planmod.cmd_widen(wf, args.id, args.path, args.reason, args.answer)
+        return _then(wf, planmod.cmd_widen(wf, args.id, args.path, args.reason, args.answer))
     if c == "rebaseline-tests":
-        return run.cmd_rebaseline_tests(wf, args.id, args.answer, args.by)
+        return _then(wf, run.cmd_rebaseline_tests(wf, args.id, args.answer, args.by))
+    if c == "ask":
+        return questions.cmd_ask(wf, args.question, args.about)
+    if c == "answer":
+        return _then(wf, questions.cmd_answer(wf, args.id, args.answer, args.by))
     if c == "budget":
         return scopemod.cmd_budget_extend(wf, args.minutes, args.answer, args.note)
     if c == "lost":
@@ -353,14 +396,22 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "show":
         return cmd_show(wf, args.id, args.part)
     if c == "triage":
-        return review.cmd_triage(wf, args.id, args.accept_all, args.dismiss, args.reason, args.assign)
+        return _then(wf, review.cmd_triage(wf, args.id, args.accept_all, args.dismiss, args.reason, args.assign,
+                                           args.route))
     if c in ("halt", "hault"):
         return run.cmd_halt(wf, args.reason)
     if c == "resume":
         return run.cmd_resume(wf, args.answer)
     if c == "plan":
         if args.what == "amend":
-            return planmod.cmd_amend(wf, args.answer, args.delegated, args.note)
+            out = planmod.cmd_amend(wf, args.answer, args.delegated, args.note)
+            return _then(wf, out) if out.startswith("amended") else out
+        if args.what == "review":
+            return planmod.cmd_plan_review(wf)
+        if args.what == "record":
+            return planmod.cmd_plan_record(wf, args.agent_id)
+        if args.what == "triage":
+            return planmod.cmd_plan_triage(wf, args.accept_all, args.dismiss, args.reason)
         return planmod.cmd_check(wf) if args.what == "check" else planmod.cmd_submit(wf)
     if c == "approve":
         return planmod.cmd_approve(wf, args.answer)
@@ -384,20 +435,26 @@ def dispatch(args: argparse.Namespace) -> str:
         return publish.cmd_publish(wf, args.id, args.answer)
     if c == "sample":
         return run.cmd_sample(wf, args.id)
+    if c == "head-moved":
+        return run.cmd_head_moved(wf, args.workspace, args.reason, args.answer)
+    if c == "red":
+        return run.cmd_red(wf, args.id)
     if c == "recheck":
-        return run.cmd_recheck(wf, args.id)
+        return _then(wf, run.cmd_recheck(wf, args.id))
     if c == "accept":
-        return run.cmd_accept(wf, args.id, args.note)
+        return _then(wf, run.cmd_accept(wf, args.ids, args.note, args.override))
     if c == "reject":
-        return run.cmd_reject(wf, args.id, args.reason)
+        return _then(wf, run.cmd_reject(wf, args.id, args.reason))
     if c == "exception":
         return run.cmd_exception(wf, args.summary, args.task)
     if c == "resolve":
         if args.review:
             with wf.locked():
-                return review.resolve(wf, wf.load(), args.review, args.action, args.answer, args.by, args.force,
-                                      [x for x in args.findings.split(",") if x], args.assign)
-        return run.cmd_resolve(wf, args.task, args.action, args.answer, args.by)
+                out = review.resolve(wf, wf.load(), args.review, args.action, args.answer, args.by, args.force,
+                                     [x for x in args.findings.split(",") if x], args.assign)
+            return _then(wf, out)
+        out = run.cmd_resolve(wf, args.task, args.action, args.answer, args.by)
+        return out if "back in flight" in out else _then(wf, out)
     if c == "note":
         wf.load()
         wf.noticed("manager", args.text)

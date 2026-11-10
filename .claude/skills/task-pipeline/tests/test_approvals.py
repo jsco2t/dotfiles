@@ -24,7 +24,7 @@ def draft(h: Harness) -> dict:
 
 
 def write(h: Harness, name: str, data: dict) -> None:
-    (h.wf / name).write_text(json.dumps(data, indent=2))
+    h.write_json(name, data)
 
 
 class OneAnswerPerAmendmentTest(unittest.TestCase):
@@ -405,6 +405,19 @@ class FixTaskDelegationTest(unittest.TestCase):
         h.tp("plan", "amend")
         self.assertIn("changed T01", h.tp("plan", "amend", "--delegated", "--note", "tweak T01 too",
                                           expect=2).text)
+
+    def test_reordering_unstarted_work_is_the_managers_call(self) -> None:
+        # Ordering-only amendments cost a real run a dozen questions; scheduling is not scope.
+        h = self.h
+        self.approve()
+        d = draft(h)
+        d["tasks"][0]["estimate_min"] = 20
+        d["tasks"][0]["sources"] = d["tasks"][0].get("sources", []) + ["src:README.md"]
+        d["tasks"].append(self.fix("T02", "a.md"))
+        write(h, "plan-amend.json", d)
+        h.tp("plan", "amend")
+        out = h.tp("plan", "amend", "--delegated", "--note", "re-estimate T01 and add the small fix").out
+        self.assertIn("amended under the standing delegation", out)
 
     def test_no_delegation_means_every_fix_is_asked(self) -> None:
         h = self.h

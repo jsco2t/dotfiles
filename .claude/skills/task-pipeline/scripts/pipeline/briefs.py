@@ -102,8 +102,7 @@ def _task_body(task: Dict[str, Any], ctx: Dict[str, Any]) -> List[str]:
     conventions = ctx.get("conventions", [])
     out += ["", "## Start from", ""] + [f"- `{c}` (conventions for every task: read first)" for c in conventions]
     out += [f"- `{s}`" for s in ctx["sources"] if s not in conventions]
-    out += ["", "Read anything in the read-only workspaces that an acceptance criterion needs (callers, "
-            "tests, docs); the fence is on what you write, not on what you read."]
+    out += ["", "Read anything in the read-only workspaces a criterion needs: the fence is on writes, not reads."]
     if ctx.get("logs"):
         out += ["", "Logs the pipeline already produced (read them; do not re-run these commands): "
                 + "; ".join(f"`{p}`" for p in ctx["logs"]) + "."]
@@ -119,7 +118,8 @@ def author(task: Dict[str, Any], step: str, rnd: int, ctx: Dict[str, Any], resul
     box = (_estimate(f"{task['estimate_min']} min") + " Do the whole task. If it turns out bigger than its brief "
            "(files, behaviour, or topics the brief does not name), stop and hand back `blocked` saying what — "
            "never cut it down to fit, and never grow it.")
-    title = {"author": "author", "tests": "tests first", "impl": "implementation"}[step]
+    title = {"author": "author", "tests": "tests first", "impl": "implementation",
+             "build": "tests first, then the implementation"}[step]
     out = [f"# /task-pipeline brief — {task['id']} {title}", "", HEADER.format(box=box), ""]
     if step == "tests":
         mode = task.get("test_mode", "red")
@@ -130,6 +130,8 @@ def author(task: Dict[str, Any], step: str, rnd: int, ctx: Dict[str, Any], resul
                 + f"`{task['test_cmd']}`. Touch no file outside the test paths — no production code, no "
                 "stubs, no 'temporary' implementations: the red check fails the step for tests that already "
                 "pass, and the implementation is the next agent's step.", ""]
+    elif step == "build":
+        out += _build_step(task, ctx)
     elif step == "impl":
         out += ["## This step: implementation", "",
                 f"Make the tests pass: `{task['test_cmd']}` must succeed. Do not edit the tests "
@@ -139,6 +141,27 @@ def author(task: Dict[str, Any], step: str, rnd: int, ctx: Dict[str, Any], resul
         out += INTEGRATION
     out += _task_body(task, ctx) + _style()
     return "\n".join(out + _handback(result, RESULT_SCHEMA.format(tid=task["id"], step=step), EVIDENCE_NOTE)) + "\n"
+
+
+def _build_step(task: Dict[str, Any], ctx: Dict[str, Any]) -> List[str]:
+    """One fused round: tests first, observed by the pipeline, then the implementation."""
+    tests = ", ".join(f"`{p}`" for p in ctx["tests_paths"])
+    mode = task.get("test_mode", "red")
+    if mode == "existing":
+        return ["## This step: change the code; the existing tests prove it", "",
+                f"The current tests ({tests}) already prove this task's criteria: write no new tests unless a "
+                f"criterion is unproven. Make the change and keep `{task['test_cmd']}` green. Never weaken or "
+                "delete a test to make the change pass; tests of code this task removes go with it (say so in "
+                "`summary`).", ""]
+    return ["## This step: tests first, then the implementation — one round", "",
+            f"1. Write the tests in {tests}. Touch no production file yet.",
+            f"2. Run `{ctx['red_cmd']}`. The pipeline runs `{task['test_cmd']}` and records it: "
+            + ("the tests must **fail**, for the reason the task names. A suite that cannot load (an import, "
+               "fixture, or build error unrelated to the missing behaviour) is not red: fix it and run again."
+               if mode == "red" else "the tests must **pass** against today's code (they pin its behaviour).")
+            + " It refuses while any production file has changed.",
+            f"3. Implement until `{task['test_cmd']}` passes. You may add tests; never loosen or remove one you "
+            "wrote. If a test proves wrong, fix it and say why in `summary` — the review checks it.", ""]
 
 
 def _fix_step(ctx: Dict[str, Any], task: Dict[str, Any]) -> List[str]:
@@ -272,6 +295,10 @@ def batch_review(bid: str, reviewer: str, tasks: List[Dict[str, Any]], ctx: Dict
         out += [f"  - done when: {a}" for a in t.get("acceptance", [])]
     if ctx.get("decisions"):
         out += [""] + _decisions(ctx)[:-1]
+    if ctx.get("manager_calls"):
+        out += ["", "## Gates the manager settled — judge each one", "",
+                "No human saw these. For each, decide whether it is sound; one that loosens a test or hides a "
+                "defect is a blocking finding on that task.", ""] + [f"- {c}" for c in ctx["manager_calls"]]
     out += _conventions_line(ctx)
     out += ["", "Check claims against: " + "; ".join(f"`{s}`" for s in ctx["sources"]) + ".", "",
             "Do not edit any file. Give each finding the workspace-relative path and line it is about, so the "
@@ -308,3 +335,67 @@ def dispatch_line(agent: str, desc: str, text: str, agent_id: Optional[str], mod
     extra = f", model={json.dumps(model)}" if model else ""
     return (f"Agent(subagent_type={json.dumps(agent)}, description={json.dumps(desc)}{extra}, "
             f"prompt={json.dumps(text)})")
+
+
+PLAN_REVIEW_SCHEMA = ('{{"review": "plan", "round": {rnd}, "verdict": "pass | changes", '
+                      '"findings": [{{"id": "F1", "state": "missing | narrowed | wrong | unnecessary | infeasible | '
+                      'unresolved", "requirement": "<R# or the request line it is about>", '
+                      '"issue": "<complete sentence: what the plan gets wrong and what that would ship>", '
+                      '"fix": "<what would make the plan right>"}}], '
+                      '"coverage": [{{"requirement": "R1", "covered": true, "tasks": ["T01"], '
+                      '"note": "<the criterion that fails if R1 is unmet>"}}], '
+                      '"observations": ["<worthwhile and non-blocking>"]}}')
+
+
+def plan_review(rnd: int, ctx: Dict[str, Any], result: Path) -> str:
+    """The independent plan reviewer's brief: the plan against the request, the human's answers, and
+    the requirements ledger, bound to one plan revision. Its verdict replaces the human's approval."""
+    out = [f"# /task-pipeline plan review — round {rnd}", "",
+           HEADER.format(box=_estimate("10 min") + " Review the whole plan."), "",
+           "## What you review", "",
+           f"The delivery plan `{ctx['plan_md']}` (readable) and `{ctx['plan_json']}` (exact), against the request "
+           f"below, the human's answers, and the settled scope `{ctx['scope_md']}`. Your verdict is the only gate "
+           "between this plan and its execution: nobody approves it after you, and execution runs without the "
+           "human. You did not write the plan and will not carry it out. Edit nothing.", "",
+           "## The request, verbatim", "", "```text", str(ctx["request"]).strip(), "```", ""]
+    if ctx.get("issues"):
+        out += ["Issue texts surveyed for this run (their acceptance criteria are requirements too): "
+                + "; ".join(f"`{p}`" for p in ctx["issues"]) + ".", ""]
+    if ctx.get("requirements"):
+        out += ["## Requirements ledger (every one must be covered)", ""]
+        out += [f"- **{r['id']}** — {r.get('text', '')}" + (f" — source: “{r['source']}”" if r.get("source") else "")
+                for r in ctx["requirements"]] + [""]
+    if ctx.get("answers"):
+        out += ["## Settled with the human (these are not open questions)", ""]
+        out += [f"- {a}" for a in ctx["answers"]] + [""]
+    if ctx.get("noticed"):
+        out += ["## Noticed during planning (not in the plan)", ""] + [f"- {n}" for n in ctx["noticed"]] + [""]
+    if ctx.get("prior"):
+        out += ["## Your previous round", "",
+                "The plan was revised since. Check each earlier finding is resolved, then review the whole plan "
+                "again: a revision can open a new gap. Where the manager dismissed a finding, its reason is shown; "
+                "keep the finding only if the reason does not hold.", ""] + [f"- {p}" for p in ctx["prior"]] + [""]
+    out += ["## Check, in order", "",
+            "1. **Coverage.** Each requirement is served by a task whose acceptance criteria would fail if it were "
+            "unmet. A task title is not coverage.",
+            "2. **Narrowing.** Read each requirement's source words (and the issue's acceptance text) against the "
+            "criteria meant to prove it. Fewer cases, nodes, platforms, or callers than the words say is a "
+            "`narrowed` finding — unless a settled answer above allows it.",
+            "3. **Prohibitions.** Anything the request says not to do (\"do not defer\", \"no new tickets\", \"test "
+            "first\"): a task, deferral, or follow-up ticket that does it is `wrong`.",
+            "4. **Missing work.** What the request plainly needs that no task does: verification, integration, the "
+            "delivery destination it names.",
+            "5. **Unnecessary work.** A task no requirement needs, however good an idea, is `unnecessary`.",
+            "6. **Feasible verification.** Each code task's `test_cmd` can run in its workspace; `test_mode` fits "
+            "(red: new behaviour; pin: preserve behaviour; existing: current tests already prove it — removals, "
+            "ports, refactors). Criteria without a mechanical check are concrete enough to judge by reading.",
+            "7. **Structure.** Dependencies are honest (a task that needs another's output says so); parallel "
+            "tasks write disjoint files; a shared file has one owner.",
+            "8. **Unresolved.** A decision the plan depends on that nobody has made. Name it; the manager asks the "
+            "human before execution, so it must surface now.", "",
+            "Ground every finding in a requirement, a request line, or a settled answer you can quote; anything "
+            "else is an observation. Finding nothing is a valid, expected outcome: say so and pass the plan.", ""]
+    out += _style()
+    note = (f"`coverage` has one entry per requirement. `pass` only with every requirement covered and no "
+            "findings; `changes` with at least one finding.")
+    return "\n".join(out + _handback(result, PLAN_REVIEW_SCHEMA.format(rnd=rnd), note)) + "\n"

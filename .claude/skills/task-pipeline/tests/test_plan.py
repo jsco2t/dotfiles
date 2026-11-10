@@ -53,9 +53,10 @@ class PlanCheckTest(unittest.TestCase):
         self.assertIn("brief", text)
         self.assertIn("acceptance", text)
 
-    def test_the_43_task_stratum_plan_is_refused(self) -> None:
-        # Regression: a 43-task plan for a KB the user expected in about 3 hours.
-        tasks = [self.h.task(f"T{i:02d}", f"area{i}/article.md") for i in range(1, 44)]
+    def test_a_plan_past_the_task_cap_is_refused(self) -> None:
+        # The cap is a sanity limit (80): a 30-task cap once split one job into two runs, and the
+        # second redid a third of the first.
+        tasks = [self.h.task(f"T{i:02d}", f"area{i}/article.md") for i in range(1, 82)]
         text = self.check(self.h.plan(tasks), expect=2).text
         self.assertIn("tasks", text)
         self.assertNotIn("budget", text)                  # refused for its size, never for time

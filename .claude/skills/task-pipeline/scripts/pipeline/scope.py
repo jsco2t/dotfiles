@@ -120,7 +120,67 @@ def is_code_file(path: str) -> bool:
     return Path(str(path)).suffix.lower() in roles().get("code_extensions", [])
 
 
-def validate(scope: Dict[str, Any], require_fix_tasks: bool = True) -> List[str]:
+def requirement_errors(scope: Dict[str, Any]) -> List[str]:
+    """The requirements ledger (new runs): every distinct requested outcome, format, destination,
+    and constraint, each an R# with the request's (or ticket's) own words and the deliverables it
+    maps to. It is what the plan must cover, the plan review verifies, and the report re-checks."""
+    reqs = scope.get("requirements")
+    if not isinstance(reqs, list) or not reqs:
+        return ["scope.json needs `requirements`: the ledger of every distinct requested outcome, format, destination "
+                "and constraint — [{\"id\": \"R1\", \"text\": \"...\", \"source\": \"<the request's or ticket's own "
+                "words>\", \"deliverables\": [\"D1\"]}] (`tp schema scope`)."]
+    errs: List[str] = []
+    known = {d.get("id") for d in scope.get("deliverables", []) if isinstance(d, dict)}
+    seen: Set[str] = set()
+    for r in reqs:
+        rid = str(r.get("id", "")) if isinstance(r, dict) else ""
+        if not re.fullmatch(r"R\d+", rid) or rid in seen:
+            errs.append(f"requirement id {rid!r} must be unique and look like R1.")
+            continue
+        seen.add(rid)
+        if not str(r.get("text", "")).strip() or not r.get("deliverables"):
+            errs.append(f"{rid}: needs `text` and the `deliverables` it maps to.")
+            continue
+        unknown = [d for d in r["deliverables"] if d not in known]
+        if unknown:
+            errs.append(f"{rid}: maps to unknown deliverables {', '.join(unknown)}.")
+    return errs
+
+
+def _norm(text: str) -> str:
+    return " ".join(re.sub(r"[*_`>#\-]+", " ", str(text)).lower().split())
+
+
+def requirement_warnings(scope: Dict[str, Any], wf_root: Path) -> List[str]:
+    """A requirement whose `source` is not the requester's own words, as found in request.md, a
+    surveyed issue, or an answered question: a ledger written in the planner's words is where
+    narrowing creeps in (a real run turned "per managed node" into "its own node")."""
+    texts = []
+    for f in [wf_root / "request.md", wf_root / "clarifications.md"] + sorted((wf_root / "survey").glob("issue-*.json")):
+        if f.is_file():
+            texts.append(_norm(f.read_text(errors="replace").replace("\\n", " ")))
+    corpus = " ".join(texts)
+    out = []
+    known = [d.get("id") for d in scope.get("deliverables", []) if isinstance(d, dict)]
+    mapped = {d for r in scope.get("requirements") or [] if isinstance(r, dict) for d in r.get("deliverables", [])}
+    unmapped = [d for d in known if d not in mapped]
+    if unmapped:
+        out.append(f"{', '.join(unmapped)}: no requirement asks for it — map it to the requirement it serves, or "
+                   "drop it (the plan review flags work nobody requested).")
+    for r in scope.get("requirements") or []:
+        if not isinstance(r, dict):
+            continue
+        src = str(r.get("source") or "").strip()
+        if not src:
+            out.append(f"{r.get('id')}: no `source` — quote the request's or ticket's own words for it, so the plan "
+                       "review can hold the plan to them.")
+        elif corpus and _norm(src) not in corpus:
+            out.append(f"{r.get('id')}: its source is not found verbatim in request.md, a surveyed issue, or "
+                       "clarifications.md — quote the requester's words, not a paraphrase.")
+    return out
+
+
+def validate(scope: Dict[str, Any], require_fix_tasks: bool = True, contract: int = 1) -> List[str]:
     """require_fix_tasks: False for a scope confirmed before the fix-task question existed — a
     revision or amendment of it must not force that question on the human mid-run (it allows
     no delegated fix tasks)."""
@@ -231,6 +291,8 @@ def validate(scope: Dict[str, Any], require_fix_tasks: bool = True) -> List[str]
     if require_fix_tasks or "fix_tasks" in scope:
         errs += _fix_task_errors(scope)
     errs += _limits_and_ignore_errors(scope)
+    if contract >= 2:
+        errs += requirement_errors(scope)
     return errs
 
 
@@ -279,6 +341,11 @@ def render(scope: Dict[str, Any]) -> str:
             f"**Review:** {scope['review']}.", _fix_tasks_line(scope), "", "## Deliverables"]
     out += [f"- {d['id']} ({d['kind']}): {d['what']}" + (f" — in `{d['where']}`" if d.get("where") else "")
             for d in scope["deliverables"]]
+    if scope.get("requirements"):
+        out += ["", "## Requirements (what the plan must prove)"]
+        out += [f"- **{r['id']}** — {r['text']} (→ {', '.join(r.get('deliverables', []))})"
+                + (f"  \n  _Source:_ “{r['source']}”" if r.get("source") else "")
+                for r in scope["requirements"] if isinstance(r, dict)]
     if scope.get("terms"):
         out += ["", "## Significant terms"]
         out += [f"- **{t['term']}** — {t['means']}" + (f" Not: {t['not']}" if t.get("not") else "")
@@ -316,7 +383,8 @@ def cmd_check(wf: Workflow) -> str:
         raise TPError(f"Scope is checked in SCOPING; the workflow is {state['phase']}.",
                       "To change a confirmed scope, the human must ask: `tp revise --scope --feedback ...`.")
     scope = load_scope(wf)
-    errs = validate(scope, require_fix_tasks=not state.get("scope_confirmed"))
+    contract = int(state.get("contract", 1))
+    errs = validate(scope, require_fix_tasks=not state.get("scope_confirmed"), contract=contract)
     if errs:
         raise TPError(*errs)
     (wf.root / "scope.md").write_text(render(scope))
@@ -324,10 +392,11 @@ def cmd_check(wf: Workflow) -> str:
     state["budget_minutes"] = scope.get("budget_minutes")
     wf.save(state)
     wf.event("scope_check")
-    return ("".join(f"WARN: {w}\n" for w in warnings(scope)) + f"scope ok — rendered {wf.root / 'scope.md'}.\n"
-            "Present it to the human and ask them to confirm (AskUserQuestion); the budgets in it are your "
-            "own estimates, shown for information, not for approval. On yes: "
-            "`tp scope confirm --answer \"<their words>\"`.")
+    warns = warnings(scope) + (requirement_warnings(scope, wf.root) if contract >= 2 else [])
+    return ("".join(f"WARN: {w}\n" for w in warns) + f"scope ok — rendered {wf.root / 'scope.md'}.\n"
+            "Show the human its key lines (deliverables, requirements, participants, fix tasks) and confirm "
+            "it in the same question round as anything still open; the budgets are your own estimates, shown "
+            "for information, not for approval. On yes: `tp scope confirm --answer \"<their words>\"`.")
 
 
 def cmd_confirm(wf: Workflow, answer: str) -> str:

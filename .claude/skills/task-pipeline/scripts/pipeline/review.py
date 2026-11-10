@@ -221,6 +221,7 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
                    whole_batch=[t["id"] for t in tasks] == [t["id"] for t in batch])
     ctx["sources"] = [w["path"] for w in scopemod.workspaces(scope).values()] or ["the deliverables' own sources"]
     ctx["decisions"] = run.decision_lines(state, [t["id"] for t in tasks])  # so the reviewer does not flag them
+    ctx["manager_calls"] = run.manager_calls(state, [t["id"] for t in tasks])
     ctx["conventions"] = [str(p) for p in planmod.conventions(plan, scope, wf.root)]
     ctx["lenses"] = _lens_texts(s.get("lenses") or [])
     ctx["full_floor"], ctx["near_floor"] = limit("review_full_finding_floor"), limit("review_near_miss_floor")
@@ -413,7 +414,7 @@ def _dismissals(dismiss: List[str], reasons: List[str]) -> Dict[str, str]:
 
 
 def cmd_triage(wf: Workflow, sid: str, accept_all: bool, dismiss_flags: List[str], reasons: Any,
-               assign: List[str]) -> str:
+               assign: List[str], route: Optional[List[str]] = None) -> str:
     if isinstance(reasons, str) or reasons is None:  # older callers pass one reason
         reasons = [reasons] if reasons else []
     if isinstance(dismiss_flags, str):
@@ -437,6 +438,13 @@ def cmd_triage(wf: Workflow, sid: str, accept_all: bool, dismiss_flags: List[str
                 errs.append(f"--assign {spec}: need a blocking finding and a task in {s['batch']}.")
             else:
                 blocking[fid]["task"] = tid
+        for spec in route or []:
+            fid, _, how = spec.partition("=")
+            if fid not in blocking or how not in run.FIX_ROUTES:
+                errs.append(f"--route {spec}: need a blocking finding and one of {', '.join(run.FIX_ROUTES)} "
+                            "(impl: production code; tests-green: test files only; tests-red: a failing test first).")
+            else:
+                blocking[fid]["route"] = how
         kept = [f for fid, f in blocking.items() if fid not in dismiss]
         errs += [f"{f['id']} matches no task path in {s['batch']} — `--assign {f['id']}=T##` or "
                  f"`--dismiss {f['id']} --reason \"...\"`." for f in kept if not f.get("task")]
@@ -492,7 +500,9 @@ def _route(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope: Dic
             out[tid] = run.add_fix(wf, state, tid, tests, fixing="tests",
                                    expect="red" if routes.get("tests-red") else "green", queued=queued)
         else:
-            step = "impl" if routes.get("impl") else run._authoring_step(task, scope)
+            ts = state["tasks"].get(tid)
+            fused = run._authoring_step(task, scope, ts)
+            step = ("impl" if fused != "build" else "build") if routes.get("impl") else fused
             out[tid] = run.add_fix(wf, state, tid, routes.get("impl", []) + routes.get("author", []), fixing=step)
     return out
 

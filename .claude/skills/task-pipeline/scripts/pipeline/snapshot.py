@@ -10,7 +10,7 @@ import os
 import stat
 import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, Optional
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tp", ".mypy_cache", ".pytest_cache",
@@ -22,6 +22,24 @@ HASH_LIMIT = 2 * 1024 * 1024
 RACY_NS = 2_000_000_000
 
 Snapshot = Dict[str, str]
+# Empty dot-files a task may legitimately create; every other empty dot-path is suspect (below).
+REAL_EMPTY_DOTFILES = {".gitkeep", ".keep", ".gitignore", ".nojekyll"}
+
+
+def sandbox_placeholder(root: Path, rel: str) -> bool:
+    """A sandbox's per-command deny mount: Claude Code's sandbox masks dotfiles and dot-folders
+    (.bashrc, .zshrc, .mcp.json, .claude/agents, .idea, ...) by mounting /dev/null over them, which
+    leaves an empty file or a character device behind on the host. They come and go between
+    commands, so no task wrote them — in real runs they were flagged as off-path edits on every
+    record (dozens of no-op fix rounds and several questions to the human)."""
+    parts = PurePosixPath(rel).parts
+    if not parts or not any(p.startswith(".") for p in parts) or parts[-1] in REAL_EMPTY_DOTFILES:
+        return False
+    try:
+        st = os.lstat(Path(root) / rel)
+    except OSError:
+        return False  # gone: no evidence it was a placeholder, so it stays a change
+    return stat.S_ISCHR(st.st_mode) or (stat.S_ISREG(st.st_mode) and st.st_size == 0)
 
 
 def _fingerprint(path: Path, st: os.stat_result) -> str:
@@ -79,6 +97,8 @@ def take(root: Path, exclude: Iterable[Path] = (), cache: Optional[Path] = None,
                 st = p.stat()
                 if not stat.S_ISREG(st.st_mode):
                     continue
+                if st.st_size == 0 and sandbox_placeholder(root, rel):
+                    continue
                 prev = known.get(rel)
                 if prev and len(prev) == 4 and prev[3] and prev[0] == st.st_size and prev[1] == st.st_mtime_ns:
                     fp, trusted = prev[2], True
@@ -126,9 +146,34 @@ def git_porcelain(root: Path) -> Optional[str]:
             return None
         out = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "-uall", "--", "."],
                              capture_output=True, text=True, timeout=120)
-        return out.stdout if out.returncode == 0 else None
+        if out.returncode != 0:
+            return None
+        top = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=30).stdout.strip() or str(root)
+        # Untracked sandbox placeholders are noise. -z gives the real (unquoted) path of each entry,
+        # relative to the repository top; only entries proven to be placeholders are dropped.
+        raw = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "-z", "-uall", "--", "."],
+                             capture_output=True, text=True, timeout=120, errors="surrogateescape")
+        noise = set()
+        if raw.returncode == 0:
+            noise = {e[3:] for e in raw.stdout.split("\0") if e.startswith("?? ")
+                     and sandbox_placeholder(Path(top), e[3:])}
+        keep = [ln for ln in out.stdout.splitlines()
+                if not (ln.startswith("?? ") and _unquote(ln[3:]) in noise)]
+        return "".join(ln + "\n" for ln in keep)
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _unquote(path: str) -> str:
+    """A porcelain path as git prints it without -z: C-quoted when unusual; plain otherwise."""
+    if len(path) >= 2 and path[0] == path[-1] == '"':
+        try:
+            return path[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape").encode(
+                "latin-1").decode("utf-8", "surrogateescape")
+        except (UnicodeError, ValueError):
+            return path
+    return path
 
 
 def hash_files(root: Path, rels: Iterable[str]) -> Dict[str, Optional[str]]:

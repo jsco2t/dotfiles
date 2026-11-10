@@ -81,7 +81,7 @@ class ScopeNeedsTheHumanTest(unittest.TestCase):
     def test_a_large_plan_is_never_told_to_cut_work(self) -> None:
         h = self.h
         h.confirmed()
-        h.write_json("plan.json", h.plan([h.task(f"T{i:02d}", f"area{i}/a.md") for i in range(1, 44)]))
+        h.write_json("plan.json", h.plan([h.task(f"T{i:02d}", f"area{i}/a.md") for i in range(1, 82)]))
         text = h.tp("plan", "check", expect=2).text
         self.assertNotIn("cut", text)
         self.assertIn("phase", text)
@@ -138,17 +138,18 @@ class WidenGuardrailTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.h.close()
 
-    def test_two_files_then_the_human(self) -> None:
+    def test_widening_never_waits_on_the_human(self) -> None:
+        # Real runs spent eight questions on a cap of two widened files, every one answered yes.
+        # Past the mark it warns; the files are in decisions.md, the report, and the final review.
         h = self.h
-        h.tp("widen", "T01", "--path", "architecture/a.md", "--reason", "F1 needs it")
-        h.tp("widen", "T01", "--path", "architecture/b.md", "--reason", "F2 needs it")
-        res = h.tp("widen", "T01", "--path", "architecture/c.md", "--reason", "F3 needs it", expect=2)
-        self.assertIn("human", res.text)
-        self.assertIn("--answer", res.text)
-        h.tp("widen", "T01", "--path", "architecture/c.md", "--reason", "F3 needs it",
-             "--answer", "Yes, add the glossary too.")
-        self.assertIn("architecture/c.md", h.read_json("plan.json")["tasks"][0]["paths"])
-        self.assertRegex((h.wf / "decisions.md").read_text(), r"widen T01 paths · human: .*glossary")
+        for i, name in enumerate("abcd", 1):
+            out = h.tp("widen", "T01", "--path", f"architecture/{name}.md", "--reason", f"F{i} needs it").out
+            self.assertNotIn("WARN", out)
+        out = h.tp("widen", "T01", "--path", "architecture/e.md", "--reason", "F5 needs it").out
+        self.assertIn("WARN", out)
+        self.assertIn("plan amendment", out)
+        self.assertIn("architecture/e.md", h.read_json("plan.json")["tasks"][0]["paths"])
+        self.assertRegex((h.wf / "decisions.md").read_text(), r"widen T01 paths · manager: .*F5 needs it")
 
     def test_widen_takes_files_not_folders_or_globs(self) -> None:
         h = self.h

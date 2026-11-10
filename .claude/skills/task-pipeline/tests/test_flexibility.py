@@ -217,14 +217,17 @@ class ApprovedTestChangesTest(unittest.TestCase):
         (m.app / "test_calc.py").write_text(TEST_PY.replace("assertEqual(mul(2, 3), 6)", "assertEqual(6, mul(3, 2))"))
         h.result("T01", "impl", changed=["calc.py", "test_calc.py"])
         self.assertIn("weakened", h.tp("record", "T01", "--agent-id", "ca-1").out)
-        h.tp("rebaseline-tests", "T01", "--answer", "Approve the reordered assertion", "--by", "manager", expect=2)
-        h.tp("rebaseline-tests", "T01", "--answer", "Approve the reordered assertion", "--by", "human")
-        h.tp("dispatch", "T01")
-        h.result("T01", "fix", changed=[])
-        out = h.tp("record", "T01").out
-        self.assertNotIn("weakened", out)
+        # The manager may make an honest correction, but must say what was wrong — the final review
+        # judges it against the kept baseline.
+        h.tp("rebaseline-tests", "T01", "--answer", "ok", "--by", "manager", expect=2)
+        out = h.tp("rebaseline-tests", "T01", "--answer", "The assertion was reordered, not loosened: the same "
+                   "values are checked", "--by", "manager").out
+        self.assertIn("no fix round is spent", out)  # its only failure was the weakening finding
         self.assertEqual(m.status("T01"), "needs_check")
-        self.assertIn("Approve the reordered assertion", (h.wf / "decisions.md").read_text())
+        self.assertIn("reordered, not loosened", (h.wf / "decisions.md").read_text())
+        corrections = h.state()["test_corrections"]
+        self.assertEqual(corrections[0]["by"], "manager")
+        self.assertTrue(Path(corrections[0]["before"]).is_dir())  # the old baseline, kept for review
 
 
 class WorkflowLimitsTest(unittest.TestCase):
@@ -256,7 +259,7 @@ class WorkflowLimitsTest(unittest.TestCase):
             h.write_json("scope.json", h.scope(limits={"max_tasks": 40}, ignore=["$HOME/**"]))
             h.tp("scope", "check")
             md = (h.wf / "scope.md").read_text()
-            self.assertRegex(md, r"max_tasks 40 \(default 30\)")
+            self.assertRegex(md, r"max_tasks 40 \(default 80\)")
             self.assertIn("`$HOME/**`", md)
         finally:
             h.close()

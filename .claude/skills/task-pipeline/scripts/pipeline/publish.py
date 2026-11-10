@@ -1,6 +1,9 @@
-"""Publishing: the manager posts a reviewed `wf:` draft to Jira after the human's OK. A script
-step, not an agent's: in real runs a liaison agent drafted the text itself, re-ran builds and tests
-to check it, and hand-built the ADF payload in throwaway scripts three times.
+"""Publishing: the manager posts a reviewed `wf:` draft to Jira or Confluence after the human's OK.
+A script step in the main session, not an agent's: in real runs a liaison agent drafted the text
+itself, re-ran builds and tests to check it, and hand-built the ADF payload three times; and a
+Confluence comment the human had approved was refused by the permission check because a sub-agent
+made the write (the run never finished). A page edit goes in as storage XHTML with the version it
+was based on, so tables and macros survive and a concurrent edit is never overwritten.
 
 `tp publish T##` is the dry run: it renders the draft, records its hash, the workspace HEAD, and
 the target's current state, and writes nothing anywhere else. `tp publish T## --answer "..."`
@@ -8,8 +11,10 @@ posts exactly that payload once, only if none of those moved, then reads it back
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
+import re
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,16 +29,49 @@ def _jira() -> str:
     return os.environ.get("TP_JIRA_BIN") or "jira"
 
 
-def _call(args: List[str], stdin: Optional[str] = None) -> str:
+def _confluence() -> str:
+    return os.environ.get("TP_CONFLUENCE_BIN") or "confluence"
+
+
+def _call(args: List[str], stdin: Optional[str] = None, tool: str = "jira") -> str:
+    binary = _confluence() if tool == "confluence" else _jira()
     try:
-        proc = subprocess.run([_jira(), *args], input=stdin, capture_output=True, text=True, timeout=TIMEOUT)
+        proc = subprocess.run([binary, *args], input=stdin, capture_output=True, text=True, timeout=TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise TPError(f"`jira {' '.join(args[:3])}` could not run: {exc}. `atlassian doctor` diagnoses auth and "
-                      "connectivity.")
+        raise TPError(f"`{tool} {' '.join(args[:3])}` could not run: {exc}. `atlassian doctor` diagnoses auth and "
+                      "connectivity (inside the sandbox, allow ciqinc.atlassian.net).")
     if proc.returncode != 0:
-        raise TPError(f"`jira {' '.join(args[:3])}` failed (exit {proc.returncode}): "
+        raise TPError(f"`{tool} {' '.join(args[:3])}` failed (exit {proc.returncode}): "
                       f"{(proc.stderr or proc.stdout).strip()[:400]}")
     return proc.stdout
+
+
+CONFLUENCE = ("confluence-comment", "confluence-page")
+
+
+def _page(pid: str) -> Dict[str, Any]:
+    """A Confluence page as the API stores it: title, version, and storage XHTML body."""
+    data = json.loads(_call(["page", str(pid), "--raw", "--body-format", "storage"], tool="confluence") or "{}")
+    version = (data.get("version") or {}).get("number")
+    if not isinstance(version, int):
+        raise TPError(f"Confluence page {pid} came back without a version: cannot edit it safely.")
+    return {"title": data.get("title", ""), "version": version,
+            "storage": ((data.get("body") or {}).get("storage") or {}).get("value") or ""}
+
+
+def storage_text(xhtml: str) -> str:
+    """A storage body's words, for the read-back and the dry run's comparison."""
+    text = re.sub(r"<[^>]+>", " ", re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", xhtml, flags=re.S))
+    return " ".join(html.unescape(text).split())
+
+
+def structure(xhtml: str) -> Dict[str, int]:
+    """What a flat-text edit destroys: in a real run an agent could only read a page as flat text and
+    could not apply the edits without losing its tables and code block."""
+    return {"tables": len(re.findall(r"<table\b", xhtml)),
+            "macros": len(re.findall(r"<ac:structured-macro\b", xhtml)),
+            "headings": len(re.findall(r"<h[1-6]\b", xhtml)),
+            "links": len(re.findall(r"<a\b|<ac:link\b", xhtml))}
 
 
 def _comments(key: str) -> List[Dict[str, Any]]:
@@ -62,6 +100,11 @@ def _split_issue(text: str) -> Tuple[str, str]:
 
 def _target_state(pub: Dict[str, Any]) -> Dict[str, Any]:
     """What the dry run saw at the target; the post goes ahead only if it is unchanged."""
+    if pub["to"] == "confluence-page":
+        page = _page(pub["target"])
+        return {"version": page["version"], "title": page["title"]}
+    if pub["to"] == "confluence-comment":
+        return {"title": _page(pub["target"])["title"]}  # the page exists; comments do not collide
     if pub["to"] == "jira-issue":
         _issue_fields(pub["target"])  # the parent must exist (an unknown key fails the call)
         return {"parent": pub["target"]}
@@ -78,6 +121,10 @@ def _target_state(pub: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _what(pub: Dict[str, Any]) -> str:
+    if pub["to"] == "confluence-page":
+        return f"replace the body of Confluence page {pub['target']}"
+    if pub["to"] == "confluence-comment":
+        return f"add one footer comment to Confluence page {pub['target']}"
     if pub["to"] == "jira-issue":
         return (f"create a {pub.get('type', 'Task')} in {pub.get('project')} under {pub['target']}: "
                 f"{pub.get('_summary', '')!r}")
@@ -87,7 +134,21 @@ def _what(pub: Dict[str, Any]) -> str:
     return f"replace the description of {pub['target']}"
 
 
-def _post(pub: Dict[str, Any], payload: str) -> str:
+def _post(pub: Dict[str, Any], payload: str, body_file: Optional[str] = None,
+          version: Optional[int] = None) -> str:
+    if pub["to"] == "confluence-page":
+        # --version: the CLI refuses if anyone edited the page since the dry run read it.
+        _call(["update", str(pub["target"]), "--body-file", str(body_file), "--storage", "--version",
+               str(version), "--json"], tool="confluence")
+        return str(pub["target"])
+    if pub["to"] == "confluence-comment":
+        out = _call(["comment", str(pub["target"]), "-", "--adf", "--json"], stdin=payload, tool="confluence")
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            return ""
+        pub["_response"] = data
+        return str(data.get("id") or "")
     if pub["to"] == "jira-issue":
         args = ["issue", "create", "--project", str(pub["project"]), "--type", str(pub["type"]),
                 "--parent", pub["target"], "--summary", pub["_summary"]]
@@ -111,7 +172,29 @@ def _post(pub: Dict[str, Any], payload: str) -> str:
     return pub["target"]
 
 
-def _read_back(pub: Dict[str, Any], posted: str, doc: Dict[str, Any]) -> Tuple[bool, str]:
+def _read_back(pub: Dict[str, Any], posted: str, doc: Any) -> Tuple[bool, str]:
+    if pub["to"] == "confluence-page":
+        stored = _page(pub["target"])["storage"]
+        if storage_text(stored) != storage_text(doc):
+            return False, "the page's text differs from what was sent"
+        if structure(stored) != structure(doc):
+            return False, f"the page's structure differs from what was sent ({structure(stored)} vs {structure(doc)})"
+        return True, f"matches what was sent ({len(storage_text(doc).split())} words, {structure(doc)})"
+    if pub["to"] == "confluence-comment":
+        if not posted:
+            return False, "the comment call returned no comment id"
+        body = ((pub.get("_response") or {}).get("body") or {}).get("atlas_doc_format") or {}
+        value = body.get("value") if isinstance(body, dict) else None
+        if not value:
+            return True, (f"comment {posted} created (the Confluence CLI cannot list comments, so its text was not "
+                          "read back)")
+        try:
+            stored = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return True, f"comment {posted} created (its stored body could not be parsed for a read-back)"
+        if adf.text_of(stored) != adf.text_of(doc):
+            return False, "the stored comment differs from what was sent"
+        return True, f"comment {posted} matches what was sent ({len(adf.text_of(doc).split())} words)"
     if pub["to"] == "jira-issue":
         if not posted:
             return False, "the create call returned no issue key"
@@ -158,33 +241,64 @@ def cmd_publish(wf: Workflow, tid: str, answer: Optional[str]) -> str:
             pub["_summary"], text = _split_issue(text)
             if not pub["_summary"]:
                 raise TPError(f"{body} is empty: a jira-issue draft's first line is the issue summary.")
-        doc = adf.to_adf(text)
-        payload = json.dumps(doc, separators=(",", ":"), sort_keys=True)
+        page_edit = pub["to"] == "confluence-page"
+        base_version = None
+        if page_edit:
+            if not text.strip():
+                raise TPError(f"{body} is empty: a confluence-page draft is the page's whole new storage body.")
+            doc, payload = text, text  # storage XHTML, sent as written
+            if pub.get("base"):
+                base_path = wf.root / planmod.wf_rel(pub["base"])
+                try:
+                    base_version = (json.loads(base_path.read_text()).get("version") or {}).get("number")
+                except (OSError, ValueError, AttributeError):
+                    raise TPError(f"{base_path} is not the page as read when the draft started (`confluence page "
+                                  f"{pub['target']} --raw --body-format storage > {base_path}`).")
+        else:
+            doc = adf.to_adf(text)
+            payload = json.dumps(doc, separators=(",", ":"), sort_keys=True)
         # The summary is part of what the human approves, so a changed summary needs a new dry run.
         sha = hashlib.sha256(((pub["_summary"] + "\n") if "_summary" in pub else "").encode()
                              + payload.encode()).hexdigest()
         head = run._git_head(run._ws(scope, task["workspace"]))
-        out_file = wf.run_dir(tid) / "payload.json"
+        out_file = wf.run_dir(tid) / ("payload.xml" if pub["to"] == "confluence-page" else "payload.json")
 
         if answer is None:
             seen = _target_state(pub)
+            page_lines: List[str] = []
+            if page_edit:
+                if base_version is not None and seen["version"] != base_version:
+                    raise TPError(f"Confluence page {pub['target']} is at version {seen['version']}, but the draft was "
+                                  f"written from version {base_version}: someone edited it since. Re-read it into "
+                                  f"`{pub['base']}`, rework the draft on top of their edit (a fix round), and dry-run "
+                                  "again — never overwrite their change.")
+                current = _page(pub["target"])["storage"]
+                before, after = structure(current), structure(doc)
+                page_lines = [f"page structure (now → after): " + ", ".join(
+                    f"{k} {before[k]} → {after[k]}" for k in before),
+                    f"page words: {len(storage_text(current).split())} → {len(storage_text(doc).split())}"]
+                page_lines += [f"WARN: the new body has fewer {k} ({before[k]} → {after[k]}) — a replacement keeps "
+                               "everything it does not mean to change; show the human this line."
+                               for k in before if after[k] < before[k]]
             out_file.parent.mkdir(parents=True, exist_ok=True)
-            out_file.write_text(json.dumps(doc, indent=1) + "\n")
+            out_file.write_text(doc if page_edit else json.dumps(doc, indent=1) + "\n")
             ts["publish"] = {"sha": sha, "head": head, "seen": seen, "ts": now_iso()}
             ts["started"] = ts.get("started") or now_iso()
             wf.save(state)
             wf.event("publish_dry_run", id=tid, sha=sha[:12])
-            markup = adf.literal_markup(doc)
+            markup = [] if page_edit else adf.literal_markup(doc)
             preview = [ln for ln in body.read_text().splitlines() if ln.strip()][:30]
             return "\n".join(
                 [f"DRY RUN {tid}: {_what(pub)} — nothing was written.",
-                 f"payload: {out_file} (ADF rendered from {body.name}), sha256 {sha[:16]}",
+                 f"payload: {out_file} ({'storage XHTML' if page_edit else 'ADF rendered'} from {body.name}), "
+                 f"sha256 {sha[:16]}", *page_lines,
                  f"pre-flight: HEAD {(head or 'n/a')[:12]}; " + ", ".join(f"{k} {v if k != 'text' else '(recorded)'}"
                                                                      for k, v in seen.items()),
                  *([f"WARN: Markdown the renderer left as text: {markup[0][:80]!r}"] if markup else []),
                  "draft (what the human approves):"] + [f"  {ln}" for ln in preview]
                 + (["  …"] if len(preview) == 30 else [])
-                + ["Show the human the draft path and what it says, ask once (AskUserQuestion), then "
+                + ["Show the human the draft path and what it says, and ask once — every publish that is ready in "
+                   "the same question, in plain text if agents are in flight — then "
                    f"`tp publish {tid} --answer \"<their words>\"`. A change to the draft, HEAD, or {pub['target']} "
                    "before then means a new dry run and a new ask."])
 
@@ -206,7 +320,9 @@ def cmd_publish(wf: Workflow, tid: str, answer: Optional[str]) -> str:
                               f"{v if k != 'text' else 'changed'}" for k, v in now.items() if dry["seen"].get(k) != v)
             raise TPError(f"{pub['target']} changed since the dry run ({moved}) — someone else wrote there (new "
                           f"comments or edits). Read it, run `tp publish {tid}` again, and ask the human again.")
-        posted = _post(pub, payload)
+        if page_edit:
+            out_file.write_text(payload)  # exactly the approved bytes (the sha above proved them unchanged)
+        posted = _post(pub, payload, body_file=str(out_file), version=now.get("version"))
         ok, detail = _read_back(pub, posted, doc)
         dry["posted"] = posted or pub["target"]
         wf.decision(f"publish {tid}", answer, who="human")

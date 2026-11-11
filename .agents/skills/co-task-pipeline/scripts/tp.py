@@ -465,7 +465,7 @@ def independent(wf, agent_id, purpose):
          and agent.get("role") == "review" and agent.get("purpose") == purpose
          and text(agent.get("agent_id"))
          and agent["agent_id"] != wf.state.get("author_agent_id", "main")
-         and not agent.get("unresolved"),
+         and agent.get("unresolved") == [],
          "a completed, accepted independent reviewer with no unresolved issues is required")
     return agent
 
@@ -1208,7 +1208,7 @@ SCHEMAS = {
                   unit="multiplication-callers", context="fresh", inputs={"app": ["calc.py", "test_*.py", "pyproject.toml"]},
                   model="TERRA", reasoning="medium", model_reason="Bounded evidence extraction with simple acceptance."),
     "agent-result": dict(accepted=True, summary="Callers and tests identified.", evidence=["calc.py:12; test_calc.py:8"],
-                         validation="Parent inspected the cited callers and reconciled all requested evidence."),
+                         validation="Parent inspected the cited callers and reconciled all requested evidence.", unresolved=[]),
     "usage": dict(id="main-session", source="Host session cumulative counters, exact session id and timestamp.",
                   measurements=dict(input_tokens=1200, cached_input_tokens=600, output_tokens=100, tool_calls=12)),
     "operation-result": dict(status="completed", evidence="Read-back confirms exact commit id or published artifact contents; operation was not replayed."),

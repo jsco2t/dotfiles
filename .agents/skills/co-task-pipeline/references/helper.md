@@ -23,7 +23,10 @@ request requirement IDs, source starting paths, question, stopping condition and
 The packet binds the current request, scope, plan JSON and rendered `plan.md` revision.
 Give that exact request/document to the actual reviewer. Attach its host identity, validate its
 result, then record `accepted: true`, summary, evidence, validation and `unresolved: []` through
-`agent finish`. `plan accept` requires the completed independent review and unchanged source;
+`agent finish`. Plan, test-correction and amendment reviews require an explicit `unresolved`
+list of nonblank issue strings; only `[]` clears the independent-review gate. Missing, null,
+boolean or object values cannot clear it, including in previously saved review records.
+`plan accept` requires the completed independent review and unchanged source;
 open questions or stale revisions stop entry. Review records are agent-supplied provenance,
 not cryptographic authentication of host identity. Never invent an independent reviewer.
 

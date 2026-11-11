@@ -130,6 +130,79 @@ class AutonomousTest(unittest.TestCase):
         self.cli("agent", "reserve", "--id", "A4", "--capacity", "2", "--file", "-", payload=brief)
         self.assertIn("author", self.cli("agent", "attach", "--id", "A4", "--agent-id", "main", expect=2))
 
+    def test_plan_review_requires_explicit_typed_unresolved_list(self):
+        self.settle()
+        self.reviewer(finish=False)
+        result = dict(accepted=True, summary="Reviewed the plan.", evidence=["plan.md"],
+                      validation="Scripted schema validation fixture.")
+        malformed = [result] + [dict(result, unresolved=value) for value in
+                               (None, False, {}, "", "Missing requirement", [None], [""], [{"issue": "Missing requirement"}])]
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                self.assertIn("unresolved", self.cli("agent", "finish", "--id", "A1", "--file", "-",
+                                                    payload=payload, expect=2))
+                self.assertEqual(self.state()["agents"]["A1"]["status"], "running")
+                self.cli("plan", "accept", "--agent", "A1", expect=2)
+        self.finish_reviewer()
+        self.cli("plan", "accept", "--agent", "A1")
+
+    def test_plan_accept_rejects_malformed_previously_saved_unresolved_list(self):
+        self.settle()
+        self.reviewer()
+        state = self.state()
+        path = self.wf / ".tp/state.json"
+        for value in (None, False, {}, ""):
+            with self.subTest(value=value):
+                state["agents"]["A1"]["unresolved"] = value
+                path.write_text(json.dumps(state))
+                self.assertIn("unresolved", self.cli("plan", "accept", "--agent", "A1", expect=2))
+                self.assertEqual(self.state()["phase"], "PLANNING")
+        state["agents"]["A1"].pop("unresolved")
+        path.write_text(json.dumps(state))
+        self.cli("plan", "accept", "--agent", "A1", expect=2)
+
+    def test_plan_review_can_continue_after_multiple_rejected_revisions(self):
+        self.settle()
+        for number in range(3):
+            aid = "A" + str(number + 1)
+            self.reviewer(aid=aid, finish=False)
+            self.finish_reviewer(aid, accepted=False, unresolved=["Clarify delivery sequence."])
+            self.cli("plan", "accept", "--agent", aid, expect=2)
+            plan = json.loads((self.wf / "plan.json").read_text())
+            plan["summary"] += " Revised delivery sequence."
+            self.put("plan.json", plan)
+            self.cli("plan", "check")
+        self.reviewer(aid="A4")
+        self.cli("plan", "accept", "--agent", "A4")
+        self.assertEqual(self.state()["phase"], "EXECUTING")
+
+    def test_final_review_rejects_empty_changes_and_malformed_findings(self):
+        self.accept()
+        self.finish_task()
+        review = dict(method="self", verdict="changes", summary="Scripted invalid review fixture.", findings=[],
+                      requirements=[dict(id="R1", evidence="a.md matches request.")])
+        payloads = [review,
+                    dict(review, findings=[dict(issue="Incorrect overview", evidence="a.md:1")]),
+                    dict(review, verdict="pass", findings=[dict(task="T01", issue="Incorrect overview", evidence="a.md:1")]),
+                    dict(review, verdict="pass", requirements=[dict(evidence="Missing requirement id.")])]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                output = self.cli("review", "--file", "-", payload=payload, expect=2)
+                self.assertNotIn("Traceback", output)
+                self.assertIsNone(self.state()["review"])
+                self.cli("final", expect=2)
+
+    def test_success_output_with_error_words_cannot_be_red_evidence(self):
+        self.accept(self.automated("red-green", [sys.executable, "-B", "-c", "print('0 errors; no failures')"]))
+        self.cli("start", "T01")
+        (self.app / "test_calc.py").write_text("Scripted fixture\n")
+        self.cli("test", "T01", "--stage", "red", "--note", "This successful run must not count as red.", expect=2)
+        state = self.state()
+        self.assertNotIn("test_checkpoint", state["tasks"]["T01"])
+        self.assertEqual(state["checks"]["unit"]["exit_code"], 0)
+        self.assertIn("0 errors", (self.wf / state["checks"]["unit"]["log"]).read_text())
+        self.cli("done", "T01", "--result-file", self.result(), expect=2)
+
     def test_autonomous_scope_rejects_no_independent_reviewer_capacity(self):
         scope=self.scope();scope["max_agents"]=0
         self.put("scope.json",scope)

@@ -279,6 +279,9 @@ def execute(wf, args, api):
                      and type(result.get("accepted")) is bool
                      and api.text(result.get("summary")) and api.text(result.get("validation"))
                      and api.strings(result.get("evidence")), "agent result needs accepted, summary, evidence and parent validation")
+            if agent.get("purpose") in ("plan", "test-correction", "amendment") or "unresolved" in result:
+                api.need(api.strings(result.get("unresolved"), empty=True),
+                         "review result needs unresolved as a list of nonblank issue strings; use [] when clear")
             scope = state["scope"]
             snapshot = wf.snapshot(scope, wf.contract()[1] if agent.get("purpose") == "plan" else state.get("plan") or {"tasks": []}, agent.get("inputs"))
             current = checks.fingerprint(snapshot, {"inputs": agent["inputs"]}) if "inputs" in agent else digest(snapshot)

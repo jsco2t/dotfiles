@@ -130,6 +130,8 @@ for complete dependencies. Name meaningful ignored dependencies with literal inp
    `--max-bytes`, just like `packet`; never drop constraints to fit the default limit.
 3. Read and validate the returned source evidence, then `tp agent finish --id A1 --file
    <result.json>`. Result needs `accepted`, summary, evidence list and parent `validation`.
+   Plan, test-correction and amendment reviews also require an explicit `unresolved` list of
+   nonblank issue strings; use `[]` only when no issues remain. Acceptance requires that empty list.
    Changes to declared source inputs invalidate automatic acceptance; review current affected
    artifacts first. Unrelated operator edits still need separate adoption authority before
    implementation can continue, even when they do not invalidate this review's coverage.

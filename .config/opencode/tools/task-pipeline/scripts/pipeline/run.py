@@ -2129,6 +2129,12 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
                 "Added by the manager without a question, inside the fix-task allowance you gave at scope time:", ""]
         out += [f"- {tid} — {tasks[tid]['title'] if tid in tasks else '?'}: {a.get('note')}"
                 for a in delegated for tid in a.get("tasks", [])]
+    scope_amends = [a for a in state.get("scope_amendments", []) if a.get("delegated")]
+    if scope_amends:
+        out += ["", "## Manager scope amendments", "",
+                "Applied without a question — plumbing only (nothing you agreed changed, no write authority "
+                "gained):", ""]
+        out += [f"- {'; '.join(a.get('changes') or [])} — {a.get('note')}" for a in scope_amends]
     review_lines = _review().report_lines(state)
     if review_lines:
         out += ["", "## Review", ""] + review_lines

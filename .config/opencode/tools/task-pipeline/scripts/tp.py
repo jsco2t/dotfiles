@@ -124,6 +124,10 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("scope", help="check or confirm scope.json; amend the confirmed scope (scope-amend.json)")
     s.add_argument("what", choices=["check", "confirm", "amend"])
     s.add_argument("--answer", help="the human's words, verbatim (confirm; amend: approves the checked draft)")
+    s.add_argument("--delegated", action="store_true", help="amend: apply checked plumbing yourself — the check "
+                   "proves no requirement, non-goal, term, workspace, shipping decision, or write authority "
+                   "changes — without a question")
+    s.add_argument("--note", help="amend --delegated: what changed and why, in plain words")
 
     s = sub.add_parser("survey-issue", help="deterministic sizing of a Jira or GitHub issue (jira:KEY, gh:o/r#N)")
     s.add_argument("ref")
@@ -346,7 +350,7 @@ def dispatch(args: argparse.Namespace) -> str:
         if args.what == "check":
             return scopemod.cmd_check(wf)
         if args.what == "amend":
-            return planmod.cmd_scope_amend(wf, args.answer)
+            return planmod.cmd_scope_amend(wf, args.answer, args.delegated, args.note)
         if not args.answer:
             raise TPError("scope confirm needs --answer with the human's words.")
         return scopemod.cmd_confirm(wf, args.answer)

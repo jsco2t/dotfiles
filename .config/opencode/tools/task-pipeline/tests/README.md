@@ -14,7 +14,7 @@ or scoped:
     python3 -m unittest test_docscheck      # docscheck unit tests (fast)
     python3 -m unittest test_progress       # closeout, lost dispatches, ship
 
-Timings: the full suite is ~400 tests / ~5.5 min (integration tests shell out to real
+Timings: the full suite is ~430 tests / ~5.5 min (integration tests shell out to real
 `tp.py` subprocesses; nothing hangs — `test_execute` alone needs ~90 s, so a 120 s
 timeout on the whole suite is too tight). `python3 -m unittest discover -s tests` from
 the repo root also works; plain `python3 -m unittest tests.test_plan` does NOT (tests/

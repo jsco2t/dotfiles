@@ -1,7 +1,9 @@
-"""Fewer approvals, never a weaker one. The human still decides every scope and plan change, but
-one answer to a concrete, already-drafted change approves it (no second "please approve" for the
-same thing), a scope change mid-run is one question, and small fix tasks can go ahead without a
-question only inside a delegation the human chose when the scope was agreed."""
+"""Fewer approvals, never a weaker one. The human still decides every substantive scope and plan
+change, but one answer to a concrete, already-drafted change approves it (no second "please
+approve" for the same thing), a scope change mid-run is one question, plumbing a scope amendment
+cannot lose (no requirement, non-goal, term, workspace, shipping, or write-authority change)
+settles without one, and small fix tasks can go ahead without a question only inside a delegation
+the human chose when the scope was agreed."""
 from __future__ import annotations
 
 import json
@@ -159,6 +161,198 @@ class ScopeAmendTest(unittest.TestCase):
         d["non_goals"] = []
         write(h, "scope-amend.json", d)
         self.assertIn("changed since", h.tp("scope", "amend", "--answer", "Yes", expect=2).text)
+
+
+class DelegatedScopeAmendTest(unittest.TestCase):
+    """Plumbing costs no question: when the check proves the amendment changes nothing the human
+    agreed to — no requirement, non-goal, term, workspace, shipping decision, or write authority —
+    the manager settles it with --delegated --note, recorded as theirs and listed in the report.
+    A substantive change still costs exactly one question, and --delegated is refused with the
+    reason. (The two shapes real runs hit: a routing fix — a liaison transports, a document author
+    drafts — and a detail in-budget research discovered.)"""
+
+    def setUp(self) -> None:
+        self.m = Mixed()
+        m = self.m
+        DRAFT = "wf:drafts/kub-1-comment.md"
+        self.scope = m.scope(["docs", "integration"], ["docs", "liaison"], review="none")
+        self.tasks = [m.doc_task("T01", path=DRAFT, brief="Write the KUB-1 comment text, citing calc.py."),
+                     {"id": "T02", "title": "Post the KUB-1 comment", "serves": ["D3"], "requirements": ["R3"],
+                      "workspace": "app", "publish": {"to": "jira-comment", "target": "KUB-1", "body": DRAFT},
+                      "acceptance": ["The comment is posted once and reads back as sent."],
+                      "estimate_min": 5, "depends_on": ["T01"]}]
+        m.approve(self.tasks, self.scope)
+
+    def tearDown(self) -> None:
+        self.m.close()
+
+    def scope_draft(self) -> dict:
+        self.m.h.tp("scope", "amend")
+        return json.loads((self.m.h.wf / "scope-amend.json").read_text())
+
+    def test_a_routing_fix_and_a_discovered_detail_settle_without_a_question(self) -> None:
+        m, h = self.m, self.m.h
+        d = self.scope_draft()
+        for dl in d["deliverables"]:                       # the dependent ticket research named
+            if dl["id"] == "D3":
+                dl["what"] = ("One comment on KUB-1, drafted as wf:drafts/kub-1-comment.md by doc-author and "
+                              "posted by the publish task after the human's OK")
+        for p in d["participants"]:                        # the liaison transports; it never drafts
+            if p["agent"] == "atlassian-liaison":
+                p["role"] = "research"
+                p["why"] = "Reads KUB-1 context; the plan's publish task posts the reviewed draft."
+        write(h, "scope-amend.json", d)
+        out = h.tp("scope", "amend").out
+        self.assertIn("settle it yourself", out)
+        self.assertNotIn("Ask the human once", out)
+        h.tp("scope", "amend", "--delegated", "--note",
+             "Routing fix: the liaison transports and doc-author drafts; research named the dependent ticket.")
+        scope = h.read_json("scope.json")
+        self.assertIn("posted by the publish task", [x["what"] for x in scope["deliverables"] if x["id"] == "D3"][0])
+        self.assertEqual(["research"], [p["role"] for p in scope["participants"]
+                                         if p["agent"] == "atlassian-liaison"])
+        self.assertRegex((h.wf / "decisions.md").read_text(),
+                         r"scope amend \(manager-settled plumbing\) · manager: Routing fix")
+        self.assertFalse((h.wf / "scope-amend.json").exists())
+        h.tp("next")                                             # the frozen scope matches: no tamper error
+
+    def test_planning_phase_plumbing_settles_too(self) -> None:
+        # The two real escalations of the KUB-1170 run happened while PLANNING, before any plan
+        # existed: the same rule must hold there, where no plan amendment can ride along.
+        m = Mixed()
+        h = m.h
+        try:
+            h.confirmed(**m.scope(["docs", "integration"], ["docs", "liaison"], review="none"))
+            h.tp("scope", "amend")
+            d = json.loads((h.wf / "scope-amend.json").read_text())
+            for dl in d["deliverables"]:
+                if dl["id"] == "D3":
+                    dl["what"] = "One comment on KUB-1, drafted by doc-author and posted by the publish task"
+            for p in d["participants"]:
+                if p["agent"] == "atlassian-liaison":
+                    p["role"] = "research"
+                    p["why"] = "Reads KUB-1 context; the publish task posts the reviewed draft."
+            write(h, "scope-amend.json", d)
+            out = h.tp("scope", "amend").out
+            self.assertIn("settle it yourself", out)
+            self.assertNotIn("Ask the human once", out)
+            h.tp("scope", "amend", "--delegated", "--note",
+                 "Routing fix before planning: the liaison transports, doc-author drafts.")
+            scope = h.read_json("scope.json")
+            self.assertEqual(["research"], [p["role"] for p in scope["participants"]
+                                             if p["agent"] == "atlassian-liaison"])
+            self.assertEqual(h.state()["phase"], "PLANNING")
+        finally:
+            m.close()
+
+    def test_a_substantive_change_still_costs_its_one_question(self) -> None:
+        h = self.m.h
+        d = self.scope_draft()
+        d["non_goals"] = ["No changes to calc's public API"]
+        write(h, "scope-amend.json", d)
+        out = h.tp("scope", "amend").out
+        self.assertIn("Ask the human once", out)
+        self.assertNotIn("settle it yourself", out)
+        text = h.tp("scope", "amend", "--delegated", "--note", "Trust me, it is plumbing.", expect=2).text
+        self.assertIn("Not plumbing", text)
+        self.assertIn("non-goals", text)
+        self.assertNotIn("public API", h.read_json("scope.json").get("non_goals") or [])
+        h.tp("scope", "amend", "--answer", "Yes, add the non-goal.")
+        self.assertIn("No changes to calc's public API", h.read_json("scope.json")["non_goals"])
+
+    def test_a_delegated_fix_task_rides_along_inside_the_allowance(self) -> None:
+        m = Mixed()
+        h = m.h
+        try:
+            scope = m.scope(["docs"], ["docs"], review="none")
+            scope["fix_tasks"] = YES_TWO
+            m.approve([m.doc_task("T01", path="docs/calc.md")], scope)
+            h.tp("scope", "amend")
+            d = json.loads((h.wf / "scope-amend.json").read_text())
+            d["deliverables"][0]["what"] += " (the note names the ticket it prepares)"
+            write(h, "scope-amend.json", d)
+            p = draft(h)
+            p["tasks"].append(m.doc_task("T03", path="docs/follow-up.md", estimate_min=10, depends_on=["T01"],
+                                          brief="Write the follow-up note."))
+            write(h, "plan-amend.json", p)
+            out = h.tp("scope", "amend").out
+            self.assertIn("settle it yourself", out)
+            h.tp("scope", "amend", "--delegated", "--note",
+                 "Research named the ticket the note prepares for; one 10-minute follow-up rides along.")
+            state = h.state()
+            self.assertEqual(state["tasks"]["T03"]["status"], "pending")
+            self.assertIn("T03", state["delegated"])
+            self.assertRegex((h.wf / "decisions.md").read_text(),
+                             r"plan amend \(fix-task delegation, 1 of 2\) · manager:")
+        finally:
+            m.close()
+
+    def test_the_delegation_runs_out(self) -> None:
+        m = Mixed()
+        h = m.h
+        try:
+            scope = m.scope(["docs"], ["docs"], review="none")
+            scope["limits"] = {"max_delegated_scope_amends": 1}
+            m.approve([m.doc_task("T01", path="docs/calc.md")], scope)
+            h.tp("scope", "amend")
+            d = json.loads((h.wf / "scope-amend.json").read_text())
+            d["deliverables"][0]["what"] += " (named)"
+            write(h, "scope-amend.json", d)
+            h.tp("scope", "amend")
+            h.tp("scope", "amend", "--delegated", "--note", "First plumbing fix, within the cap of one.")
+            h.tp("scope", "amend")
+            d = json.loads((h.wf / "scope-amend.json").read_text())
+            d["deliverables"][0]["what"] += " (renamed)"
+            write(h, "scope-amend.json", d)
+            out = h.tp("scope", "amend").out
+            self.assertIn("Ask the human once", out)
+            text = h.tp("scope", "amend", "--delegated", "--note", "Second plumbing fix, past the cap.",
+                        expect=2).text
+            self.assertIn("cap", text)
+        finally:
+            m.close()
+
+    def test_flag_misuse_is_refused(self) -> None:
+        h = self.m.h
+        d = self.scope_draft()
+        d["deliverables"][1]["what"] += " (renamed)"
+        write(h, "scope-amend.json", d)
+        h.tp("scope", "amend")
+        self.assertIn("not both", h.tp("scope", "amend", "--delegated", "--note", "x y z w",
+                                       "--answer", "both at once", expect=2).text)
+        self.assertIn("--note", h.tp("scope", "amend", "--delegated", expect=2).text)
+
+    def test_gained_write_authority_and_a_changed_deliverable_set_are_never_plumbing(self) -> None:
+        from pipeline import plan as planmod
+        base = {"deliverables": [{"id": "D1", "kind": "integration", "what": "One comment", "where": "jira:KUB-1"}],
+                "participants": [{"agent": "atlassian-liaison", "role": "research", "why": "Reads tickets for us."}]}
+        promoted = json.loads(json.dumps(base))
+        promoted["participants"][0]["role"] = "author"           # the liaison would write content
+        self.assertIn("write authority", "; ".join(planmod._scope_delegation_misfit(base, promoted)))
+        grown = json.loads(json.dumps(base))
+        grown["deliverables"].append({"id": "D2", "kind": "docs", "what": "A note", "where": "app"})
+        self.assertIn("deliverable set", "; ".join(planmod._scope_delegation_misfit(base, grown)))
+
+    def test_the_report_lists_what_the_manager_settled(self) -> None:
+        m = Mixed()
+        h = m.h
+        try:
+            m.approve([m.doc_task("T01", path="docs/calc.md")],
+                      m.scope(["docs"], ["docs"], review="none"))
+            h.tp("scope", "amend")
+            d = json.loads((h.wf / "scope-amend.json").read_text())
+            d["deliverables"][0]["what"] += " (the note names the KUB-1 comment it prepares)"
+            write(h, "scope-amend.json", d)
+            h.tp("scope", "amend")
+            h.tp("scope", "amend", "--delegated", "--note",
+                 "Routing fix: research named where the note lands; no requirement moved.")
+            m.doc_done("T01", cite="calc.py:1-2")
+            h.tp("final")
+            report = (h.wf / "report.md").read_text()
+            self.assertIn("Manager scope amendments", report)
+            self.assertIn("Routing fix", report)
+        finally:
+            m.close()
 
 
 class LegacyScopeTest(unittest.TestCase):

@@ -60,7 +60,10 @@ Then run the manager loop below from Stage 1.
 5. **The approved plan is the contract.** Outside it: `tp note "<one line>"`; mechanical changes:
    `tp widen <id> --path <file> --reason "..."` (no question) and `tp plan amend` (draft, check,
    ask once — or `--delegated` inside the fix-task allowance). Scope changes: `tp scope amend`,
-   the same way.
+   the same way — or, when its check proves the change is plumbing (no requirement, non-goal,
+   term, workspace, shipping, or write-authority change — a routing fix, a detail research
+   discovered), `--delegated --note "..."` settles it without a question; recorded as yours,
+   capped, and listed in the report.
 6. **Script before judgment.** If a command can decide it, a command decides it.
 7. **Answer-first** (`~/.config/opencode/output-styles/answer-first-core.md`, inlined into every
    brief) for everything you write.

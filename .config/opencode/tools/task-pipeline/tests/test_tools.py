@@ -420,5 +420,38 @@ class ChangedMarkdownTest(unittest.TestCase):
         self.assertEqual(run._changed_md(self.repo, None), (None, set()))
 
 
+class RosterMapTest(unittest.TestCase):
+    """The manager's capability map: one command answers what any agent can do — the roles it
+    takes and the deliverable kinds per role, straight from the catalog plan check enforces.
+    Turns of debate about which agent can do what were the alternative."""
+
+    def test_describe_prints_every_agent_with_roles_and_kinds(self) -> None:
+        h = Harness()
+        try:
+            out = h.tp("roster", "describe", wf=False).out
+            self.assertIn("capability map", out)
+            self.assertIn("code-author (author: code)", out)
+            self.assertIn("atlassian-liaison (research: integration; author: integration)", out)
+            self.assertIn("Transport only", out)                 # the liaison drafts nothing
+            self.assertIn("Never own source code", out)           # a doc author's files are documents
+            self.assertEqual(len([ln for ln in out.splitlines() if ln.startswith("- ")]), len(
+                json.loads((SKILL / "references" / "catalog.json").read_text())["agents"]))
+        finally:
+            h.close()
+
+    def test_describe_names_only_the_agents_asked_for(self) -> None:
+        h = Harness()
+        try:
+            out = h.tp("roster", "describe", "code-author", "doc-author", wf=False).out
+            self.assertIn("- code-author (author: code)", out)
+            self.assertIn("- doc-author (author: docs, research)", out)
+            self.assertNotIn("- atlassian-liaison (", out)
+            text = h.tp("roster", "describe", "hal-9000", wf=False, expect=2).text
+            self.assertIn("hal-9000 is not a pipeline agent", text)
+            self.assertIn("code-author", text)                    # the roster it offers instead
+        finally:
+            h.close()
+
+
 if __name__ == "__main__":
     unittest.main()

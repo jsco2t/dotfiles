@@ -283,6 +283,54 @@ class LostTest(unittest.TestCase):
         self.assertIn("not in flight", self.h.tp("lost", "T01", "--summary", "nothing", expect=2).text)
         self.assertIn("tp record", self.h.tp("lost", "R1", "--summary", "a researcher died", expect=2).text)
 
+    def test_a_fresh_dispatch_is_never_called_stale(self) -> None:
+        h = self.h
+        h.tp("dispatch", "T01")
+        acts = [a["action"] for a in h.next()["actions"]]
+        self.assertIn("dispatch", acts)                       # other tasks are ready: work continues
+        self.assertNotIn("stale", acts)
+        self.assertNotIn("tp lost", h.tp("next").out)
+
+    def test_a_silent_dispatch_past_the_threshold_is_stale_never_wait(self) -> None:
+        # A killed agent hands back nothing, so nothing re-invokes the manager: past the silence
+        # threshold the dispatch becomes a first-class action — `tp next` never endorses plain
+        # waiting on it, and never lets the run be reported done. (A real run sat 77 min dead.)
+        h = self.h
+        h.tp("dispatch", "T01")
+        elapse(h, 40)
+        acts = [a for a in h.next()["actions"] if a["action"] in ("stale", "wait")]
+        self.assertEqual([a["action"] for a in acts], ["stale"])
+        self.assertEqual(acts[0]["id"], "T01")
+        out = h.tp("next").out
+        self.assertIn("tp lost T01", out)
+        self.assertIn("Never report the run", out)
+        self.assertIn("watchdog", out)                     # re-arm after acting, or while waiting
+
+    def test_liveness_never_counsels_waiting_on_a_stale_dispatch(self) -> None:
+        # Two looks with nothing moving used to say "end your turn and wait for the hand-back" —
+        # exactly wrong once the dispatch is past the silence threshold: the hand-back is never
+        # coming. The warning must point at the stale action instead.
+        h = self.h
+        h.tp("dispatch", "T01")
+        elapse(h, 40)
+        h.next()                                          # first look
+        out = h.tp("next").out                            # second look, nothing moved
+        self.assertIn("past the silence threshold", out)
+        self.assertIn("Never end your turn on a stale dispatch", out)
+        self.assertNotIn("end your turn and wait", out)
+
+    def test_a_stale_dispatch_that_hands_back_still_records(self) -> None:
+        # Stale is a prompt to probe, not a verdict: the hand-back is recorded as usual.
+        h = self.h
+        h.tp("dispatch", "T01")
+        elapse(h, 40)
+        h.next()
+        h.good_article("architecture/overview.md")
+        h.result("T01", "author", changed=["architecture/overview.md"])
+        h.tp("record", "T01", "--agent-id", "a-1")
+        self.assertNotIn("T01", h.state()["in_flight"])
+        self.assertEqual(h.state()["tasks"]["T01"]["status"], "needs_check")
+
     def test_two_losses_leave_the_rerun_to_the_manager(self) -> None:
         self.lose_once("harness interrupt")
         self.h.tp("dispatch", "T01")

@@ -1000,9 +1000,11 @@ def _scope_diff(old: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
 # What the human agreed to at scope time, verbatim: an amendment that touches any of it is
 # theirs to approve, never the manager's to settle alone. Budgets are deliberately absent —
 # they are the manager's own reporting metadata (tp budget extend / research extend change
-# them without a question already).
+# them without a question already). Gate-ignore patterns are handled separately below: adding
+# one only stops a false positive (the harness's own artefacts, gitignored build noise) and is
+# plumbing; removing one stops the gates watching something, and is the human's.
 _DELEGATION_FROZEN = ("title", "output", "requirements", "terms", "non_goals", "ship", "answers",
-                      "limits", "ignore", "fix_tasks", "review", "workspaces")
+                      "limits", "fix_tasks", "review", "workspaces")
 
 
 def _scope_delegation_misfit(old: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
@@ -1011,9 +1013,10 @@ def _scope_delegation_misfit(old: Dict[str, Any], new: Dict[str, Any]) -> List[s
     terms, workspaces, shipping, their answers, what the gates enforce, the review mode, the
     fix-task allowance, title, output), the deliverable set is fixed — each one's description,
     kind, or destination may be refined, and the frozen requirements still map onto the same ids —
-    and no agent gains write authority (an author or tests role). Covers the two shapes real runs
-    hit: a routing fix (a liaison transports, a document author drafts) and a detail in-budget
-    research discovered (the dependent ticket's id)."""
+    no agent gains write authority (an author or tests role), and gate-ignore patterns are only
+    ever added, never removed. Covers the shapes real runs hit: a routing fix (a liaison
+    transports, a document author drafts), a detail in-budget research discovered (the dependent
+    ticket's id), and build noise the fence misread as task work (an added ignore pattern)."""
     labels = {"title": "the title", "output": "the output summary", "requirements": "the requirement ledger",
               "terms": "the significant terms", "non_goals": "the non-goals", "ship": "shipping",
               "answers": "the human's recorded answers", "limits": "what the gates enforce (limits)",
@@ -1023,6 +1026,10 @@ def _scope_delegation_misfit(old: Dict[str, Any], new: Dict[str, Any]) -> List[s
     changed = [labels[k] for k in _DELEGATION_FROZEN if old.get(k) != new.get(k)]
     if changed:
         out.append("it changes " + ", ".join(changed))
+    old_ig = {str(p) for p in old.get("ignore") or []}
+    new_ig = {str(p) for p in new.get("ignore") or []}
+    if old_ig != new_ig and not new_ig >= old_ig:
+        out.append("it removes gate-ignore patterns — what the gates stop watching is the human's call")
     ids = lambda s: {d.get("id") for d in s.get("deliverables", []) if isinstance(d, dict)}
     if ids(old) != ids(new):
         out.append("the deliverable set changes — work is added or dropped")
@@ -1111,8 +1118,9 @@ def cmd_scope_amend(wf: Workflow, answer: Optional[str], delegated: bool = False
                            + " — do not ask again: `tp scope amend --answer \"<their words>\"`. A change to either "
                            "draft after this check needs a new check and a new answer.")
             else:
-                out.append("This is plumbing — no requirement, non-goal, term, workspace, shipping decision, or "
-                           "write authority changes — so settle it yourself: `tp scope amend --delegated --note "
+                out.append("This is plumbing — no requirement, non-goal, term, workspace, shipping, or "
+                           "gate-enforcement change, no write authority gained, and any gate-ignore patterns "
+                           "only added — so settle it yourself: `tp scope amend --delegated --note "
                            f"\"<what changed and why, in plain words>\"` ({used} of {cap} used; recorded as yours, "
                            "listed in the report). Or ask once with `--answer` — the human always overrules.")
             return "\n".join(out)

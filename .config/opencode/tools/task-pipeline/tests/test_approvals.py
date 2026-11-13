@@ -245,6 +245,39 @@ class DelegatedScopeAmendTest(unittest.TestCase):
         finally:
             m.close()
 
+    def test_an_added_gate_ignore_pattern_settles_but_a_removed_one_asks(self) -> None:
+        # The KUB-1178 run asked the human to approve ignoring .opencode/**; KUB-1170 asked twice
+        # more for build output. Adding a pattern only stops a false positive, so it is plumbing;
+        # removing one stops the gates watching something, and stays the human's.
+        m = Mixed()
+        h = m.h
+        try:
+            scope = m.scope(["docs"], ["docs"], review="none")
+            scope["ignore"] = [".stamps/**"]
+            m.approve([m.doc_task("T01", path="docs/calc.md")], scope)
+            h.tp("scope", "amend")
+            d = json.loads((h.wf / "scope-amend.json").read_text())
+            d["ignore"] = [".stamps/**", "e2e-out/**"]
+            write(h, "scope-amend.json", d)
+            out = h.tp("scope", "amend").out
+            self.assertIn("settle it yourself", out)
+            self.assertNotIn("Ask the human once", out)
+            h.tp("scope", "amend", "--delegated", "--note",
+                 "Gate false positive: e2e-out/** is test scratch, never task work; nothing agreed changed.")
+            self.assertEqual(h.read_json("scope.json")["ignore"], [".stamps/**", "e2e-out/**"])
+            self.assertRegex((h.wf / "decisions.md").read_text(),
+                             r"scope amend \(manager-settled plumbing\) · manager: Gate false positive")
+            h.tp("scope", "amend")
+            d = json.loads((h.wf / "scope-amend.json").read_text())
+            d["ignore"] = [".stamps/**"]
+            write(h, "scope-amend.json", d)
+            self.assertIn("Ask the human once", h.tp("scope", "amend").out)
+            text = h.tp("scope", "amend", "--delegated", "--note",
+                        "Trust me, it is only plumbing.", expect=2).text
+            self.assertIn("removes gate-ignore patterns", text)
+        finally:
+            m.close()
+
     def test_a_substantive_change_still_costs_its_one_question(self) -> None:
         h = self.m.h
         d = self.scope_draft()

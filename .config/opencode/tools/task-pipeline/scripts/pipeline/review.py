@@ -358,6 +358,7 @@ def record(wf: Workflow, state: Dict[str, Any], sid: str, agent_id: Optional[str
     edits = []
     for name, snap in fl.get("snaps", {}).items():
         changed = snapshot.diff(snapshot.load(Path(snap)), run._take(wf, run._ws(scope, name)))
+        changed = [c for c in changed if c not in run.git_ignored(run._ws(scope, name), changed)]
         edits += [f"{name}:{c}" for c in changed if not snapshot.matches(c, allowed.get(name, []))]
     minutes = minutes_since(fl["since"])
     del state["in_flight"][sid]

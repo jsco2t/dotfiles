@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import briefs, docscheck, snapshot
 from . import plan as planmod
 from . import scope as scopemod
-from .common import (TP_SCRIPT, TPError, Workflow, agent_context_tokens, auto_accept, gap_minutes, limit, load_json, minutes_since,
+from .common import (TP_SCRIPT, TPError, Workflow, agent_context_tokens, auto_accept, catalog, gap_minutes, limit, load_json, minutes_since,
                      now_iso, sha_file, waiting_gaps, words)
 
 DONE_STATES = ("accepted", "skipped")
@@ -52,16 +52,36 @@ def _take(wf: Workflow, root: Path, only: Optional[List[str]] = None) -> snapsho
 
 
 def _ignored(wf: Workflow) -> List[str]:
-    """scope.json `ignore`: workspace-relative patterns for files no task writes (a sandbox's
-    per-command mount points), left out of every snapshot and read-only check."""
-    if not wf.scope_json.exists():
-        return []
+    """What no snapshot or gate ever counts: the catalog's `default_ignore` (the host harness's
+    own artefacts — its audit directory is written by the harness, never by a task, and was
+    human-approved as an ignore pattern in three separate runs in one day before it became a
+    default) plus scope.json `ignore`: workspace-relative patterns for files no task writes
+    (a sandbox's per-command mount points, repo build noise)."""
+    pats = list(catalog().get("default_ignore") or [])
+    if wf.scope_json.exists():
+        try:
+            data = json.loads(wf.scope_json.read_text())
+        except ValueError:
+            data = None
+        extra = data.get("ignore") if isinstance(data, dict) else None
+        if isinstance(extra, list):
+            pats += [str(p) for p in extra]
+    return pats
+
+
+def git_ignored(ws: Path, rels: List[str]) -> set:
+    """The paths the workspace's own .gitignore excludes (none when ws is not a git work tree).
+    Build output the repo itself refuses to track is not deliverable work: the write fence, the
+    read-only check, and the reviewer's no-concurrent-edits check skip it instead of raising
+    false positives the human is then asked to approve ignoring."""
+    if not rels or not (Path(ws) / ".git").exists():
+        return set()
     try:
-        data = json.loads(wf.scope_json.read_text())
-    except ValueError:
-        return []
-    pats = data.get("ignore") if isinstance(data, dict) else None
-    return [str(p) for p in pats] if isinstance(pats, list) else []
+        proc = subprocess.run(["git", "-C", str(ws), "check-ignore", "--stdin"], input="\n".join(rels),
+                              capture_output=True, text=True, timeout=30)
+        return set(proc.stdout.splitlines())
+    except (OSError, subprocess.SubprocessError):
+        return set()
 
 
 def _write_aliases(scope: Dict[str, Any]) -> set:
@@ -104,6 +124,8 @@ def _readonly_changes(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any]
             before = set(base["git"].splitlines())
             changed = [ln[3:] for ln in now.splitlines() if ln not in before]
         else:
+            # Non-git workspace: porcelain cannot see it, so the snapshot walk is the check (and
+            # git_ignored would be empty here anyway — there is no .gitignore to consult).
             changed = snapshot.diff(snapshot.load(Path(base["snap"])), _take(wf, root))
         changed = [c for c in changed if not (ignore and snapshot.matches(c, ignore))]
         if changed:
@@ -245,14 +267,23 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
             free -= 1
     review_acts = _review().actions(state, free)
     acts += review_acts
+    # A dispatch this old with no hand-back is presumed dying or dead: the harness kills an
+    # agent's silence well before this, and a killed agent never hands back, so nothing else
+    # would ever re-invoke the manager (a real run sat dead 77 min while reporting itself done).
+    # The action replaces blind waiting: tp next never endorses waiting on a dispatch past this.
+    stale = [{"action": "stale", "id": tid, "why": f"{minutes_since(fl['since']):.0f} min in flight, no hand-back"}
+             for tid, fl in sorted(state["in_flight"].items())
+             if minutes_since(fl["since"]) >= limit("stale_dispatch_minutes")]
+    acts += stale
     everything_done = all(ts["status"] in DONE_STATES for ts in state["tasks"].values())
     if (everything_done and not state["in_flight"] and not state.get("blocked")
             and not _review().open_sessions(state)):
         pending = _closeout_pending(wf, state)
         acts.append({"action": "closeout", "why": pending} if pending else {"action": "final"})
+    live = [tid for tid in state["in_flight"] if tid not in {a["id"] for a in stale}]
     if (not any(a["action"] in ("dispatch", "fix", "review", "final", "closeout", "rerun", "publish") for a in acts)
-            and state["in_flight"]):
-        acts.append({"action": "wait", "ids": list(state["in_flight"])})
+            and live):
+        acts.append({"action": "wait", "ids": live})
     return acts
 
 
@@ -284,7 +315,15 @@ GUIDE = {
              "approved test change: `tp rebaseline-tests {id} --answer \"...\" --by human`.",
     "rerun": "{why}. Check the workspace for stranded edits, then `tp resolve --task {id} --action retry "
              "--answer \"...\" --by manager` and `tp dispatch {id}` (a fresh agent).",
-    "wait": "Wait for {ids} to hand back; end your turn if nothing else is actionable.",
+    "wait": "Wait for {ids} to hand back; end your turn if nothing else is actionable — and arm the watchdog: "
+            "one background call `sleep 600 && {tp} next`; its completion re-invokes you (a dispatch "
+            "that dies never hands back, so nothing else would wake you). On each watchdog wake: `tp next`, act on "
+            "what it prints, re-arm if you end your turn still waiting.",
+    "stale": "{id} is {why} — past the silence threshold. `tp digest` shows whether its writes still move "
+             "(a long build that is writing is fine: keep waiting, note it, re-arm the watchdog). When nothing has "
+             "moved, the dispatch died: check the workspace for stranded edits, then `tp lost {id} --summary "
+             "\"...\"` (a research or review id keeps its slot: send its call again), resolve, and dispatch fresh. "
+             "Never report the run as done, or waiting normally, while a stale dispatch is unresolved.",
     "recheck": "`tp recheck {id}`: the sibling tasks whose red tests were its only failures have landed, so its "
                "tests and checks run again (no agent, no fix round).",
     "halting": "Halt requested: record {ids} as they hand back; dispatch nothing new.",
@@ -320,6 +359,12 @@ def _liveness_warning(wf: Workflow, acts: List[Dict[str, Any]]) -> Optional[str]
     if not same:
         return None
     idle = minutes_since(since)
+    stale = [tid for tid, fl in state["in_flight"].items()
+             if minutes_since(fl["since"]) >= limit("stale_dispatch_minutes")]
+    if stale:
+        return (f"no state change for {idle:.0f} min and {', '.join(stale)} "
+                f"{'is' if len(stale) == 1 else 'are'} past the silence threshold — do the stale action above: "
+                "`tp digest`, then `tp lost` if nothing is moving. Never end your turn on a stale dispatch.")
     if state["in_flight"]:
         return (f"no state change for {idle:.0f} min while {', '.join(state['in_flight'])} "
                 f"{'is' if len(state['in_flight']) == 1 else 'are'} in flight — end your turn and wait for the "
@@ -352,7 +397,8 @@ def cmd_next(wf: Workflow, as_json: bool, probe: bool = True) -> str:
             label += f" ({a['step']} · {a['agent']}" + (f" · resume {a['agent_id']}" if a.get("agent_id") else "") + ")"
         about = f" about {a['id']}" if a.get("id") else ""
         out.append(f"→ {label}: " + GUIDE[what].format(id=a.get("id", ""), why=a.get("why", ""), about=about,
-                                                      ids=", ".join(a.get("ids", []))))
+                                                      ids=", ".join(a.get("ids", [])),
+                                                      tp=f"python3 {TP_SCRIPT} -w {wf.root}"))
     ready = [a["id"] for a in acts if a["action"] in ("dispatch", "fix", "review")]
     if len(ready) > 1:
         out.append(f"→ all at once: `tp dispatch {' '.join(ready)}` (one Bash call — never chain dispatches "
@@ -980,6 +1026,7 @@ def _stale_guard(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], rnd:
     ws = _ws(scope, task["workspace"])
     since = snapshot.diff(snapshot.load(failed), _take(wf, ws))
     others = [c for c in since if not snapshot.matches(c, task["paths"])]
+    others = [c for c in others if c not in git_ignored(ws, others)]
     if not others:
         return []
     return [f"Since this round failed, these files outside your paths changed — most likely accepted concurrent "
@@ -1229,6 +1276,11 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
             if other in tasks and tasks[other]["workspace"] == task["workspace"]:
                 allowed += tasks[other]["paths"]
         off = [c for c in changed if not snapshot.matches(c, allowed)]
+        noise = git_ignored(ws, off) if off else set()
+        if noise:
+            off = [c for c in off if c not in noise]
+            msgs.append(f"{len(noise)} gitignored build artefact(s) ({', '.join(sorted(noise)[:5])}) left out of "
+                        "the write fence: the repo's own .gitignore excludes them, so no task owns them.")
         if off:
             findings.append(f"Changed files outside this task's paths: {', '.join(off[:10])} — revert them; if the "
                             "task cannot be done without them, hand back `blocked` and say why.")
@@ -2262,7 +2314,8 @@ def cmd_advance(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
     for a in rest:
         about = f" about {a['id']}" if a.get("id") else ""
         out.append(f"→ {a['action']} {a.get('id', '')}".rstrip() + ": " + GUIDE[a["action"]].format(
-            id=a.get("id", ""), why=a.get("why", ""), about=about, ids=", ".join(a.get("ids", []))))
+            id=a.get("id", ""), why=a.get("why", ""), about=about, ids=", ".join(a.get("ids", [])),
+            tp=f"python3 {TP_SCRIPT} -w {wf.root}"))
     return "\n\n".join(out)
 
 

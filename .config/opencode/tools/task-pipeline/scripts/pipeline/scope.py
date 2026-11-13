@@ -318,8 +318,11 @@ def render(scope: Dict[str, Any]) -> str:
     out += ["", "## Workspaces"]
     out += [f"- {w['name']} ({w['mode']}): `{w['path']}`" for w in scope["workspaces"]]
     # What the gates enforce differently in this workflow: the human confirms these too.
-    if scope.get("ignore"):
-        out += ["", "**Ignored by the gates:** " + ", ".join(f"`{p}`" for p in scope["ignore"])]
+    defaults = [str(p) for p in catalog().get("default_ignore") or []]
+    shown = [f"`{p}`" for p in defaults + [str(p) for p in scope.get("ignore") or []]]
+    if shown:
+        out += ["", "**Ignored by the gates:** " + ", ".join(shown)
+                + (" (the first are catalog defaults)" if defaults else "")]
     if scope.get("limits"):
         defaults = catalog()["limits"]
         out += ["", "**Limits changed:** " + ", ".join(f"{k} {v} (default {defaults.get(k)})"
@@ -457,4 +460,33 @@ def cmd_suggest(kinds: List[str]) -> str:
     out.append("Research is the manager's call, and a clear, small ask needs none; size its budget yourself as "
                "reporting metadata. Other research agents: "
                + ", ".join(sorted(a for a, e in cat["agents"].items() if "research" in e["roles"])) + ".")
+    return "\n".join(out)
+
+
+def cmd_describe(names: List[str]) -> str:
+    """The capability map: every agent (or the ones named), each role it takes, and the deliverable
+    kinds per role — straight from the catalog that `tp plan check` enforces. When the manager
+    wonders what an agent can or cannot do, this is the whole answer; arguing it from memory is
+    how runs spent turns debating misassignments the script could have settled in one line."""
+    cat = catalog()
+    agents = cat["agents"]
+    unknown = [n for n in names if n not in agents]
+    if unknown:
+        raise TPError(f"{', '.join(unknown)} is not a pipeline agent. The roster: {', '.join(sorted(agents))}.")
+    out = ["The capability map — the catalog is authoritative and `tp plan check` enforces the fit; never argue "
+           "an agent's abilities from memory:"]
+    for name in (names or sorted(agents)):
+        e = agents[name]
+        role_bits = []
+        for role in e["roles"]:
+            kinds = agent_kinds(name, role)
+            role_bits.append(f"{role}: {', '.join(kinds) if kinds else 'any'}")
+        out.append(f"- {name} ({'; '.join(role_bits)}) — {e['use']}")
+    roles = cat.get("roles", {})
+    if roles.get("transport"):
+        out.append(f"Transport only — they move approved content and never write it (a document task drafts it, "
+                   f"a `publish` task posts it): {', '.join(roles['transport'])}.")
+    if roles.get("no_code"):
+        out.append(f"Never own source code, comments included (their files are documents or research): "
+                   f"{', '.join(roles['no_code'])}.")
     return "\n".join(out)

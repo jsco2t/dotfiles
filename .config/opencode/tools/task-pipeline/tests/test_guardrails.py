@@ -11,8 +11,10 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Callable
 
 from harness import SKILL, Harness
+from scenarios import Mixed
 
 sys.path.insert(0, str(SKILL / "scripts"))
 
@@ -127,6 +129,55 @@ class ManagerAnswersClarifyTest(unittest.TestCase):
             self.assertIn("never removes or loosens", fix)
         finally:
             h.close()
+
+
+class GateNoiseTest(unittest.TestCase):
+    """The host harness's own artefacts and the repo's gitignored build output are not task work:
+    the write fence, the read-only check, and the reviewer no-edits check skip them, visibly,
+    instead of raising findings the human is then asked to approve ignoring (three separate runs
+    asked to ignore .opencode/** in one day; one asked twice more for build output)."""
+
+    def setUp(self) -> None:
+        self.m = m = Mixed()
+        (m.app / ".gitignore").write_text("staging/\n")
+        m.approve([m.doc_task("T01")], m.scope(["docs"], ["docs"], review="none"))
+
+    def tearDown(self) -> None:
+        self.m.close()
+
+    def round_with_noise(self, extra: Callable[[Path], None]) -> str:
+        m, h = self.m, self.m.h
+        h.tp("dispatch", "T01")
+        m.note(cite="calc.py:1-2")
+        extra(m.app)
+        h.result("T01", "author", changed=["docs/calc.md"])
+        return h.tp("record", "T01", "--agent-id", "da-1").out
+
+    def test_harness_artifacts_never_reach_the_fence(self) -> None:
+        def audit(app: Path) -> None:
+            p = app / ".opencode" / "ciq-loop" / "audit.log"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("grant long_task 8\n")
+        out = self.round_with_noise(audit)
+        self.assertNotIn("outside this task's paths", out)
+        self.assertEqual(self.m.h.state()["tasks"]["T01"]["status"], "needs_check")
+
+    def test_gitignored_build_output_is_left_out_of_the_fence_visibly(self) -> None:
+        def build(app: Path) -> None:
+            (app / "staging").mkdir(exist_ok=True)
+            (app / "staging" / "images.tar").write_text("x" * 2048)
+        out = self.round_with_noise(build)
+        self.assertNotIn("outside this task's paths", out)
+        self.assertIn("gitignored build artefact", out)
+        self.assertIn("staging/images.tar", out)
+        self.assertEqual(self.m.h.state()["tasks"]["T01"]["status"], "needs_check")
+
+    def test_a_tracked_file_outside_the_paths_is_still_a_finding(self) -> None:
+        def stray(app: Path) -> None:
+            (app / "calc.py").write_text("def add(a, b):\n    return a + b\n\ndef mul(a, b):\n    return a * b\n")
+        out = self.round_with_noise(stray)
+        self.assertIn("outside this task's paths", out)
+        self.assertEqual(self.m.h.state()["tasks"]["T01"]["status"], "needs_fix")
 
 
 class WidenGuardrailTest(unittest.TestCase):

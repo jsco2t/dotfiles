@@ -117,16 +117,18 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("path")
     s.add_argument("--name", required=True)
 
-    s = sub.add_parser("roster", help="participant suggestions")
-    s.add_argument("what", choices=["suggest"])
-    s.add_argument("--kinds", required=True, help="comma-separated deliverable kinds")
+    s = sub.add_parser("roster", help="the capability map (describe), or participant suggestions (suggest)")
+    s.add_argument("what", choices=["suggest", "describe"],
+                   help="describe: every agent's roles and kinds — the map; suggest: a minimal roster per kind")
+    s.add_argument("names", nargs="*", help="describe: only these agents (default: all)")
+    s.add_argument("--kinds", help="suggest: comma-separated deliverable kinds (required for suggest)")
 
     s = sub.add_parser("scope", help="check or confirm scope.json; amend the confirmed scope (scope-amend.json)")
     s.add_argument("what", choices=["check", "confirm", "amend"])
     s.add_argument("--answer", help="the human's words, verbatim (confirm; amend: approves the checked draft)")
     s.add_argument("--delegated", action="store_true", help="amend: apply checked plumbing yourself — the check "
-                   "proves no requirement, non-goal, term, workspace, shipping decision, or write authority "
-                   "changes — without a question")
+                   "proves no requirement, non-goal, term, workspace, shipping, or gate-enforcement change, no "
+                   "write authority gained, and no gate-ignore pattern removed — without a question")
     s.add_argument("--note", help="amend --delegated: what changed and why, in plain words")
 
     s = sub.add_parser("survey-issue", help="deterministic sizing of a Jira or GitHub issue (jira:KEY, gh:o/r#N)")
@@ -311,6 +313,11 @@ def cmd_show(wf: Workflow, tid: str, part) -> str:
 
 def dispatch(args: argparse.Namespace) -> str:
     if args.cmd == "roster":
+        if args.what == "describe":
+            return scopemod.cmd_describe(list(args.names))
+        if not args.kinds:
+            raise TPError("roster suggest needs --kinds (comma-separated deliverable kinds); "
+                          "`tp roster describe` prints the capability map.")
         return scopemod.cmd_suggest([k.strip() for k in args.kinds.split(",") if k.strip()])
     if args.cmd == "check-docs":
         return cmd_check_docs(args)

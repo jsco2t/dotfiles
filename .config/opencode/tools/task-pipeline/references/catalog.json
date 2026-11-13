@@ -1,5 +1,8 @@
 {
-  "_comment": "Which agents /task-pipeline may use, in which role, for which deliverable kinds. tp.py enforces it. Agents not listed here are never used. `role_kinds` overrides `kinds` for one role.",
+  "_comment": "Which agents /task-pipeline may use, in which role, for which deliverable kinds. tp.py enforces it. Agents not listed here are never used. `role_kinds` overrides `kinds` for one role. `default_ignore`: workspace-relative patterns no snapshot or gate ever counts (the host harness's own artefacts — added after the same pattern was human-approved in three separate runs in one day).",
+  "default_ignore": [
+    ".opencode/**"
+  ],
   "kinds": [
     "code",
     "kb",
@@ -394,6 +397,8 @@
     "max_delegated_fix_tasks": 5,
     "_max_delegated_scope_amends": "plumbing-only scope amendments the manager may settle without a question (a routing fix, a detail in-budget research discovered): everything the human agreed — requirement ledger, non-goals, terms, workspaces, shipping, answers, gate enforcement — unchanged and no write authority gained; substantive changes always ask",
     "max_delegated_scope_amends": 3,
+    "_stale_dispatch_minutes": "an in-flight dispatch this old with no hand-back gets a stale action in tp next (the harness kills an agent after about this much silence, so its death is otherwise invisible: no hand-back ever arrives to re-invoke the manager — real runs sat dead for over an hour while reporting themselves done)",
+    "stale_dispatch_minutes": 35,
     "review_near_miss_floor": 60,
     "review_full_finding_floor": 70,
     "auto_accept_steps": [

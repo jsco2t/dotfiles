@@ -1,5 +1,9 @@
 # Evaluation status for the autonomous workflow
 
+See [reliability-review.md](reliability-review.md) for the November 21 recovery/efficiency
+review, test-forward regressions and independent forward-check results. Runtime scenario
+coverage is not a measurement of real-workload latency or token savings.
+
 The historical agent scenarios below intentionally initialize with `--legacy-approvals` so
 existing measurements, prompts and graders retain their original contract. They are not
 performance evidence for the new autonomous default. The autonomous runtime is covered by

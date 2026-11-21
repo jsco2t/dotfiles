@@ -10,7 +10,7 @@ from snapshot import digest
 READ_ONLY = {"metrics", "packet"}
 COMMANDS = READ_ONLY | {"activity", "usage", "agent", "operation", "recover", "repair", "cancel-check"}
 CATEGORIES = ("scoping", "research", "implementation", "verification", "bookkeeping", "waiting")
-MODELS = {"SOL": "gpt-6.1-sol", "TERRA": "gpt-6.1-terra"}
+MODELS = {"inherit": None, "SOL": "gpt-6.1-sol", "TERRA": "gpt-6.1-terra"}
 
 
 def seconds(start, end):
@@ -200,13 +200,18 @@ def execute(wf, args, api):
         if args.action == "reserve":
             api.need(state["phase"] in ("PLANNING", "EXECUTING") and not state.get("question"), "agent work needs confirmed scope and no pending question")
             brief = api.read(args.file)
+            if isinstance(brief, dict):
+                brief.setdefault("model", "inherit")
+                brief.setdefault("reasoning", "inherit")
+                if brief["model"] == "inherit":
+                    brief.setdefault("model_reason", "Use the available session model for this bounded assignment.")
             scope = state["scope"]
             api.need(api.read(wf.root / "scope.json") == scope, "scope drift; inspect before delegation")
             api.need(args.id not in agents, "agent assignment id already exists")
             api.need(isinstance(brief, dict) and brief.get("role") in ("research", "review")
-                     and brief.get("model") in MODELS and brief.get("reasoning") in ("medium", "high")
+                     and brief.get("model") in MODELS and brief.get("reasoning") in ("inherit", "medium", "high")
                      and all(api.text(brief.get(k)) for k in ("question", "done_when", "model_reason"))
-                     and api.strings(brief.get("paths")), "brief needs bounded role/question/paths/stop condition and SOL/TERRA choice with reason")
+                     and api.strings(brief.get("paths")), "brief needs bounded role/question/paths/stop condition and a supported model/effort choice")
             for raw_path in brief["paths"]:
                 path = Path(raw_path).resolve()
                 api.need(Path(raw_path).is_absolute() and any(
@@ -244,8 +249,9 @@ def execute(wf, args, api):
                 target = next((r for r in entry.get("repairs", []) if r["id"] == brief["repair"]), {}) if brief.get("repair") else entry
                 api.need(target.get("test_checkpoint"), "correction reviewer needs an existing pin")
                 brief["pin_revision"] = digest(target["test_checkpoint"])
+                api.need(api.strings(brief.get("proofs", []), empty=True), "proofs must list actual correction-proof operation ids")
                 import corrections
-                brief["correction_revision"] = corrections.revision(wf, brief["task"], brief.get("repair"), brief.get("proof"))
+                brief["correction_revision"] = corrections.revision(wf, brief["task"], brief.get("repair"), brief.get("proof"), brief.get("proofs", []))
             elif purpose == "amendment":
                 api.need(brief["role"] == "review" and api.text(brief.get("plan_file")), "amendment review needs a candidate plan_file")
                 path = (wf.root / brief["plan_file"]).resolve()
@@ -263,7 +269,7 @@ def execute(wf, args, api):
             return packet(wf, brief.get("task"), args.id, args.max_bytes)
         agent = agents.get(args.id)
         api.need(agent is not None, "unknown agent assignment")
-        if args.action == "attach":
+        if args.action == "attach" or args.action == "finish" and args.agent_id:
             api.need(agent["status"] == "reserved" and api.text(args.agent_id), "attach actual identity to a reserved assignment")
             api.need(args.agent_id != state.get("author_agent_id", "main"), "reviewer cannot be the main author")
             if agent.get("context") == "fresh":
@@ -272,7 +278,7 @@ def execute(wf, args, api):
             elif agent.get("context") == "continue":
                 api.need(args.agent_id == agents[agent["continues"]]["agent_id"], "continue must attach the same host agent identity")
             agent.update(status="running", agent_id=args.agent_id, actual_model=args.actual_model, actual_reasoning=args.actual_reasoning)
-        elif args.action == "finish":
+        if args.action == "finish":
             api.need(agent["status"] == "running", "only a running agent can finish")
             result = api.read(args.file)
             api.need(isinstance(result, dict) and set(result) <= {"accepted", "summary", "validation", "evidence", "coverage", "unresolved"}
@@ -290,10 +296,10 @@ def execute(wf, args, api):
                 api.need(agent["plan_revision"] == api.plan_revision(wf), "plan review is stale; review the current request and plan")
             if agent.get("purpose") == "test-correction" and result["accepted"]:
                 import corrections
-                api.need(agent["correction_revision"] == corrections.revision(wf, agent["task"], agent.get("repair"), agent.get("proof")),
+                api.need(agent["correction_revision"] == corrections.revision(wf, agent["task"], agent.get("repair"), agent.get("proof"), agent.get("proofs", [])),
                          "test correction review is stale; review exact corrected tests, pin and proof")
             agent.update(result, status="done", ended=api.now())
-        else:
+        elif args.action == "cancel":
             api.need(agent["status"] in ("reserved", "running", "unknown"), "agent is already settled")
             agent.update(status="cancelled", ended=api.now(), cancellation_evidence=args.evidence)
         wf.event("agent-" + args.action, id=args.id)
@@ -364,8 +370,8 @@ def add_parsers(commands):
         if action == "reserve":
             child.add_argument("--capacity", type=int, required=True, help="total usable child capacity: assigned children plus free slots, excluding parent")
             child.add_argument("--max-bytes", type=int, default=16000, help="justified budget for the complete essential context packet")
-        if action == "attach":
-            child.add_argument("--agent-id", required=True)
+        if action in ("attach", "finish"):
+            child.add_argument("--agent-id", required=action == "attach")
             child.add_argument("--actual-model")
             child.add_argument("--actual-reasoning", choices=("medium", "high"))
         if action == "cancel":

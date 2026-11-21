@@ -40,8 +40,9 @@ one concrete decision; do not silently change outcomes through repair details.
 3. For qualifying findings, start a bounded `repair` step with the actual files, criterion,
    focused commands and test-first strategy. Add its regressions, inspect genuine failing
    behavior, and pin with `repair test --stage red`. Implement, check green, inspect the diff
-   and close that step before the next finding. Preserve earlier test pins with separate
-   regression files. Store notes inside the
+   and close that step before the next finding. Existing suites can be extended: retain
+   earlier cases/assertions and review shared-file pin evolution as described in execution.md.
+   Do not create separate regression files just to avoid pipeline bookkeeping. Store notes inside the
    workflow rather than changing product files during the pre-fix review.
 4. Run the affected component/integration gates required by the contract. Broaden when the
    change, failures, or repository rules justify it. Reuse current logs in the repair review;

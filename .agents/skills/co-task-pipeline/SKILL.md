@@ -1,185 +1,131 @@
 ---
 name: co-task-pipeline
 description: >-
-  Scope and deliver substantial work through a persistent Codex task pipeline. Resolve
-  material questions, write a detailed readable plan, obtain independent plan review,
-  then implement without human scope or plan approval. Supports start, resume, halt,
-  and status; one writer with bounded research/review delegation.
+  Plan and deliver substantial work through a persistent Codex pipeline, with independent
+  plan review, one implementation writer, test-forward repairs and resumable evidence.
+  Supports start, resume, halt and status without human scope or plan approval.
 ---
 
 # Codex task pipeline
 
-The human supplies a unit of work. Restate the requested result in your own words, resolve
-material ambiguities with them, investigate enough to make a detailed delivery plan, review
-that plan independently, and deliver it. Scoping and implementation are the two phases.
-**There is no human scope-confirmation or plan-approval gate.** Do not ask whether to proceed
-with work already requested. Clarification is for missing requirements, never ceremony.
+Turn the requested work into a reviewed plan, then deliver it. The main session owns scope,
+implementation and integration. Resolve material requirements with the user; settle routine
+engineering and pipeline mechanics yourself. **No human scope, plan or completion approval
+gate applies to new runs.** Existing authorization still governs external effects.
 
-The main session owns scope, integration and implementation. This skill permits up to three
-read-only research/review children within host capacity; the ceiling is not a target. Use
-one independent plan reviewer. Delegate other bounded questions only when they save useful
-work. No nested fanout or parallel writers. Choose SOL/TERRA per the
-[delegation policy](references/delegation.md); use fresh, narrow briefs and reuse the reviewer
-for repair inspection within the same unit when its context remains useful.
+## Start and plan
 
-## Invocation
-
-| Invocation | Action |
-| --- | --- |
-| `$co-task-pipeline <planning-location> <request>` | Start beneath that location. |
-| `$co-task-pipeline resume <workflow-dir>` | Recover and continue saved work. |
-| `$co-task-pipeline halt` or `hault` | Preserve and halt the active run. |
-| `$co-task-pipeline status <workflow-dir>` | Report saved progress without advancing. |
-
-Ask for a missing request/location or genuinely ambiguous active run. Use the helper bundled
-with the actual skill directory; never assume its deployed path or use another agent’s helper.
-Read [references/helper.md](references/helper.md) before advancing state. `tp` below means:
+Invocation: `$co-task-pipeline <planning-location> <request>`, `resume <workflow-dir>`,
+`halt` (also `hault`), or `status <workflow-dir>`. Ask only for a missing request/location
+or a genuinely ambiguous active run. Use this skill's actual directory, never another client's
+helper. Read [helper.md](references/helper.md) for schemas and command details. Here `tp` means:
 
 ```sh
 python3 "<actual-skill-dir>/scripts/tp.py" -w "<workflow-dir>" <command>
 ```
 
-## Scoping
+1. State the requested outcome and boundaries briefly. Read repository instructions and
+   existing edits. Preserve the complete request with `init <location> --title <title>
+   --request-file <file>`; supply the actual author identity when exposed.
+2. Investigate until you can describe the delivery units and verification. Reuse existing
+   evidence; planning does not require a full audit. Bundle material questions about requested
+   behavior, destination or authority. Continue independent investigation while awaiting answers.
+   Record genuine questions with `block` and actual answers with `resolve`; use saved evidence
+   to resolve questions already settled by the request. Never invent a user answer.
+3. Write `scope.json`: deliverables, every requested outcome/constraint as a requirement,
+   workspaces and non-goals. Compare it against `request.md`. Use Git snapshots for Git roots;
+   bound reference-document monitoring to relevant sources rather than historical archives.
+   Keep whole-workspace monitoring where production drift detection matters. Run `scope settle`.
+4. Write `plan.json`, then `plan check` to render readable `plan.md`. One task should complete
+   a coherent deliverable/component cycle, including review, fixes, tests and an authorized
+   commit when appropriate. Map every requirement to tasks with objective criteria, actual
+   dependencies and concrete files. Unknown findings can use `adaptive: true`; ordinary tasks
+   can also refine details and repair defects. Include requested external delivery.
+5. Obtain one independent read-only plan review of the exact request, decisions, rendered plan,
+   source assumptions and revision. Read [delegation.md](references/delegation.md) when assigning
+   a reviewer. Validate and reconcile findings; review material revisions with the same reviewer
+   when useful. Record an accepted return with `unresolved: []`, then `plan accept --agent <id>`.
+   Begin implementation immediately. A capability gap is not an independent self-review.
 
-1. **Understand the request.** Briefly state the outcome, boundaries and constraints in
-   ordinary language. Preserve the full request verbatim; initialize with `tp init
-   <planning-location> --title <title> --request-file <file>`. Supply `--author-agent-id`
-   when the host exposes your identity. Read repository instructions and existing edits.
-   Do not wait for a confirmation response when the request is already clear.
-2. **Investigate to a planning decision.** Map relevant behavior, dependencies, tests and
-   delivery destinations. Reuse existing reports and evidence. Stop when you can specify
-   the delivery tasks; do not perform a full audit merely to plan one. Ask material product,
-   policy, destination or scope questions during scoping, bundling related unknowns. Continue
-   independent investigation while waiting. Resolve every known material question before
-   implementation; record actual answers and their consequences once. Routine implementation
-   choices belong to you. Record a genuine question with `block`, then `resolve` when answered.
-3. **Settle the scope.** Write `scope.json` with requested deliverables, workspaces,
-   constraints/non-goals and a requirements ledger covering every distinct outcome, format,
-   destination and constraint. Compare that ledger with `request.md`. Use `snapshot: git` for
-   Git workspaces. For reference documents, set `monitor` to the specific files/directories
-   needed; never monitor whole historical pipeline archives incidentally. Full-workspace
-   monitoring remains appropriate for production write roots. Bounded monitoring detects
-   drift only in that boundary, plus task files and declared check inputs. Run `scope settle`
-   yourself; no invented operator answer. No human sign-off is needed.
-4. **Write the detailed plan.** Write `plan.json`, then `plan check` to produce **readable
-   Markdown in `plan.md`**, with the delivery sequence, per-unit task breakdown, dependencies,
-   concrete files (or adaptive finding-driven paths), objective acceptance criteria and
-   verification commands. Use one task per coherent deliverable/component cycle; keep review,
-   repair, relevant tests and an authorized commit together when they form one unit. Do not
-   create tasks per lens or checkpoint. Use `adaptive: true` for finding-driven work. Keep
-   common policy in one place. Link requirement IDs to tasks and verify full request coverage.
-   Plan external delivery when requested; a draft alone does not fulfill publication.
-5. **Independently review and reconcile.** Give a read-only reviewer the original request,
-   settled decisions, rendered plan, source evidence and the exact `plan check` revision.
-   Reserve an `agent` assignment with `role: review, purpose: plan`, attach its actual host
-   identity, and finish it only after validating its evidence. Require requirement coverage,
-   feasible verification, missing work, unnecessary work and unresolved issues. Fix confirmed
-   problems; changed request/scope/plan requires review of the new revision. Use `plan accept
-   --agent A1` only for the completed accepted review with no unresolved issues. Enter
-   implementation immediately. **Do not ask the human to approve the plan.** If independent
-   review is unavailable, report that concrete capability gap; do not label self-review independent.
+Give an estimate with assumptions for substantial work. Reassess from observed progress;
+estimates never limit requested scope or justify stopping.
 
-The internal legacy `PLANNING` state is part of scoping, not a separate research phase.
-For substantive work, give an estimate with assumptions; unknown repair costs stay unknown.
-Estimates inform reassessment, never a time limit or reason to omit requested work.
+## Deliver
 
-## Implementation
+Consult the plan and current task packet; do not repeatedly dump full state/history.
+`start T01` → implement and inspect → `done T01 --verify --result-file -` is the normal loop.
+The completion call runs missing/stale task checks once and returns the next action. Run
+focused checks separately when their output is needed to guide a fix. Acceptance evidence
+must address every criterion. A status question means report progress and continue working.
 
-Use `plan.md` and the current task packet to keep delivery on track. `next` identifies the
-ready task or missing gate; `packet T01` supplies its requirements/constraints without dumping
-history. Read relevant paged evidence only when needed. Preserve the user’s existing work.
+- Select meaningful verification: `red-green` for new behavior/bugs, `characterization` for
+  preserved behavior, `existing` for adequate coverage, `manual` when automation adds no value.
+  Exercise fixtures before pinning; compiler/import/setup failures are not behavioral red.
+- Use `refine` for necessary paths/checks or stronger verification, `widen` for paths alone,
+  and `repair` for additional test-first findings inside the same task. These are same-scope
+  manager actions, including on ordinary tasks. Do not create a task or approval round per assertion.
+- Fix your mistakes. Before a pin, correct and rerun directly. For changed pinned tests,
+  preserve old evidence, verify that earlier regression coverage survives, and follow
+  [execution.md](references/execution.md). Shared test files may evolve across tasks/repairs;
+  do not create artificial files to satisfy a hash lock. Never weaken behavior to manufacture green.
+- Correct same-scope scheduling or runner mistakes with `amend --by manager --reason ...`.
+  Existing check replacements need a focused independent review of preserved obligations.
+  Finish repairs before revalidating affected completed work; stale checks do not erase delivery.
+- For requested component review cycles, use [review-loops.md](references/review-loops.md).
+  Preserve exact requested iteration counts, reviewer skills, thresholds and review scope.
 
-- Start the task, implement all its criteria, verify, and record `done` with evidence for
-  every criterion. A mid-run status question means report progress and keep working.
-- Refine finding-driven details with `refine`, `widen` or incremental `repair` steps before
-  editing newly named files. These are manager decisions inside existing outcomes, not new
-  human approval requests. Prefer one coherent regression batch over a separate ceremony per
-  assertion. Preserve explicitly requested iteration counts, reviewer skills and thresholds.
-- Choose `red-green` for new behavior/bugs, `characterization` to preserve behavior, `existing`
-  when tests already cover the change, or `manual` for evidence unsuitable for automation.
-  Do not invent tests for trivial reversible edits. A compiler/import/setup failure is **not**
-  behavioral red. Check fixture readiness before pinning; inspect actual failure output.
-- **Fix your own mistakes.** Repair fixture imports, paths, build setup, incorrect expectations
-  or other honest test errors without human approval. Before a pin, just correct and rerun.
-  After a pin, use the [test-correction procedure](references/execution.md): preserve original
-  copies/logs, get a focused independent review, retain valid unchanged regression proof or
-  execute corrected tests on an isolated pre-fix baseline, then record the correction after
-  current green. Never weaken the requested behavior, delete coverage, skip tests or change
-  expectations merely to make faulty production look successful. Repairing a test is normal
-  engineering, not a human policy exception. Inability to prove a regression is unfinished
-  verification, not permission to fabricate success.
-- Same-scope scheduling/runner corrections use `amend --by manager --reason ...`. Existing
-  check-command changes also need a focused independent `purpose: amendment` review; no
-  human approval. Requested outcomes/criteria stay fixed, existing pins remain, and concurrent
-  edits are never silently adopted. Completed dependent tasks retain delivery evidence while
-  affected verification becomes dirty; finish repairs before revalidating those checks.
-- New material ambiguity discovered during implementation returns the affected work to
-  scoping: isolate the exact decision, continue independent work, clarify, update the readable
-  plan and review material changes. Never knowingly start implementation with open questions.
-  Changed requested outcomes or workspace authority still require the human’s actual decision.
+## Resolve problems without exporting pipeline work to the user
 
-For component reviews, also read [references/review-loops.md](references/review-loops.md).
+A helper refusal is a diagnosis to investigate, not automatically a human decision.
+Read its message, current task/operation and relevant saved evidence. Use the narrow recovery
+path and continue. Do not repeatedly retry an unchanged failure, hand-edit internal state,
+restart a workflow, or ask the user to authorize an agent's own repair.
 
-## Efficiency and recovery
+| Situation | Owner and response |
+| --- | --- |
+| Wrong path, missing test fixture, runner mistake, additional necessary file, stale check, reviewed shared-suite evolution | Agent: correct/refine/amend, preserve proof, verify and continue. |
+| Interrupted check or handoff | Agent: recover saved receipts; reconcile unknown outcomes before retry. |
+| Unrelated finding | Agent: record one optional observation with `note`; do not create a user follow-up obligation. |
+| Uncertain observed behavior | Agent: inspect source/tests or use bounded research; uncertainty alone is not a scope decision. |
+| Missing requirement, incompatible requested outcomes, new workspace/service authority, required removal/weakening of an outcome | User: show the concrete decision, evidence and consequences; continue independent work. |
+| Host permission or genuinely unavailable capability needed for required work | Follow the host's permission mechanism or report the exact missing capability, without claiming completion. |
 
-- Run focused checks while repairing and one meaningful integrated gate per batch. Establish
-  necessary baselines once. Use an early non-mutating diagnostic sweep to discover platform
-  failures together where useful (`--no-fail-fast` or independent suites); retain the strict
-  final gate. Do not rebuild unrelated platforms or repeat benchmarks/licensing audits per fix.
-- Reuse stable passing checks with complete scoped `inputs`, including runners, tests, shared
-  config, lockfiles, dependencies and relevant environment variables. External-state checks
-  remain uncached. Inspect saved logs before rerunning. Do not narrow inputs to preserve a pass.
-- After two unchanged infrastructure failures, diagnose readiness/environment rather than
-  blindly retrying. Repair demonstrated in-scope causes using existing tools; `--retry-reason`
-  records the actual diagnosis/change. Avoid global installs, speculative new harnesses or
-  product redesign merely to satisfy an agent-invented verification matrix.
-- `next` and other advancing boundaries reconcile completed worker receipts automatically.
-  Inspect running/unknown checks; cancel only their recorded worker when necessary. Retry only
-  missing verification. Never replay an unknown commit/publication or infer a pass from silence.
-- Use stdin JSON (`--file -` / `--result-file -`) for small structured payloads. Batch independent
-  reads; serialize state mutations. `batch --file -` runs deterministic transitions in order,
-  saves each success, stops at failure and returns the next action. It cannot launch agents or
-  make implementation decisions. Do not alternate status/next/full-state dumps after every call.
-- After the first delivery unit, and whenever progress stalls, compare review, repair, checks,
-  waiting and bookkeeping costs. Remove duplicated activity or fix the blocker. Report delivered
-  units and remaining work, with revised estimates when warranted. Metrics are boundary wall
-  spans; overlapping durations are not additive and unmeasured tokens stay unknown.
+If a late material question changes the work, update the affected scope/plan and independently
+review material revisions. Avoid knowingly implementing an unresolved requirement.
 
-## Scope and artifacts
+## Keep coordination proportional
 
-Admit work only if it serves a requested outcome or removes a demonstrated blocker. Tie a
-repair to an existing acceptance criterion. A curiosity or opportunistic improvement does not
-expand the job. Record a worthwhile unrelated finding once with `note`; report it at delivery
-as an optional observation, without asking the human to accept a follow-up obligation. Required
-work cannot be relabeled out of scope to finish early.
+Use at most three read-only children within host capacity, with no nested fanout or parallel
+writers. Independent plan review is required; other assignments must justify their setup cost.
+Reuse a reviewer for focused repair inspection within the same unit. Do not add reviews merely
+because a checkpoint exists. Keep source stable while it is being reviewed.
 
-Keep the root to `request.md`, `scope.json`, `scope.md`, `plan.json`, `plan.md`, an optional
-compact `research.md`, final `report.md`/`metrics.json`, and requested deliverables. Put durable
-supporting evidence in `.tp/evidence/`, draft contracts in `.tp/drafts/`, scratch in
-`.tp/scratch/` or the system temporary directory. Check logs live in `checks/`; internal state,
-checkpoint objects, original files, pins and receipts live in `.tp/`. Do not save a JSON brief,
-packet, result, duplicate report and diff for the same handoff. The helper already preserves
-structured evidence. Remove only scratch you created when no longer needed; never discard
-proof, saved pins or another actor’s files. Do not clean historical runs as an incidental action.
+Run focused checks during fixes and one meaningful integration gate per batch. Establish
+baselines once. Reuse stable current evidence with complete source/test/config/dependency and
+environment inputs; external-state checks stay uncached. After two unchanged infrastructure
+failures, diagnose the environment and use `--retry-reason` for an actual change/diagnosis.
+Avoid speculative harnesses, installations or unrequested verification matrices.
 
-**Never put JSON in a `.md` file.** JSON uses `.json` (or stdin); Markdown contains prose,
-headings, lists and meaningful code examples. `plan.md` is the human implementation document,
-not a JSON dump hidden inside a fence.
+Batch independent reads; serialize mutations. Use stdin JSON and `batch` for already-known
+transitions, never predicted evidence or agent identities. Read relevant references only when
+needed. At a completed unit or stall, remove duplicated reviews, checks, reads and bookkeeping.
+Report delivered units and remaining work. Helper wall spans overlap; unmeasured tokens stay unknown.
 
-## Finish, halt and resume
+## Finish and recover
 
-After implementation, run affected dirty verification and final checks; review the complete
-result against the original request and every requirement. Reuse completed component reviews,
-current logs and unchanged coverage. Review changed fixes and integration gaps; preserve any
-separately requested full-system review. Validate code and test quality or document claims.
-Record `review`, fix validated in-scope findings, and finish with `final`. No human completion
-approval is needed. Report delivered work, verification, limitations and worthwhile unrelated
-observations, linking `report.md`. External effects still need actual user authorization.
+Finish remaining work and affected verification; review the result against the original request
+and requirement ledger. Reuse component coverage and current logs; inspect fixes and integration
+gaps, preserving any separately requested full-system review. Record `review`, fix confirmed
+in-scope findings, and `final`. Report delivered work, verification and limitations with
+`report.md`. No human completion approval is needed.
 
-On `halt`/`hault`, stop assigning/starting work, interrupt active agents through host tools,
-preserve partial artifacts and record the halt. Stop only on an actual halt request, not elapsed
-time or an ordinary recovery issue. On resume, inspect status, request, readable plan, pending
-questions and partial edits; merge receipts before replaying anything. Resume the current task
-and its checkpoints. Legacy saved contracts stay compatible with their original gates; do not
-silently grant them new authority, modify another client’s state, or fabricate old approval.
-Status mode remains read-only.
+Keep human artifacts at the root: request, scope, readable plan, optional compact research,
+report and metrics. Put evidence/drafts/scratch under `.tp/`; logs under `checks/`. Use JSON
+for machine payloads and Markdown for prose. Do not duplicate every handoff into several files,
+discard proof, clean historical runs, or touch another client's state.
+
+On an actual halt, stop new work, interrupt owned agents, preserve partial artifacts and
+record `halt`. On resume, inspect status, request, plan, decisions and partial edits; recover
+receipts before replaying anything. Continue missing work from the existing checkpoint.
+Status mode is read-only. Legacy contracts retain their original authority; do not fabricate
+old approval or silently migrate a run. Ordinary recovery problems do not end an active task.

@@ -28,12 +28,13 @@ def reset(wf, tid, reason):
 
 def preserve(wf, snapshot, need, exclude=None):
     """A later task cannot silently weaken an earlier accepted regression."""
+    excluded = exclude if isinstance(exclude, set) else {exclude}
     for tid, entry in wf.tasks().items():
         for rid, item in [(None, entry)] + [(r["id"], r) for r in entry.get("repairs", [])]:
-            if (tid, rid) == exclude or item.get("status") == "superseded":
+            if (tid, rid) in excluded or item.get("status") == "superseded":
                 continue
             pin = item.get("test_checkpoint")
             if pin:
                 need(all(snapshot.get(path) == value for path, value in pin["hashes"].items()),
                      f"pinned tests changed in {tid}" + (f"/{rid}" if rid else "") +
-                     "; use a mechanical correction or an explicitly approved test amendment")
+                     "; preserve coverage with test-update and review; see references/execution.md")

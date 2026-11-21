@@ -1,6 +1,7 @@
 # Execution and honest test corrections
 
-Use the normal start → implementation → affected checks → done loop in [helper.md](helper.md).
+Use start → implementation → `done --verify` in [helper.md](helper.md), with focused checks
+while diagnosing fixes. The completion call returns the next action.
 Retain previous evidence rather than starting a new research/approval cycle per finding.
 
 ## Prevent premature pins
@@ -18,11 +19,16 @@ it is not a reason to wait overnight for permission to fix an import or expectat
 1. Inspect the original saved tests and red/pin log, task criteria and current diff. Identify
    the actual mistake and how the corrected test proves the unchanged requested behavior.
    Preserve every unaffected regression. Correct the tests in the running task’s declared
-   paths; keep other actors’ edits separate. Do not restore the live production tree.
+   paths; keep other actors’ edits separate. The pin owner may be a delivered task whose
+   shared tests are now owned by the running writer. Do not reopen delivered work merely
+   to record honest test evolution. Do not restore the live production tree.
 2. Choose the evidence basis. If values/cases/assertions and the genuine original behavioral
-   proof are unchanged, use `basis: retained` with `assertions_unchanged: true`,
+   proof are preserved, use `basis: retained` with `assertions_unchanged: true`,
    `original_checkpoint_valid: true` and specific evidence. An original compiler/setup failure
-   cannot be retained as behavioral red. A semantic correction needs a fresh reproduction.
+   cannot be retained as behavioral red. New cases are compatible with retained proof when
+   every earlier case/assertion remains intact. One focused review/update covers all changed
+   pins in those shared files, retaining each original copy/log. Semantic corrections need
+   fresh reproduction.
 3. For reproduction, prepare an isolated trustworthy pre-fix checkout/fixture outside all
    live workspace roots. Include the exact corrected test files, necessary source,
    dependencies/configuration and explicit baseline identity. Inspect the baseline diff;
@@ -48,7 +54,8 @@ it is not a reason to wait overnight for permission to fix an import or expectat
    <proof-operation>` when reproduced. Give the reviewer original/corrected tests, original
    criteria/pin, current diff/green log and baseline identity/actual proof log. They verify
    cases/assertions, meaningful regression detection and absence of weakened obligations.
-   The helper binds mandatory corrected-test hashes and task/pin/proof revision even if
+   The helper binds corrected-test hashes, the running writer and all affected shared-file
+   pins in the task/pin/proof revision even if
    optional review inputs are narrow. Attach the real host identity and validate the response.
 5. Record `test-update T01 --repair F1 --file -`. JSON has `kind: correction`, concrete
    `reason`, `evidence`, `agent: <completed-assignment-id>` and `regression`. For reproduced
@@ -56,6 +63,22 @@ it is not a reason to wait overnight for permission to fix an import or expectat
    For retained evidence use the fields in step 2. A stale review, mismatched test/proof,
    missing real receipt or absent current green stops replacement. Original pin/copies/logs
    remain archived; the corrected pin carries the current proof. Continue without human approval.
+
+For semantic changes affecting several pins in a shared file, run `correction-proof` for
+each invalid original checkpoint against its own trustworthy baseline. Other shared-file
+pins may remain temporarily changed while gathering proof; this cannot complete the task.
+Give the reviewer the primary `proof` operation plus additional `proofs: [<operation>, ...]`.
+In the update's `regression`, provide `related` entries with `task`, optional `repair`, and
+that pin's `basis`/`operation`/`evidence` (or honest retained-proof fields). An unchanged
+earlier regression can retain proof while the mistaken one is reproduced. Every affected
+pin needs a disposition and current green; one pin's red cannot stand in for another's proof.
+If an earlier characterization captured incorrect behavior, `correction-proof --stage red`
+can establish genuine regression proof and the reviewed update strengthens that pin and
+verification mode to red-green. Behavioral red cannot be replaced by a passing pin.
+
+When adding a new failing case to a shared suite, record the new task/repair's red before
+implementation. Then reach current green and review preservation of the earlier pins.
+Do not demand green before allowing the new red; the completion gates still enforce coverage.
 
 Legacy workflows retain their previous formatting-only `kind: mechanical` procedure or actual
 operator-authorized supersession. Do not silently migrate legacy authority. New workflows

@@ -47,13 +47,18 @@ def take(workspaces, workflow, tasks, cache, input_roots=()):
         workspace = next(w for w in workspaces if w["name"] == name)
         monitoring = workspace.get("monitor")
         monitored = [root / p for p in monitoring] if monitoring is not None else [root]
-        monitored += [root / p for task in list(tasks) + list(input_roots) if task["workspace"] == name for p in task["paths"]]
+        monitored += [root / p for task in tasks if task["workspace"] == name for p in task["paths"]]
+        input_prefixes = [root / p for item in input_roots if item["workspace"] == name for p in item["paths"]]
+        patterns = [p for item in input_roots if item["workspace"] == name for p in item.get("patterns", [])]
 
         def selected(path):
-            return any(path == p or p in path.parents for p in monitored)
+            from checks import matches
+            return (any(path == p or p in path.parents for p in monitored) or
+                    any(matches(path.relative_to(root).as_posix(), p) for p in patterns))
 
         def traverse(path):
-            return selected(path) or any(path in p.parents for p in monitored)
+            return selected(path) or any(path == p or path in p.parents or p in path.parents
+                                         for p in monitored + input_prefixes)
 
         if modes[name] == "git":
             # Git performs ignore pruning without opening SDKs, caches or build outputs.
@@ -73,7 +78,6 @@ def take(workspaces, workflow, tasks, cache, input_roots=()):
                     if selected(path) and (path.exists() or path.is_symlink()):
                         paths.add(path)
         if modes[name] == "git":
-            patterns = [p for item in input_roots if item["workspace"] == name for p in item.get("patterns", [])]
             if patterns:
                 # Declared check inputs include ignored dependencies, including new glob matches.
                 prefixes = [p for item in input_roots if item["workspace"] == name for p in item["paths"]]
@@ -93,7 +97,8 @@ def take(workspaces, workflow, tasks, cache, input_roots=()):
             # Directory symlinks are artifacts too, but never followed.
             files += [d for d in dirs if (here / d).is_symlink()]
             dirs[:] = [d for d in dirs if d != ".git" and
-                       (d not in SKIP or any(here / d == p or here / d in p.parents for p in monitored if p != root))
+                       (d not in SKIP or any(here / d == p or here / d in p.parents
+                                            for p in monitored + input_prefixes if p != root))
                        and not (here / d).is_symlink() and traverse(here / d)
                        and not any(here / d == p for p in excluded)]
             for filename in files:

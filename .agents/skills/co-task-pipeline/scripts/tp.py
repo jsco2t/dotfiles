@@ -347,6 +347,26 @@ class Workflow:
                 else:
                     originals[key] = None
 
+    def expand_monitoring(self, scope, plan, before):
+        """Admit newly observed originals, never changes to an already observed file."""
+        after = self.snapshot(scope, plan)
+        if after == before:
+            return after
+        need(self.state.get("governance") == "autonomous",
+             "new paths expose previously untracked contents; inspect and use an approved amendment")
+        need(all(after.get(p) == value for p, value in before.items()),
+             "previously monitored contents changed during refinement; inspect concurrent edits")
+        additions = {p: value for p, value in after.items() if p not in before}
+        # Immutable maps may be shared by the checkpoint store; replace, never mutate.
+        self.state["checkpoint"] = dict(self.state["checkpoint"], **additions)
+        for entry in self.tasks().values():
+            for item in [entry] + entry.get("repairs", []):
+                if "before" in item:
+                    item["before"] = dict(item["before"], **additions)
+        self.event("monitor-expand", paths=sorted(additions),
+                   reason="Manager inspected newly admitted originals; no prior observation changed.")
+        return after
+
     def runnable(self):
         need(self.state["phase"] == "EXECUTING", "execution requires approval and a non-halted run")
         need(not self.state.get("question"), "operator input is pending; resolve or amend first")
@@ -823,7 +843,8 @@ def execute(wf, args):
     if command == "refine":
         _, _, task = wf.task(args.task)
         entry = wf.tasks()[args.task]
-        need(task.get("adaptive", False), "refine requires adaptive: true in the approved task")
+        need(state.get("governance") == "autonomous" or task.get("adaptive", False),
+             "refine requires adaptive: true in the approved legacy task")
         need(entry["status"] in ("pending", "running"), "reopen completed work before refining it")
         need(not any(tid != args.task and t["status"] == "running" for tid, t in wf.tasks().items()),
              "finish the active task before refining another task")
@@ -860,9 +881,8 @@ def execute(wf, args):
         else:
             snapshot = wf.snapshot(scope, plan)
             wf.idle_checkpoint(snapshot)
-        need(wf.snapshot(scope, updated) == snapshot,
-             "new paths expose previously untracked contents; inspect and use an approved amendment")
         need(updated != plan, "refinement changes nothing")
+        snapshot = wf.expand_monitoring(scope, updated, snapshot)
         wf.capture_baseline(scope, updated)
         state.update(plan=updated, checks=retain_checks(state, snapshot, updated), review=None)
         write(wf.root / "plan.json", updated)
@@ -872,8 +892,10 @@ def execute(wf, args):
     if command == "test-update":
         _, _, task = wf.task(args.task)
         entry = wf.tasks()[args.task]
-        need(task.get("adaptive", False), "test-update requires adaptive: true in the approved task")
-        need(entry["status"] == "running", "start and pin this task first")
+        need(state.get("governance") == "autonomous" or task.get("adaptive", False),
+             "test-update requires adaptive: true in the approved legacy task")
+        import corrections
+        active_task, active_entry = corrections.writer(wf, task, entry, need)
         target = entry
         if args.repair:
             target = next((r for r in entry.get("repairs", []) if r["id"] == args.repair), None)
@@ -889,46 +911,70 @@ def execute(wf, args):
              "use a documented mechanical correction or independently reviewed correction; retain acceptance criteria")
         checkpoint = target["test_checkpoint"]
         need(checkpoint.get("files"), "original pinned copies unavailable; use an approved amendment")
-        snapshot, _ = wf.edits(scope, plan, task, entry["before"])
-        verification_evidence.preserve(wf, snapshot, need, exclude=(args.task, args.repair))
+        snapshot, _ = wf.edits(scope, plan, active_task, active_entry["before"])
+        related = corrections.affected(wf, args.task, args.repair, snapshot) if reviewed else [(task, args.repair, target)]
+        verification_evidence.preserve(wf, snapshot, need, exclude={(t["id"], rid) for t, rid, _ in related})
         hashes = {p: snapshot.get(p) for p in checkpoint["hashes"]}
         need(all(hashes.values()) and hashes != checkpoint["hashes"], "pinned tests must exist and have a correction")
+        writable = {f"{active_task['workspace']}:{p}" for p in active_task["paths"]}
+        need(all(p in writable for p in hashes if hashes[p] != checkpoint["hashes"][p]),
+             "the running writer must own every corrected test path")
         verification = target["verification"] if args.repair else task["verification"]
         need(fresh(state["checks"].get(verification["check"]), snapshot, plan["checks"][verification["check"]]),
              "run the verification check on current contents before recording a correction")
+        receipts = {}
+        dispositions = {}
         if reviewed:
             agent = independent(wf, correction["agent"], "test-correction")
             need(agent.get("task") == args.task and agent.get("repair") == args.repair,
                  "correction reviewer must cover this exact task/repair pin")
             current = check_runtime.fingerprint(snapshot, {"inputs": agent["inputs"]}) if "inputs" in agent else digest(snapshot)
-            import corrections
             need(agent.get("source") == current and agent.get("pin_revision") == digest(checkpoint)
-                 and agent.get("correction_revision") == corrections.revision(wf, args.task, args.repair, agent.get("proof")),
+                 and agent.get("correction_revision") == corrections.revision(wf, args.task, args.repair, agent.get("proof"), agent.get("proofs", [])),
                  "test correction review is stale; inspect current tests, original pin and criteria")
             proof = correction["regression"]
             need(isinstance(proof, dict) and proof.get("basis") in ("retained", "reproduced") and text(proof.get("evidence")),
                  "correction needs independently verified regression evidence")
-            if proof["basis"] == "reproduced":
-                receipt = state.get("proofs", {}).get(proof.get("operation"), {})
-                details = receipt.get("proof", {})
-                need(receipt and receipt.get("stable") and details.get("task") == args.task
-                     and details.get("repair") == args.repair and details.get("tests") == hashes
-                     and details.get("check_definition") == plan["checks"][verification["check"]]
-                     and agent.get("proof") == proof.get("operation"),
-                     "reproduced correction needs the actual stable correction-proof receipt for these exact tests and reviewer")
-                code = receipt["exit_code"]
-                need((code > 0 and code not in (124, 127, 130)) if checkpoint["stage"] == "red" else code == 0,
-                     "baseline must demonstrate the intended failure/pass, not a launch error or timeout")
-            else:
-                need(proof.get("assertions_unchanged") is True and proof.get("original_checkpoint_valid") is True,
-                     "retained proof requires unchanged cases/assertions and a genuine original behavior failure; otherwise reproduce")
-            verification_evidence.archive(wf, args.task, "Agent-owned test correction: " + correction["reason"])
-        target.setdefault("test_updates", []).append(dict(previous=copy.deepcopy(checkpoint), **correction))
-        target["test_checkpoint"] = dict(checkpoint, hashes=hashes, files=wf.pin_files(task, hashes))
-        if reviewed and correction["regression"]["basis"] == "reproduced":
-            target["test_checkpoint"].update(log=receipt["log"],
-                                           note=correction["regression"]["evidence"],
-                                           baseline=details["identity"], proof=receipt["operation"])
+            extra = proof.get("related", [])
+            need(isinstance(extra, list), "regression.related must list per-pin proof dispositions")
+            for item in extra:
+                need(isinstance(item, dict) and text(item.get("task"))
+                     and (item.get("repair") is None or text(item["repair"])), "related proof needs task and optional repair")
+                key = (item["task"], item.get("repair"))
+                need(key != (args.task, args.repair) and key not in dispositions
+                     and key in {(t["id"], rid) for t, rid, _ in related}, "unknown or duplicate related pin")
+                dispositions[key] = item
+            for owner, rid, item in related:
+                key = (owner["id"], rid)
+                disposition = dispositions.get(key, proof if key == (args.task, args.repair) or proof["basis"] == "retained" else None)
+                current_hashes = {p: snapshot.get(p) for p in item["test_checkpoint"]["hashes"]}
+                receipts[key] = corrections.verify_regression(wf, owner, rid, item, disposition, current_hashes, agent, sys.modules[__name__])
+                dispositions[key] = disposition
+                verify = item["verification"] if rid else owner["verification"]
+                need(fresh(state["checks"].get(verify["check"]), snapshot, plan["checks"][verify["check"]]),
+                     "run every affected pin's verification check green before correction")
+            for tid in {t["id"] for t, _, _ in related}:
+                verification_evidence.archive(wf, tid, "Agent-owned test correction: " + correction["reason"])
+        for owner, rid, item in related:
+            previous = item["test_checkpoint"]
+            current_hashes = {p: snapshot.get(p) for p in previous["hashes"]}
+            need(all(current_hashes.values()), "retained regression files must still exist")
+            item.setdefault("test_updates", []).append(dict(previous=copy.deepcopy(previous), **correction))
+            item["test_checkpoint"] = dict(previous, hashes=current_hashes, files=wf.pin_files(owner, current_hashes))
+            receipt = receipts.get((owner["id"], rid))
+            if receipt:
+                details = receipt["proof"]
+                stage = details.get("stage", previous["stage"])
+                item["test_checkpoint"].update(stage=stage, log=receipt["log"],
+                    note=dispositions[(owner["id"], rid)]["evidence"], baseline=details["identity"], proof=receipt["operation"])
+                if stage == "red" and previous["stage"] == "pin":
+                    verify = item["verification"] if rid else owner["verification"]
+                    verify["mode"] = "red-green"
+                    verify["reason"] = correction["reason"]
+            if wf.tasks()[owner["id"]]["status"] == "done":
+                state.setdefault("verification_dirty", {})[owner["id"]] = "Reviewed shared-test evolution in " + active_task["id"]
+        write(wf.root / "plan.json", state["plan"])
+        render(wf.root, "plan", state["plan"])
         state["review"] = None
         wf.event("test-update", task=args.task, previous=checkpoint["hashes"], current=hashes,
                  detail=correction, reason=correction["reason"], repair=args.repair, by="manager")
@@ -954,8 +1000,7 @@ def execute(wf, args):
         new_task = next(t for t in updated["tasks"] if t["id"] == args.task)
         new_task["paths"] += added
         validate_plan(updated, scope, wf.root)
-        need(wf.snapshot(scope, updated) == snapshot,
-             "new paths expose previously untracked contents; inspect and use an approved amendment")
+        snapshot = wf.expand_monitoring(scope, updated, snapshot)
         wf.capture_baseline(scope, updated)
         state.update(plan=updated, checks=retain_checks(state, snapshot, updated), review=None)
         write(wf.root / "plan.json", updated)
@@ -1036,6 +1081,14 @@ def execute(wf, args):
                  "each acceptance entry needs an integer criterion and evidence")
             criteria.append(item["criterion"])
         need(sorted(criteria) == list(range(1, len(task["acceptance"]) + 1)), "every criterion needs exactly one evidence entry")
+        if args.verify:
+            for name in task["checks"]:
+                if not fresh(wf.state["checks"].get(name), snapshot, plan["checks"][name]):
+                    execute(wf, argparse.Namespace(command="check", name=name, force=False, retry_reason=None))
+                    wf.runnable()
+                    snapshot, changes = wf.edits(scope, plan, task, wf.tasks()[args.task]["before"])
+            # Workers release the lock and reload durable state, so discard old references.
+            state, entry = wf.state, wf.tasks()[args.task]
         for name in task["checks"]:
             need(fresh(state["checks"].get(name), snapshot, plan["checks"][name]), f"required check {name} is missing, failed, or stale")
         if entry.get("repairs"):
@@ -1044,15 +1097,16 @@ def execute(wf, args):
         if verification["mode"] in ("red-green", "characterization"):
             checkpoint = entry.get("test_checkpoint")
             need(checkpoint and all(snapshot.get(p) == value for p, value in checkpoint["hashes"].items()),
-                 "test checkpoint missing or pinned tests changed; ask before correcting the approved test strategy")
+                 "test checkpoint missing or pinned tests changed; record test/test-update with genuine regression evidence")
         entry.update(status="done", result=result, changes=changes, ended=now(),
                      checks={c: copy.deepcopy(state["checks"][c]) for c in task["checks"]})
         entry.pop("before", None)
         state["checkpoint"] = snapshot
+        state.get("verification_dirty", {}).pop(args.task, None)
         tracking.switch(wf, "verification" if all(t["status"] == "done" for t in wf.tasks().values()) else "bookkeeping",
                         "Integrate and review delivered outcomes")
         wf.event("done", task=args.task, result=result, changes=changes)
-        return f"Accepted {args.task}. Run next."
+        return f"Accepted {args.task}.\n" + next_action(wf)
     if command == "reopen":
         need(args.task in wf.tasks() and wf.tasks()[args.task]["status"] == "done", "only completed tasks can reopen")
         need(not any(t["status"] == "running" for t in wf.tasks().values()), "finish or amend the active task first")
@@ -1177,7 +1231,7 @@ def execute(wf, args):
 SCHEMAS = {
     "scope": dict(title="Add multiplication", deliverables=[dict(id="D1", kind="code", what="Add mul(a,b)", where="app/calc.py")],
                   requirements=[dict(id="R1", text="Add multiplication with zero and negative operand support.", deliverables=["D1"])],
-                  workspaces=[dict(name="app", path="/absolute/path/to/app", mode="write")],
+                  workspaces=[dict(name="app", path="/absolute/path/to/app", mode="write", snapshot="git")],
                   constraints=["Follow repository instructions; preserve existing edits."], non_goals=["No unrelated cleanup."],
                   review="self", max_agents=3, estimate_minutes=30),
     "plan": dict(summary="Add and verify multiplication.", tasks=[dict(id="T01", title="Multiply", kind="code", serves=["D1"], requirements=["R1"],
@@ -1206,7 +1260,7 @@ SCHEMAS = {
     "agent": dict(role="research", requirements=["R1"], question="Locate multiplication callers and their existing tests.",
                   paths=["/absolute/path/to/app"], done_when="Return bounded caller/test evidence with paths and lines.",
                   unit="multiplication-callers", context="fresh", inputs={"app": ["calc.py", "test_*.py", "pyproject.toml"]},
-                  model="TERRA", reasoning="medium", model_reason="Bounded evidence extraction with simple acceptance."),
+                  model="inherit", reasoning="inherit"),
     "agent-result": dict(accepted=True, summary="Callers and tests identified.", evidence=["calc.py:12; test_calc.py:8"],
                          validation="Parent inspected the cited callers and reconciled all requested evidence.", unresolved=[]),
     "usage": dict(id="main-session", source="Host session cumulative counters, exact session id and timestamp.",
@@ -1263,6 +1317,7 @@ def parser():
         item.add_argument("task")
         if name == "done":
             item.add_argument("--result-file", required=True)
+            item.add_argument("--verify", action="store_true", help="run missing/stale task checks once before acceptance")
         if name == "test":
             item.add_argument("--stage", required=True, choices=("red", "pin"))
             item.add_argument("--note", required=True)
@@ -1296,6 +1351,7 @@ def parser():
     item = commands.add_parser("correction-proof", help="execute corrected tests against a prepared isolated pre-fix baseline")
     item.add_argument("task")
     item.add_argument("--repair")
+    item.add_argument("--stage", choices=("red", "pin"), help="retain the old stage, or strengthen a mistaken characterization to red")
     item.add_argument("--baseline", required=True)
     item.add_argument("--identity", required=True, help="exact pre-fix revision/fixture provenance")
     item.add_argument("--snapshot", choices=("git", "walk"), default="walk")

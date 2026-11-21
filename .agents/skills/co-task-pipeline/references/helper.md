@@ -11,18 +11,19 @@ tp init <location> --title <title> --request-file <verbatim-request> --author-ag
 tp -w <workflow> scope settle
 tp -w <workflow> plan check
 tp -w <workflow> agent reserve --id A1 --capacity 1 --file -
-tp -w <workflow> agent attach --id A1 --agent-id <actual-independent-reviewer>
-tp -w <workflow> agent finish --id A1 --file -
+tp -w <workflow> agent finish --id A1 --agent-id <actual-independent-reviewer> --file -
 tp -w <workflow> plan accept --agent A1
 tp -w <workflow> start T01
 ```
 
 Write `scope.json` and `plan.json` before their validation commands. `schema scope|plan|agent`
 prints examples. The agent reservation must specify `role: review, purpose: plan`; include
-request requirement IDs, source starting paths, question, stopping condition and model/rationale.
+request requirement IDs, source starting paths, question and stopping condition. Model/effort
+default to inherited settings; explicit SOL/TERRA routing remains supported with its rationale.
 The packet binds the current request, scope, plan JSON and rendered `plan.md` revision.
-Give that exact request/document to the actual reviewer. Attach its host identity, validate its
-result, then record `accepted: true`, summary, evidence, validation and `unresolved: []` through
+Give that exact request/document to the actual reviewer. Validate its result, supply the actual
+host identity with the finish call (or attach earlier for recovery), then record `accepted: true`,
+summary, evidence, validation and `unresolved: []` through
 `agent finish`. Plan, test-correction and amendment reviews require an explicit `unresolved`
 list of nonblank issue strings; only `[]` clears the independent-review gate. Missing, null,
 boolean or object values cannot clear it, including in previously saved review records.
@@ -59,7 +60,8 @@ product decision during implementation returns that part to scoping, preserving 
   Optional `monitor: ["file.md", "reference-directory"]` bounds captured paths and traversal.
   Use it for reference documents instead of watching archives. Files added/deleted under those
   directories are observed. Task files and check-input roots are always added to monitoring,
-  including ignored glob matches. Undeclared paths outside this set are **not drift-detected**;
+  including ignored glob matches. Traversal prefixes do not capture unrelated sibling files.
+  Undeclared paths outside this set are **not drift-detected**;
   keep whole monitoring where that guarantee matters. This is bookkeeping, not a sandbox.
 - Plan: `summary`, `tasks`, named `checks`, `final_checks`. Each task: `id: T01`, `title`,
   `kind`, `serves`, `requirements`, `workspace`, concrete relative `paths`, `depends_on`,
@@ -110,6 +112,9 @@ after success. Do not put a future test result or unknown agent identity into a 
 Only one task runs at a time. `start T01` checkpoints; implement its paths. `test T01 --stage
 red|pin --note ...` runs the real contracted check and pins test copies/hashes. `done` requires
 current passing task checks, retained pins and one evidence entry per numbered criterion.
+Prefer `done T01 --verify --result-file -`: it runs missing/stale checks once, keeps failures
+and logs without accepting the task, and returns the next action after success. Current
+evidence is retained without rerunning checks. Use separate `check` calls during diagnosis.
 
 `check <name>` uses a detached cancellable worker and durable receipts. Reusable stable passes
 at identical declared inputs return their existing log; `--force` requests a rerun. Source
@@ -127,16 +132,29 @@ does not execute them or grant permission. Read-only `status`, `packet` and `met
 ## Refinement and self-healing
 
 `refine T01 --file - --reason ...` adds paths/checks and establishes test-first verification
-on adaptive tasks without changing outcomes or pinned strategy. `widen T01 --path ...
+without changing outcomes or pinned strategy. Ordinary autonomous tasks can refine, repair
+and correct tests; legacy runs retain their adaptive allowance. `widen T01 --path ...
 --deliverable D1 --reason ...` adds files inside an existing workspace. Do this before editing
-new files. Neither operation adopts unexpected edits. `repair start/test/done` gives successive
-findings independent retained checkpoints inside one adaptive task. Prefer a coherent finding
+new files. Newly observed originals outside prior monitoring are admitted and original planned
+file contents are saved; existing checkpoints expand without rewriting prior observations.
+Inspect these originals and state the reason. This cannot adopt changes to already monitored
+files. `repair start/test/done` gives successive findings independent retained checkpoints
+inside one task. Prefer a coherent finding
 batch; do not create a new human decision per defect.
 
 Honest pinned test corrections use the detailed procedure in [execution.md](execution.md).
 New runs require a focused independent reviewer for pin changes, preserving old evidence and
-current genuine proof. Before pinning, correct mistakes directly. No human approval is needed
-for same-contract test fixes. Do not label assertion weakening a mechanical correction.
+current genuine proof. A later running task can own changes to completed tasks' shared tests;
+`test-update <pin-owner>` retains their delivery records. One retained-proof review/update covers
+all affected pins in those shared files, with original copies/logs retained for each. An added
+failing repair regression can record red before prior-pin preservation review; completion
+still requires current green and preserved coverage. Before pinning, correct mistakes directly.
+No human approval is needed for same-contract test fixes. Do not label assertion weakening a
+mechanical correction.
+
+Grouped semantic corrections use per-pin `regression.related` dispositions and reviewer
+`proofs` in addition to the primary `proof`; see execution.md. An invalid characterization
+can be strengthened with a real `correction-proof --stage red`, never the reverse.
 
 `amend --by manager --reason ... --plan-file <draft.json>` can adjust same-scope scheduling,
 concrete files and verification runners while preserving task IDs, titles, deliverables,

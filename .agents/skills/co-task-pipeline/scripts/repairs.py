@@ -37,9 +37,13 @@ def execute(wf, args, api):
              "recover the unresolved operation first")
     scope, plan, task = wf.task(args.task)
     entry = wf.tasks()[args.task]
-    api.need(task.get("adaptive") and entry["status"] == "running", "repair requires a running approved adaptive task")
+    api.need((wf.state.get("governance") == "autonomous" or task.get("adaptive")) and entry["status"] == "running",
+             "repair requires a running task (adaptive for legacy runs)")
     snapshot, _ = wf.edits(scope, plan, task, entry["before"])
-    preserve(entry, snapshot, api.need)
+    # An added failing case in a shared suite must reach its red checkpoint before
+    # current green and preservation review are possible. Completion still checks all pins.
+    if args.action != "test" or wf.state.get("governance") != "autonomous":
+        preserve(entry, snapshot, api.need)
     repairs = entry.setdefault("repairs", [])
     if args.action == "start":
         api.need(not any(r["status"] == "running" for r in repairs), "finish the active repair first")
@@ -80,7 +84,7 @@ def execute(wf, args, api):
                  and api.strings(verification.get("test_paths"))
                  and set(verification["test_paths"]) <= set(spec["paths"]), "repair needs a concrete test-first strategy")
         api.validate_plan(updated, scope, wf.root)
-        api.need(wf.snapshot(scope, updated) == snapshot, "repair exposes ignored originals; inspect and amend before adopting")
+        snapshot = wf.expand_monitoring(scope, updated, snapshot)
         wf.capture_baseline(scope, updated)
         wf.state.update(plan=updated, checks=api.retain_checks(wf.state, snapshot, updated), review=None)
         api.write(wf.root / "plan.json", updated)
@@ -100,6 +104,9 @@ def execute(wf, args, api):
         api.need(not repair.get("test_checkpoint"), "repair tests are already pinned")
         api.need(verification["mode"] == ("red-green" if args.stage == "red" else "characterization"), "wrong repair test stage")
         tests = {f"{task['workspace']}:{p}" for p in verification["test_paths"]}
+        for pin in pins(entry):
+            api.need(all(p in tests or snapshot.get(p) == value for p, value in pin["hashes"].items()),
+                     "changes to prior pinned files must be confined to the active repair's test paths")
         api.need(set(delta) <= tests and tests <= snapshot.keys(), "repair production changed before tests")
         result = wf.run_check(verification["check"], scope, plan)
         wf.runnable()

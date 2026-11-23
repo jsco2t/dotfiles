@@ -347,6 +347,50 @@ PLAN_REVIEW_SCHEMA = ('{{"review": "plan", "round": {rnd}, "verdict": "pass | ch
                       '"observations": ["<worthwhile and non-blocking>"]}}')
 
 
+AMEND_REVIEW_SCHEMA = ('{{"review": "amendment", "round": {rnd}, "verdict": "approve | reject | escalate", '
+                       '"reason": "<complete sentence: why, grounded in the request, an answer, or the evidence>", '
+                       '"concerns": ["<anything the manager should watch, non-blocking>"]}}')
+
+
+def amend_review(rnd: int, ctx: Dict[str, Any], result: Path) -> str:
+    """The independent judgment of a mid-run change that strengthens the run (another reviewer, more
+    tests, a task past the allowance): approve it, reject it, or escalate it to the human. It stands
+    in for the human's approval, so it is told exactly what the human keeps for themselves."""
+    out = [f"# /task-pipeline amendment review — {rnd}", "",
+           HEADER.format(box=_estimate("5 min") + " Judge one change."), "",
+           "## What you judge", "",
+           "The manager wants to change a running pipeline. Your verdict decides it instead of the human: "
+           "approve applies it, reject drops it, escalate puts it to the human. You did not propose it and will not "
+           "carry it out. Edit nothing.", "",
+           "## The change", "", *[f"    {ln}" for ln in ctx["lines"]], "",
+           f"Why it is not the manager's alone: {'; '.join(ctx['reasons'])}.", "",
+           f"The manager's reason: {ctx['note']}", "",
+           f"Full drafts: `{ctx['draft_md']}`; the run as agreed: `{ctx['scope_md']}`, `{ctx['plan_md']}`.", "",
+           "## The request, verbatim", "", "```text", str(ctx["request"]).strip(), "```", ""]
+    if ctx.get("requirements"):
+        out += ["## Requirements as agreed", ""] + [
+            f"- **{r['id']}** — {r.get('text', '')}" + (f" — source: “{r['source']}”" if r.get("source") else "")
+            for r in ctx["requirements"]] + [""]
+    if ctx.get("answers"):
+        out += ["## The human's answers", ""] + [f"- {a}" for a in ctx["answers"]] + [""]
+    if ctx.get("prior"):
+        out += ["## Earlier verdicts on this kind of change", "", "A revised draft must answer them; a rejection "
+                "stands unless the revision removes its reason.", ""] + [f"- {p}" for p in ctx["prior"]] + [""]
+    out += ["## Decide", "",
+            "- **approve** — the change makes the delivery more accurate, complete, or better verified (an added "
+            "reviewer, more or stronger tests, a task the requirements need, a requirement the request or an answer "
+            "states), it is needed — not gold-plating — and it changes nothing the human would see as a different "
+            "deliverable.",
+            "- **reject** — it is unnecessary, wrong, or costs more than it protects. Say what to do instead.",
+            "- **escalate** — it changes what is delivered (new or different content, a new destination, a "
+            "requirement the request and answers do not state), or removes an agent, a check, or agreed work. That is "
+            "the human's, however good the idea.", "",
+            "Read the request and the answers before the manager's reason: judge the change, not the argument for "
+            "it. Ground the reason in a request line, an answer, or evidence you checked.", ""]
+    out += _style()
+    return "\n".join(out + _handback(result, AMEND_REVIEW_SCHEMA.format(rnd=rnd))) + "\n"
+
+
 def plan_review(rnd: int, ctx: Dict[str, Any], result: Path) -> str:
     """The independent plan reviewer's brief: the plan against the request, the human's answers, and
     the requirements ledger, bound to one plan revision. Its verdict replaces the human's approval."""

@@ -234,6 +234,14 @@ def _action_for(tid: str, ts: Dict[str, Any], task: Dict[str, Any], scope: Dict[
     return act
 
 
+def _amend_action(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """An amendment review with the reviewer: the one way back to it, for `tp next` and a fresh session."""
+    ar = state.get("amend_review") or {}
+    if ar.get("status") != "in_flight":
+        return []
+    return [{"action": "amend_review", "id": f"amend/review:{ar.get('round')}", "why": ar.get("kind", "plan")}]
+
+
 def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> List[Dict[str, Any]]:
     phase = state["phase"]
     if phase == "DONE":
@@ -248,7 +256,7 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
         return [{"action": "scope"}]
     if phase == "PLANNING":
         free = limit("max_in_flight") - len(state["in_flight"])
-        return _research().actions(state, free) + [{"action": "plan"}]
+        return _research().actions(state, free) + _amend_action(state) + [{"action": "plan"}]
     if phase == "AWAITING_APPROVAL":
         pr = state.get("plan_review") if int(state.get("contract", 1)) >= 2 else None
         if pr is None:  # a workflow from before the plan review keeps its human approval
@@ -296,7 +304,7 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
             acts.append(act)
             free -= 1
     review_acts = _review().actions(state, free)
-    acts += review_acts
+    acts += review_acts + _amend_action(state)
     everything_done = all(ts["status"] in DONE_STATES for ts in state["tasks"].values())
     if (everything_done and not state["in_flight"] and not state.get("blocked")
             and not _review().open_sessions(state)):
@@ -334,7 +342,9 @@ GUIDE = {
              "(`--action tests`), a test correction (`tp rebaseline-tests {id} --by manager`), a gate you have "
              "shown false (`tp accept {id} --override`, even once its fix round is printed), a file the fix needs "
              "(`tp widen`), a fix task inside the allowance (`tp plan amend --delegated`), plumbing scope (`tp scope "
-             "amend --delegated`). Only what changes the outcome, drops work, or writes "
+             "amend --delegated`); what strengthens the run past that — a reviewer, more tests, a bigger fix — goes "
+             "to an independent reviewer (`tp plan|scope amend --review`). Only what changes the outcome, drops work, "
+             "an agent, or a check, or writes "
              "outside the run goes to the human: `tp ask --about {id} --question \"...\"`, put it to them in plain "
              "text, and keep working everything else — never AskUserQuestion while agents are in flight. If "
              "settling it changes the plan, draft and check the amendment first (`tp plan amend`) and show its "
@@ -361,6 +371,9 @@ GUIDE = {
                 "the report unasked. Only deferred work goes to the human: draft and check its fix first (`tp plan "
                 "amend`) so `tp closeout --ask` shows the cost, ask once, then `tp closeout --decide --answer` (and "
                 "`tp plan amend --answer` if they chose the fix).",
+    "amend_review": "{id} ({why} amendment) is with the independent reviewer: when it replies, `tp advance {id} "
+                    "--agent-id <its id>` (or `tp {why} amend --record --agent-id <its id>`) — its verdict applies, "
+                    "drops, or escalates the change.",
     "done": "Report to the human from report.md.",
     "asked": "Waiting on the human for {why} — asked already; keep working the rest.",
 }
@@ -1301,6 +1314,13 @@ def _sample(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any]) -> str:
 
 
 def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
+    if tid.startswith("amend/"):
+        # The reviewer hands back like any agent; its verdict settles the amendment it judged.
+        kind = (wf.load().get("amend_review") or {}).get("kind")
+        if kind not in ("scope", "plan"):
+            raise TPError(f"no amendment review is in flight ({tid}).")
+        return (planmod.cmd_scope_amend(wf, None, record=True, agent_id=agent_id) if kind == "scope"
+                else planmod.cmd_amend(wf, None, record=True, agent_id=agent_id))
     with wf.locked():
         state = wf.load()
         if tid.startswith("R"):
@@ -2467,10 +2487,18 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
                 "Added by the manager without a question, inside the fix-task allowance you gave at scope time:", ""]
         out += [f"- {tid} — {tasks[tid]['title'] if tid in tasks else '?'}: {a.get('note')}"
                 for a in delegated for tid in a.get("tasks", [])]
+    reviewed = ([f"- {', '.join(a.get('tasks') or []) or 'plan'}: {a.get('note')} — the reviewer: {a.get('reason')}"
+                 for a in state.get("amendments", []) if a.get("reviewed")]
+                + [f"- scope: {a.get('note')} — the reviewer: {a.get('reason')}"
+                   for a in state.get("scope_amendments", []) if a.get("reviewed")])
+    if reviewed:
+        out += ["", "## Changes an independent reviewer approved", "",
+                "Each strengthened the run without changing what it delivers; the reviewer judged it in your place:",
+                ""] + reviewed
     plumbing = [a for a in state.get("scope_amendments", []) if a.get("delegated")]
     if plumbing:
         out += ["", "## Scope plumbing the manager settled", "",
-                "Nothing you agreed changed (requirements added only from your own recorded answers):", ""]
+                "Nothing you agreed changed — wording, rationale, or less write authority:", ""]
         out += [f"- {a.get('note')} ({'; '.join(c.strip() for c in a.get('changes', []))})" for a in plumbing]
     review_lines = _review().report_lines(state)
     if review_lines:
@@ -2534,6 +2562,9 @@ def cmd_status(wf: Workflow, as_json: bool) -> str:
     research = state.get("recon", {})
     if research:
         out.append("  research: " + ", ".join(f"{rid} {r['status']}" for rid, r in list(research.items())[:12]))
+    for a in _amend_action(state):
+        out.append(f"  amendment review: {a['id']} ({a['why']}) with the reviewer — `tp {a['why']} amend --record "
+                   "--agent-id <its id>`")
     reviews = state.get("reviews", {})
     if reviews:
         def _wait(s: Dict[str, Any]) -> str:

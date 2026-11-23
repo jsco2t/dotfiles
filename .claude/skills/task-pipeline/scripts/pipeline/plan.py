@@ -935,7 +935,7 @@ def _delegation_misfit(approved: Dict[str, Any], draft: Dict[str, Any], scope: D
     fx = scopemod.fix_tasks(scope)
     allow = int(fx.get("allow") or 0)
     if not allow:
-        return ["the human allowed no fix tasks without asking: ask them"]
+        return ["the human allowed no fix tasks without review"]
     before = {t["id"]: t for t in approved["tasks"]}
     after = {t.get("id"): t for t in draft["tasks"]}
     # Scheduling is the manager's: an unstarted task re-ordered, re-estimated, given a source or a
@@ -1016,13 +1016,15 @@ def _checked_draft(wf: Workflow, state: Dict[str, Any]) -> Tuple[Dict[str, Any],
     return approved, draft, scope, changes, frozen
 
 
-def cmd_amend(wf: Workflow, answer: Optional[str], delegated: bool = False, note: Optional[str] = None) -> str:
+def cmd_amend(wf: Workflow, answer: Optional[str], delegated: bool = False, note: Optional[str] = None,
+              review: bool = False, record: bool = False, agent_id: Optional[str] = None) -> str:
     """Change the approved plan mid-run: add tasks, or change or remove tasks not yet dispatched.
     The draft lives in plan-amend.json, so plan.json stays the contract — and agents in flight can
-    still be recorded — until it is approved. Draft first, then check it (`tp plan amend`), which
-    renders the one question to put to the human; their answer approves exactly the checked draft.
-    Inside the human's standing fix-task delegation (scope `fix_tasks`), `--delegated --note`
-    applies it without a question, recorded as the manager's."""
+    still be recorded — until it is applied. Draft, check (`tp plan amend`), then the check says who
+    settles it: the manager inside the standing fix-task allowance (`--delegated --note`); an
+    independent reviewer for what strengthens the run past it — more tasks, bigger ones, stricter
+    criteria (`--review --note`, then `--record`); the human for what drops agreed work or a check,
+    or changes what is delivered (`--answer`, which also overrules either of the others)."""
     with wf.locked():
         state = wf.load()
         if state["phase"] != "EXECUTING":
@@ -1041,49 +1043,66 @@ def cmd_amend(wf: Workflow, answer: Optional[str], delegated: bool = False, note
             return f"{draft_path.name} changes nothing yet."
         remaining, _ = _remaining(draft, scope, state)
         _, scope_pending = _amend_scope(wf)
+        human = _plan_human_reasons(approved, draft, scope)
         misfit = _delegation_misfit(approved, draft, scope, state, changes)
         if scope_pending:
-            misfit = misfit + ["a scope amendment is pending: the human approves both together"]
-        if answer is None and not delegated:
+            human = human + ["a scope amendment is pending: `tp scope amend` settles both together"]
+        allow = int(scopemod.fix_tasks(scope).get("allow") or 0)
+        used = len(state.get("delegated", []))
+        if answer is None and not delegated and not review and not record:
             (wf.root / "plan-amend.md").write_text(render(draft, scope, wf))
             state["amend_checked"] = {"sha": sha_file(draft_path), "ts": now_iso()}
             wf.save(state)
-            allow = int(scopemod.fix_tasks(scope).get("allow") or 0)
             if scope_pending:
-                tail = [f"A scope amendment is pending: `tp scope amend` checks both, and the human's one answer "
-                        "approves both (`tp scope amend --answer`)."]
-            else:
+                tail = ["A scope amendment is pending: `tp scope amend` checks both, and one decision settles both."]
+            elif human:
                 tail = [f"Ask the human once, showing this change (full plan: {wf.root / 'plan-amend.md'}); their "
                         "answer approves it — do not ask again: `tp plan amend --answer \"<their words>\"`. If the "
                         "human already chose this exact change in answer to a question that showed it (a closeout, "
                         "a blocked task), pass those words; do not ask twice. A change to plan-amend.json after this "
-                        "check needs a new check and a new answer."]
-                if allow and not misfit:
-                    used = len(state.get("delegated", []))
-                    tail.append(f"Or, inside the human's standing delegation ({used} of {allow} fix tasks used): "
-                                "`tp plan amend --delegated --note \"<what is wrong and why it needs fixing>\"` — no "
-                                "question; the report lists it.")
-                elif allow:
-                    tail.append("This is not within the standing delegation: " + "; ".join(misfit) + ".")
+                        "check needs a new check and a new answer. (Theirs because " + "; ".join(human) + ".)"]
+            elif misfit:
+                tail = [("This is not within the standing delegation: " if allow else "") + "; ".join(misfit) + ". It "
+                        "strengthens the run without changing what is delivered, so an independent review settles it, "
+                        "not the human: `tp plan amend --review --note \"<why it makes the delivery more accurate>\"`, "
+                        "send the call it prints, then `tp plan amend --record --agent-id <its id>`. If the human "
+                        "already chose this exact change in answer to a question that showed it (a closeout, a blocked "
+                        "task), pass those words instead — `--answer \"<their words>\"`; do not ask twice."]
+            else:
+                tail = [f"Inside the human's standing delegation ({used} of {allow} fix tasks used): `tp plan amend "
+                        "--delegated --note \"<what is wrong and why it needs fixing>\"` — no question; the report "
+                        "lists it."]
             return "\n".join([f"amendment ok — {'; '.join(changes)}:"] + _change_lines(approved, draft) + remaining
                              + tail)
         checked = state.get("amend_checked") or {}
-        if checked.get("sha") != sha_file(draft_path):
+        checked_now = {"sha": sha_file(draft_path)}
+        if record:
+            verdict, reason, rec = _amend_review_verdict(wf, state, "plan", agent_id, checked_now)
+            if verdict != "approve":
+                return _verdict_out("plan", verdict, reason, wf.root / "plan-amend.md")
+        elif checked.get("sha") != checked_now["sha"]:
             raise TPError("plan-amend.json changed since its check, or was never checked: run `tp plan amend`, show the "
                           "human what it prints, and ask again — an answer approves only the draft it was shown."
                           if checked else "plan-amend.json was never checked: run `tp plan amend` first, then ask the "
                           "human about what it prints.")
+        if review:
+            if human:
+                raise TPError("This goes to the human, not a reviewer: " + "; ".join(human) + ".",
+                              "Ask them once, showing what `tp plan amend` printed, then `tp plan amend --answer "
+                              "\"<their words>\"`.")
+            return _amend_review_start(wf, state, "plan", [f"{'; '.join(changes)}:"] + _change_lines(approved, draft),
+                                       misfit or ["inside the standing delegation"], note, checked)
         if delegated:
-            if misfit:
-                raise TPError("Not within the human's standing fix-task delegation: " + "; ".join(misfit) + ".",
-                              "Ask the human (one question, showing this change), then `tp plan amend --answer "
-                              "\"<their words>\"` — never shrink an estimate or split the work to make it fit.")
+            if human or misfit:
+                raise TPError("Not within the human's standing fix-task delegation: " + "; ".join(human + misfit) + ".",
+                              "An independent review settles what strengthens the run (`tp plan amend --review --note "
+                              "\"...\"`); what drops work or a check goes to the human — never shrink an estimate or "
+                              "split the work to make it fit.")
             if not note or words(note) < 4:
                 raise TPError("--delegated needs --note: what is wrong and why it needs fixing, in plain words (the "
                               "report shows it to the human).")
             added = [t["id"] for t in draft["tasks"] if t["id"] not in {a["id"] for a in approved["tasks"]}]
             state["delegated"] = list(state.get("delegated", [])) + added
-            allow = int(scopemod.fix_tasks(scope).get("allow") or 0)
             label = f"plan amend (fix-task delegation, {len(state['delegated'])} of {allow})"
             _apply_amendment(wf, state, draft, scope, changes, {"delegated": True, "note": " ".join(note.split()),
                                                                 "tasks": added})
@@ -1092,14 +1111,111 @@ def cmd_amend(wf: Workflow, answer: Optional[str], delegated: bool = False, note
             wf.event("plan_amend", changes=changes, delegated=True)
             return "\n".join([f"amended under the standing delegation — {'; '.join(changes)}."] + remaining
                              + ["`tp next`."])
+        if record:
+            added = [t["id"] for t in draft["tasks"] if t["id"] not in {a["id"] for a in approved["tasks"]}]
+            _apply_amendment(wf, state, draft, scope, changes, {"reviewed": True, "note": rec["note"],
+                                                                "reason": reason, "tasks": added})
+            wf.save(state)
+            wf.decision("plan amend (approved by independent review)", f"{rec['note']} — the reviewer: {reason}",
+                        who="plan-reviewer")
+            wf.event("plan_amend", changes=changes, reviewed=True)
+            return "\n".join([f"amended on the reviewer's approval — {'; '.join(changes)}."] + remaining
+                             + ["`tp next`."])
         if scope_pending:
-            raise TPError("A scope amendment is pending: apply both with one answer — `tp scope amend` checks them "
-                          "together, then `tp scope amend --answer \"<their words>\"`.")
+            raise TPError("A scope amendment is pending: apply both with one decision — `tp scope amend` checks them "
+                          "together.")
         _apply_amendment(wf, state, draft, scope, changes, {"answer": answer})
         wf.save(state)
         wf.decision("plan amend", str(answer))
         wf.event("plan_amend", changes=changes)
         return "\n".join([f"amended — {'; '.join(changes)}."] + remaining + ["`tp next`."])
+
+
+def _amend_review_start(wf: Workflow, state: Dict[str, Any], kind: str, lines: List[str], reasons: List[str],
+                        note: Optional[str], checked: Dict[str, Any]) -> str:
+    """Dispatch the independent judgment of a checked amendment that strengthens the run: the plan
+    reviewer (who never wrote it) approves, rejects, or escalates it to the human. Bound to the exact
+    checked draft: an edit after dispatch voids the verdict."""
+    from . import briefs, run
+    if not note or words(note) < 6:
+        raise TPError("--review needs --note: why the change makes the delivery more accurate or better verified, "
+                      "in plain words (the reviewer judges it; the report shows it).")
+    if (state.get("amend_review") or {}).get("status") == "in_flight":
+        raise TPError(f"an amendment review is in flight: when it replies, `tp {state['amend_review']['kind']} amend "
+                      "--record --agent-id <its id>`.")
+    earlier = [r for r in state.get("amend_reviews", []) if r.get("kind") == kind]
+    if any(r.get("verdict") == "reject" and r.get("sha") == checked.get("sha")
+           and r.get("plan_sha") == checked.get("plan_sha") for r in earlier):
+        raise TPError("the reviewer already rejected this exact draft: revise it to answer the rejection (then `tp "
+                      f"{kind} amend` and `--review` again), or delete it — another reviewer is not a second opinion.")
+    n = len(state.get("amend_reviews", [])) + 1
+    run_dir = wf.root / "runs" / "amend"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    brief, result = run_dir / f"brief-review-{n}.md", run_dir / f"result-review-{n}.json"
+    result.unlink(missing_ok=True)
+    scope = scopemod.load_scope(wf)
+    ctx = {"request": (wf.root / "request.md").read_text(errors="replace") if (wf.root / "request.md").exists() else "",
+           "scope_md": wf.root / "scope.md", "plan_md": wf.root / "plan.md",
+           "draft_md": wf.root / ("scope-amend.md" if kind == "scope" else "plan-amend.md"),
+           "lines": lines, "reasons": reasons, "note": " ".join(note.split()),
+           "requirements": [r for r in scope.get("requirements") or [] if isinstance(r, dict)],
+           "answers": [f"{q['text']} — {q['answer']}" for q in (state.get("questions") or {}).values()
+                       if q.get("answer") and q.get("by", "human") == "human"],
+           "prior": [f"review {r['round']}: {r['verdict']} — {r['reason']}" for r in earlier]}
+    brief.write_text(briefs.amend_review(n, ctx, result))
+    agent = catalog_plan_reviewer()
+    state["amend_review"] = {"kind": kind, "round": n, "status": "in_flight", "checked": dict(checked),
+                             "note": ctx["note"], "reasons": reasons, "since": now_iso()}
+    wf.save(state)
+    wf.event("dispatch", id=f"amend/review:{n}", step="amend_review", agent=agent)
+    call = briefs.dispatch_line(agent, f"amendment review {n}", briefs.prompt(brief, result), None, None)
+    return "\n".join([f"AMENDMENT REVIEW {n} · {agent} — it judges whether the change is right and needed, "
+                      "within what the human asked for", f"brief: {brief}", f"send: {call}",
+                      f"then, when it replies: tp advance amend/review:{n} --agent-id <its agent id>",
+                      "It is one of your three agents: send it when a slot is free, and keep working the rest."])
+
+
+def _amend_review_verdict(wf: Workflow, state: Dict[str, Any], kind: str, agent_id: Optional[str],
+                          checked_now: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
+    """(verdict, reason, the review record) for the amendment review in flight; refuses a malformed
+    hand-back (the reviewer fixes it) and a draft edited since dispatch (the verdict is for another one)."""
+    ar = state.get("amend_review") or {}
+    if ar.get("status") != "in_flight" or ar.get("kind") != kind:
+        raise TPError(f"no {kind} amendment review is in flight — `tp {kind} amend --review --note \"...\"` starts one.")
+    result = wf.root / "runs" / "amend" / f"result-review-{ar['round']}.json"
+    if not result.exists():
+        raise TPError(f"{result} is missing — the reviewer writes it before you record. SendMessage it to write it.")
+    data = load_json(result, "the amendment review")
+    errs = []
+    if not isinstance(data, dict) or data.get("review") != "amendment" or data.get("round") != ar["round"]:
+        errs.append(f"it must say \"review\": \"amendment\" and \"round\": {ar['round']}.")
+    elif data.get("verdict") not in ("approve", "reject", "escalate"):
+        errs.append("verdict must be approve, reject, or escalate.")
+    elif words(str(data.get("reason", ""))) < 6:
+        errs.append("reason must say, in a sentence, why — the report shows it to the human.")
+    if errs:
+        raise TPError(*[f"{result.name}: {e}" for e in errs], "SendMessage the reviewer to fix the file, then record again.")
+    state.pop("amend_review", None)
+    if {k: ar["checked"].get(k) for k in ("sha", "plan_sha")} != {k: checked_now.get(k) for k in ("sha", "plan_sha")}:
+        wf.save(state)
+        raise TPError("the draft changed after it went to review, so this verdict is for another change: `tp "
+                      f"{kind} amend` to check it again, then `--review` again.")
+    record = {"round": ar["round"], "kind": kind, "verdict": data["verdict"], "reason": " ".join(str(data["reason"]).split()),
+              "agent_id": agent_id, "note": ar.get("note"), "sha": ar["checked"].get("sha"),
+              "plan_sha": ar["checked"].get("plan_sha"), "ts": now_iso()}
+    state.setdefault("amend_reviews", []).append(record)
+    wf.save(state)
+    wf.event("record", id=f"amend/review:{ar['round']}", step="amend_review", status=data["verdict"])
+    return data["verdict"], record["reason"], record
+
+
+def _verdict_out(kind: str, verdict: str, reason: str, draft_md: Path) -> str:
+    """What the manager does after a reject or an escalation (an approval applies at once)."""
+    if verdict == "reject":
+        return (f"The reviewer rejected the change: {reason}\nNot applied. Revise the draft (then `tp {kind} amend` and "
+                f"`--review` again), or delete it and go on without it.")
+    return (f"The reviewer escalated it — {reason}\nAsk the human once, showing this change (full: {draft_md}) and the "
+            f"reviewer's reason; their answer applies it: `tp {kind} amend --answer \"<their words>\"`.")
 
 
 def _scope_diff(old: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
@@ -1137,66 +1253,120 @@ def _scope_diff(old: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
     for key in ("title", "output", "review", "budget_minutes", "research", "fix_tasks", "limits", "ignore"):
         if old.get(key) != new.get(key):
             out.append(f"  ~ {key}: {json.dumps(new.get(key))[:300]}")
+    # Any other key the draft changes is shown too: a change the diff hides is a change nobody approves.
+    shown = {"deliverables", "workspaces", "requirements", "participants", "non_goals", "terms", "title", "output",
+             "review", "budget_minutes", "research", "fix_tasks", "limits", "ignore"}
+    out += [f"  ~ {key}: {json.dumps(new.get(key))[:300]}" for key in sorted(set(old) | set(new))
+            if key not in shown and old.get(key) != new.get(key)]
     return out
 
 
-# What the human agreed to at scope time: an amendment that touches any of it is theirs to approve.
-# Budgets are absent on purpose — they are the manager's reporting metadata. The requirement ledger
-# is judged separately: an added requirement that quotes the human's own recorded answer is theirs
-# already (a real run spent a question turning four clarification answers into R11-R14).
-_DELEGATION_FROZEN = ("title", "output", "terms", "non_goals", "answers", "limits", "ignore", "fix_tasks", "review",
-                      "workspaces")
-_FROZEN_LABELS = {"title": "the title", "output": "the output summary", "terms": "the significant terms",
-                  "non_goals": "the non-goals", "answers": "the human's recorded answers",
-                  "limits": "what the gates enforce (limits)", "ignore": "what the gates ignore",
-                  "fix_tasks": "the fix-task allowance", "review": "the review mode", "workspaces": "the workspaces"}
+# Scope keys the manager owns: its own reporting budgets (`tp budget extend` and `tp research extend`
+# change them without a question already). Everything else in scope.json is what the human agreed to.
+_SCOPE_MANAGER_KEYS = ("budget_minutes", "research")
+_SCOPE_LABELS = {"title": "the title", "output": "the output summary", "requirements": "the requirement ledger",
+                 "terms": "the significant terms", "non_goals": "the non-goals",
+                 "answers": "the human's recorded answers", "limits": "what the gates enforce (limits)",
+                 "ignore": "what the gates ignore", "fix_tasks": "the fix-task allowance", "review": "the review mode",
+                 "workspaces": "the workspaces", "split_tests": "who writes the tests (split_tests)"}
 
 
-def _quotes_human_answer(source: str, state: Dict[str, Any], scope: Dict[str, Any]) -> bool:
-    """True when `source` quotes the human's own recorded answer: four of its words in a row (all of it
-    when shorter). An answer of three words or fewer vouches only when `source` names its Q#, so a
-    bare "Yes" cannot make arbitrary text look like theirs. Answers are those recorded `--by human`
-    and the scope-time answers they confirmed."""
-    norm = lambda x: re.sub(r"[^\w\s]", " ", str(x).lower()).split()
-    src = " ".join(norm(source))
-    named = set(re.findall(r"\bQ\d+\b", str(source)))
-    answers = [(qid, q.get("answer")) for qid, q in (state.get("questions") or {}).items()
-               if q.get("answer") and q.get("by", "human") == "human"]
-    answers += [(None, a.get("a")) for a in scope.get("answers") or [] if isinstance(a, dict) and a.get("a")]
-    for qid, answer in answers:
-        ans = norm(answer)
-        if len(ans) <= 3 and qid not in named:
-            continue
-        runs = [" ".join(ans[i:i + 4]) for i in range(max(1, len(ans) - 3))]
-        if any(r and r in src for r in runs):
-            return True
-    return False
+_REVIEW_STRENGTH = {"none": 0, "final": 1, "per-task": 1, "both": 2}
 
 
-def _scope_delegation_misfit(old: Dict[str, Any], new: Dict[str, Any], state: Dict[str, Any]) -> List[str]:
-    """Why this scope amendment is the human's to approve; [] when it is plumbing the manager settles
-    alone: nothing they agreed changes, requirements are only added and each quotes their recorded
-    answer, the deliverable set is fixed (each one's wording, kind, or destination may be refined),
-    and no agent gains write authority (an author or tests role)."""
-    out = []
-    changed = [_FROZEN_LABELS[k] for k in _DELEGATION_FROZEN if old.get(k) != new.get(k)]
-    before_r = {str(r.get("id")): r for r in old.get("requirements") or [] if isinstance(r, dict)}
-    after_r = {str(r.get("id")): r for r in new.get("requirements") or [] if isinstance(r, dict)}
-    unsourced = [k for k, r in after_r.items()
-                 if k not in before_r and not _quotes_human_answer(r.get("source", ""), state, old)]
-    if any(k not in after_r or after_r[k] != r for k, r in before_r.items()) or unsourced:
-        changed.append("the requirement ledger" + (f" ({', '.join(unsourced)} quotes no answer the human gave — quote "
-                                                   "their words in `source`, with its Q#)" if unsourced else ""))
+def _scope_tiers(old: Dict[str, Any], new: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """(why the human decides, why an independent reviewer decides) for a scope amendment; both empty
+    is plumbing the manager settles alone (wording, rationale, its own budgets).
+
+    The human: a change to what is delivered — a deliverable added, dropped, or redefined (kind,
+    destination), an agreed requirement rewritten or dropped, the output, non-goals, terms, workspaces,
+    gate enforcement, their own answers or allowance — or the removal of an agent or a check (a
+    participant, a reviewer or test role, a weaker review mode, the separate test author), or any
+    field tp does not know. The reviewer: what strengthens the run without changing what is delivered —
+    an added requirement, reviewer, test writer, or author role, a narrowed role, a stronger review."""
+    human: List[str] = []
+    review: List[str] = []
+    special = {"deliverables", "participants", "requirements", "review", "split_tests", *_SCOPE_MANAGER_KEYS}
+    changed = sorted(k for k in set(old) | set(new) if k not in special and old.get(k) != new.get(k))
     if changed:
-        out.append("it changes " + ", ".join(changed))
-    ids = lambda sc: {d.get("id") for d in sc.get("deliverables", []) if isinstance(d, dict)}
-    if ids(old) != ids(new):
-        out.append("the deliverable set changes — work is added or dropped")
-    before = {(p.get("agent"), scopemod.role_of(p)) for p in old.get("participants", []) if isinstance(p, dict)}
-    after = {(p.get("agent"), scopemod.role_of(p)) for p in new.get("participants", []) if isinstance(p, dict)}
-    gained = [f"{a} as {r}" for a, r in sorted(after - before) if r in ("author", "tests")]
-    if gained:
-        out.append("it grants write authority (" + ", ".join(gained) + ")")
+        human.append("it changes " + ", ".join(_SCOPE_LABELS.get(k, f"`{k}`") for k in changed))
+    shape = lambda sc: {str(d.get("id")): {k: v for k, v in d.items() if k != "what"}
+                        for d in sc.get("deliverables", []) if isinstance(d, dict)}
+    if set(shape(old)) != set(shape(new)):
+        human.append("the deliverable set changes — work is added or dropped")
+    elif shape(old) != shape(new):
+        human.append("a deliverable's kind or destination changes")
+    reqs = lambda sc: {str(r.get("id")): r for r in sc.get("requirements") or [] if isinstance(r, dict)}
+    rewritten = sorted(k for k, r in reqs(old).items() if reqs(new).get(k) != r)
+    if rewritten:
+        human.append(f"it rewrites or drops agreed requirement{'s' if len(rewritten) > 1 else ''} {', '.join(rewritten)}")
+    added = sorted(k for k in reqs(new) if k not in reqs(old))
+    if added:
+        review.append(f"it adds requirement{'s' if len(added) > 1 else ''} {', '.join(added)}")
+    if old.get("review") != new.get("review"):
+        stronger = _REVIEW_STRENGTH.get(str(new.get("review")), -1) > _REVIEW_STRENGTH.get(str(old.get("review")), 9)
+        (review if stronger else human).append(f"the review mode goes from {old.get('review')} to {new.get('review')}")
+    if bool(old.get("split_tests")) != bool(new.get("split_tests")):
+        (human if old.get("split_tests") else review).append(
+            "the separate test author " + ("goes" if old.get("split_tests") else "is added"))
+    pairs = lambda sc: {(str(p.get("agent")), scopemod.role_of(p)) for p in sc.get("participants", [])
+                        if isinstance(p, dict)}
+    members_after = {a for a, _ in pairs(new)}
+    gone = sorted({a for a, _ in pairs(old)} - members_after)
+    if gone:
+        human.append("it removes " + ", ".join(gone) + " from the run")
+    checks = sorted(f"{a} as {r}" for a, r in pairs(old) - pairs(new) if r in ("reviewer", "tests") and a not in gone)
+    if checks:
+        human.append("it removes a check (" + ", ".join(checks) + ")")
+    narrowed = sorted(f"{a} as {r}" for a, r in pairs(old) - pairs(new) if r not in ("reviewer", "tests")
+                      and a not in gone)
+    if narrowed:
+        review.append("it narrows a role (" + ", ".join(narrowed) + ")")
+    gained = sorted(pairs(new) - pairs(old))
+    writes = [f"{a} as {r}" for a, r in gained if r in ("author", "tests")]
+    others = [f"{a} as {r}" for a, r in gained if r not in ("author", "tests")]
+    if writes:
+        review.append("it grants write authority (" + ", ".join(writes) + ")")
+    if others:
+        review.append("it adds a participant role (" + ", ".join(others) + ")")
+    return human, review
+
+
+def _plan_human_reasons(approved: Dict[str, Any], draft: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
+    """What in a plan amendment only the human may approve: it drops agreed work or a check, adds a
+    write to an external system, or changes what a task delivers (its deliverable or requirements, a
+    Done-when item or file dropped or rewritten, a weaker test mode). Everything else that goes past
+    the standing fix-task allowance — more tasks, bigger ones, stricter criteria — is the reviewer's."""
+    out: List[str] = []
+    before = {t["id"]: t for t in approved["tasks"]}
+    after = {t.get("id"): t for t in draft["tasks"]}
+    removed = [t for t in before if t not in after]
+    if removed:
+        out.append(f"it removes {', '.join(removed)}: dropping agreed work")
+    out += [f"{t['id']} writes to an external system" for t in draft["tasks"]
+            if t.get("id") not in before and is_integration(t, scope)]
+    strength = {"red": 2, "pin": 1, "existing": 0}
+    for tid, old in before.items():
+        new = after.get(tid)
+        if not new or new == old:
+            continue
+        lost = [what for what, key in (("a Done-when item", "acceptance"), ("a file", "paths"), ("a check", "checks"),
+                                       ("a requirement", "requirements"))
+                if set(map(str, old.get(key) or [])) - set(map(str, new.get(key) or []))]
+        if lost:
+            out.append(f"{tid} loses {', '.join(lost)}")
+        if set(old.get("serves", [])) != set(new.get("serves", [])):
+            out.append(f"{tid} serves a different deliverable")
+        if strength.get(str(new.get("test_mode", "red")), 0) < strength.get(str(old.get("test_mode", "red")), 0):
+            out.append(f"{tid}'s test mode is weaker ({old.get('test_mode', 'red')} → {new.get('test_mode')})")
+        if old.get("publish") != new.get("publish") or old.get("gate") != new.get("gate"):
+            out.append(f"{tid} changes what it posts or asks")
+    if set(approved.get("final_checks", [])) - set(draft.get("final_checks", [])):
+        out.append("it drops a final check")
+    if any(k not in (draft.get("checks") or {}) or draft["checks"][k] != v for k, v in (approved.get("checks") or {}).items()):
+        out.append("it removes or rewrites a check command")
+    if approved.get("questions") != draft.get("questions"):
+        out.append("it changes the plan's questions")
     return out
 
 
@@ -1211,13 +1381,15 @@ def merge_baselines(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any]) 
                                .items() if k in names and names[k]["mode"] == "write"}
 
 
-def cmd_scope_amend(wf: Workflow, answer: Optional[str], delegated: bool = False, note: Optional[str] = None) -> str:
-    """Change the confirmed scope mid-run: draft scope-amend.json, check it here (with the plan
-    amendment it needs, if any, in plan-amend.json), then either ask the human once — their one answer
-    applies both — or, when the check proves the change is plumbing (nothing they agreed changes, no
-    write authority gained), settle it with --delegated --note, recorded as the manager's and listed
-    in the report. The run stays where it is."""
-    from . import review
+def cmd_scope_amend(wf: Workflow, answer: Optional[str], delegated: bool = False, note: Optional[str] = None,
+                    review: bool = False, record: bool = False, agent_id: Optional[str] = None) -> str:
+    """Change the confirmed scope mid-run: draft scope-amend.json, check it here (with the plan amendment
+    it needs, if any, in plan-amend.json), then the check says who settles it (`_scope_tiers`): the
+    manager for plumbing (`--delegated --note`); an independent reviewer for what strengthens the run
+    without changing what is delivered (`--review --note`, then `--record --agent-id`); the human for
+    a change to what is delivered or the removal of an agent or a check (`--answer`, which also
+    overrules either of the others). The run stays where it is."""
+    from . import review as reviewmod
     with wf.locked():
         state = wf.load()
         if state["phase"] not in ("PLANNING", "EXECUTING"):
@@ -1252,51 +1424,73 @@ def cmd_scope_amend(wf: Workflow, answer: Optional[str], delegated: bool = False
         diff = _scope_diff(old, draft)
         if not diff and plan_draft is None:
             return f"{draft_path.name} changes nothing yet."
-        misfit = _scope_delegation_misfit(old, draft, state)
+        human, strengthen = _scope_tiers(old, draft)
         if plan_draft is not None:
-            misfit += _delegation_misfit(approved, plan_draft, draft, state, plan_changes)
+            human += _plan_human_reasons(approved, plan_draft, draft)
+            strengthen += _delegation_misfit(approved, plan_draft, draft, state, plan_changes)
         cap = limit("max_delegated_scope_amends")
         used = len([a for a in state.get("scope_amendments", []) if a.get("delegated")])
-        if used >= cap:
-            misfit.append(f"the run already settled {used} scope amendment{'s' if used != 1 else ''} without a "
-                          f"question (the cap is {cap}) — this one goes to the human")
+        if used >= cap and not strengthen:
+            strengthen.append(f"the run already settled {used} scope amendment{'s' if used != 1 else ''} alone "
+                              f"(the cap is {cap})")
         plan_sha = sha_file(wf.root / AMEND_JSON) if plan_draft is not None else None
-        if answer is None and not delegated:
+        checked_now = {"sha": sha_file(draft_path), "plan_sha": plan_sha}
+        lines = diff + ([f"with the plan amendment — {'; '.join(plan_changes)}:"] + _change_lines(approved, plan_draft)
+                        if plan_draft is not None else [])
+        if answer is None and not delegated and not review and not record:
             (wf.root / "scope-amend.md").write_text(scopemod.render(draft))
-            state["scope_amend_checked"] = {"sha": sha_file(draft_path), "plan_sha": plan_sha, "ts": now_iso()}
+            state["scope_amend_checked"] = dict(checked_now, ts=now_iso())
             wf.save(state)
-            out = ["scope amendment ok:"] + diff
+            out = ["scope amendment ok:"] + lines
             if plan_draft is not None:
-                remaining, _ = _remaining(plan_draft, draft, state)
-                out += [f"with the plan amendment — {'; '.join(plan_changes)}:"] + _change_lines(approved, plan_draft)
-                out += remaining
-            if misfit:
+                out += _remaining(plan_draft, draft, state)[0]
+            if human:
                 out.append(f"Ask the human once, showing this change (full scope: {wf.root / 'scope-amend.md'}); their "
                            "answer approves the scope" + (" and the plan amendment together" if plan_draft is not None
                                                           else "")
                            + " — do not ask again: `tp scope amend --answer \"<their words>\"`. A change to either "
                            "draft after this check needs a new check and a new answer. (Theirs because "
-                           + "; ".join(misfit) + ".)")
+                           + "; ".join(human) + ".)")
+            elif strengthen:
+                out.append("It strengthens the run without changing what is delivered (" + "; ".join(strengthen)
+                           + "), so an independent review settles it, not the human: `tp scope amend --review --note "
+                           "\"<why it makes the delivery more accurate>\"`, send the call it prints, then `tp scope "
+                           "amend --record --agent-id <its id>`.")
             else:
-                out.append("This is plumbing — nothing the human agreed changes, and no agent gains write authority — "
-                           "so settle it yourself: `tp scope amend --delegated --note \"<what changed and why>\"` "
-                           f"({used} of {cap} used; recorded as yours, listed in the report).")
+                out.append("This is plumbing — wording, rationale, or your own budgets — so settle it yourself: `tp "
+                           f"scope amend --delegated --note \"<what changed and why>\"` ({used} of {cap} used; "
+                           "recorded as yours, listed in the report).")
             return "\n".join(out)
-        if delegated and answer:
-            raise TPError("pass either --answer (the human's words) or --delegated (settle it yourself), not both.")
-        checked = state.get("scope_amend_checked") or {}
-        if checked.get("sha") != sha_file(draft_path) or checked.get("plan_sha") != plan_sha:
-            raise TPError("scope-amend.json (or plan-amend.json) changed since the check, or was never checked: run "
-                          "`tp scope amend`, " + ("read what it prints before settling anything." if delegated else
-                                                  "show the human what it prints, and ask again — an answer approves "
-                                                  "only the change it was shown."))
+        if sum(map(bool, (answer, delegated, review, record))) > 1:
+            raise TPError("pass one of --answer (the human's words), --delegated, --review, or --record.")
+        rec: Dict[str, Any] = {}
+        if record:
+            verdict, reason, rec = _amend_review_verdict(wf, state, "scope", agent_id, checked_now)
+            if verdict != "approve":
+                return _verdict_out("scope", verdict, reason, wf.root / "scope-amend.md")
+        else:
+            checked = state.get("scope_amend_checked") or {}
+            if {k: checked.get(k) for k in checked_now} != checked_now:
+                raise TPError("scope-amend.json (or plan-amend.json) changed since the check, or was never checked: "
+                              "run `tp scope amend`, " + ("read what it prints before settling anything."
+                                                          if delegated or review else
+                                                          "show the human what it prints, and ask again — an answer "
+                                                          "approves only the change it was shown."))
+        if review:
+            if human:
+                raise TPError("This goes to the human, not a reviewer: " + "; ".join(human) + ".",
+                              "Ask them once, showing what `tp scope amend` printed, then `tp scope amend --answer "
+                              "\"<their words>\"`.")
+            return _amend_review_start(wf, state, "scope", lines, strengthen or ["plumbing"], note, checked_now)
         if delegated:
-            if misfit:
-                raise TPError("Not plumbing the manager may settle: " + "; ".join(misfit) + ".",
-                              "Ask the human once, showing what `tp scope amend` printed, then "
-                              "`tp scope amend --answer \"<their words>\"`.")
+            if human or strengthen:
+                raise TPError("Not plumbing the manager may settle alone: " + "; ".join(human + strengthen) + ".",
+                              "What strengthens the run goes to an independent review (`tp scope amend --review --note "
+                              "\"...\"`); a change to what is delivered, or a removed agent or check, to the human.")
             if not note or words(note) < 4:
                 raise TPError("--delegated needs --note: what changed and why, in plain words (the report shows it).")
+        how = "reviewed" if record else "delegated" if delegated else "answer"
+        why = rec.get("note") if record else note
         wf.scope_json.write_text(json.dumps(draft, indent=2) + "\n")
         (wf.root / "scope.md").write_text(scopemod.render(draft))
         n = len([p for p in wf.meta.glob("scope-amend-*.json")]) + 1
@@ -1308,36 +1502,46 @@ def cmd_scope_amend(wf: Workflow, answer: Optional[str], delegated: bool = False
         allow = 0
         if executing:
             merge_baselines(wf, state, draft)
-            if plan_draft is not None and delegated:
-                # The plan side rides along only inside the standing fix-task delegation (proved above).
-                added = [t["id"] for t in plan_draft["tasks"] if t["id"] not in {a["id"] for a in approved["tasks"]}]
+            added = ([t["id"] for t in plan_draft["tasks"] if t["id"] not in {a["id"] for a in approved["tasks"]}]
+                     if plan_draft is not None else [])
+            if plan_draft is not None and how == "delegated":
                 state["delegated"] = list(state.get("delegated", [])) + added
                 allow = int(scopemod.fix_tasks(draft).get("allow") or 0)
                 _apply_amendment(wf, state, plan_draft, draft, plan_changes,
-                                 {"delegated": True, "note": " ".join(note.split()), "tasks": added, "with_scope": True})
+                                 {"delegated": True, "note": " ".join(str(why).split()), "tasks": added,
+                                  "with_scope": True})
+            elif plan_draft is not None and how == "reviewed":
+                _apply_amendment(wf, state, plan_draft, draft, plan_changes,
+                                 {"reviewed": True, "note": why, "reason": rec.get("reason"), "tasks": added,
+                                  "with_scope": True})
             elif plan_draft is not None:
                 _apply_amendment(wf, state, plan_draft, draft, plan_changes, {"answer": answer, "with_scope": True})
             else:
                 plan = load_plan(wf)
-                state["reviews"] = review.new_reviews(plan, draft, state.get("reviews", {}))
-                state["integration"] = review.integration_ids(plan, draft)
+                state["reviews"] = reviewmod.new_reviews(plan, draft, state.get("reviews", {}))
+                state["integration"] = reviewmod.integration_ids(plan, draft)
                 state["gates"] = gate_descendants(plan)
                 (wf.root / "plan.md").write_text(render(plan, draft, wf))
         state.setdefault("scope_amendments", []).append(
-            {"ts": now_iso(), "changes": diff, "delegated": bool(delegated), "note": " ".join((note or "").split())})
+            {"ts": now_iso(), "changes": diff, "delegated": how == "delegated", "reviewed": how == "reviewed",
+             "note": " ".join(str(why or "").split()), "reason": rec.get("reason")})
         wf.save(state)
-        if delegated:
-            wf.decision("scope amend (manager-settled plumbing)", str(note), who="manager")
+        if how == "delegated":
+            wf.decision("scope amend (manager-settled plumbing)", str(why), who="manager")
             if plan_draft is not None:
-                wf.decision(f"plan amend (fix-task delegation, {len(state['delegated'])} of {allow})", str(note),
+                wf.decision(f"plan amend (fix-task delegation, {len(state['delegated'])} of {allow})", str(why),
                             who="manager")
+        elif how == "reviewed":
+            wf.decision("scope amend (approved by independent review)" + (" with its plan amendment"
+                                                                         if plan_draft is not None else ""),
+                        f"{why} — the reviewer: {rec.get('reason')}", who="plan-reviewer")
         else:
             wf.decision("scope amend", str(answer))
             if plan_draft is not None:
                 wf.decision("plan amend (approved with the scope amendment)", str(answer))
-        wf.event("scope_amend", changes=diff, plan=plan_draft is not None, delegated=bool(delegated))
-        return "\n".join(["scope amended:"] + diff + (["and the plan amendment applied."] if plan_draft else [])
-                         + ["`tp next`."])
+        wf.event("scope_amend", changes=diff, plan=plan_draft is not None, how=how)
+        return "\n".join(["scope amended" + (" on the reviewer's approval" if how == "reviewed" else "") + ":"] + diff
+                         + (["and the plan amendment applied."] if plan_draft else []) + ["`tp next`."])
 
 
 _TEST_NAME = re.compile(r"(^|/)(tests?|__tests__|spec)/|(^|/)test_[^/]*$|_test\.[a-z]+$|\.(test|spec)\.[a-z]+$|"

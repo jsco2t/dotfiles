@@ -28,9 +28,9 @@ dispatches it and prints the calls to send.
 
 ## Rules
 
-1. **The human decides at the start; you deliver at the end.** During execution only skipping
-   agreed work, changing a deliverable, shipping review findings unfixed, scheduled `gate`s,
-   and writes outside the run (Jira, GitHub, commits) go to them.
+1. **The human decides at the start; you deliver at the end.** Mid-run they get only changes to
+   what is delivered, removed work, agents, or checks, unfixed findings, `gate`s, and outside
+   writes. What strengthens the run (a reviewer, more tests) goes to an independent reviewer.
 2. **Asking never stops the run.** `tp ask`, keep working, `tp answer` with their words.
    AskUserQuestion only while nothing is in flight (it holds the turn; hand-backs wait
    unrecorded — real runs lost 8 to 42 hours); otherwise plain text at the end of your turn.
@@ -47,11 +47,11 @@ dispatches it and prints the calls to send.
 1. Save the request verbatim, then `tp init <location> --title "..." --request-file <file>`
    (no `-w`; it prints the workflow dir). No location given: ask.
 2. Size it yourself, no agents: `tp survey <repo> --name <ws>`; `tp survey-issue jira:KEY` or
-   `gh:owner/repo#N` for a named ticket (needs network).
+   `gh:owner/repo#N` for a named ticket.
 3. `tp roster suggest --kinds <kinds>`; keep only agents with a direct bearing on the output,
    specific reviewers (correctness, security, api-compat, test) over broad ones.
 4. **One AskUserQuestion round**: output (kind, format, where), participants, review (`none` or
-   `final`), conventions, and **fix tasks** — how many small fix tasks you may add unasked, how big.
+   `final`), conventions, and **fix tasks** — how many small fix tasks you may add unreviewed, how big.
    Never ask them to pick a budget or whether to proceed.
 5. `scope.json` (`tp schema scope`) with the **requirements ledger**: each requested outcome,
    format, destination, constraint, and ticket acceptance criterion as `R#`, with `source` — the
@@ -96,7 +96,7 @@ for a reader who was not in the conversation.
 `tp plan review` prints a `plan-reviewer` dispatch bound to the submitted revision; on its reply
 `tp plan record --agent-id <id>`.
 
-- **Pass** → `tp approve`; tell the human in one line that delivery started, with `plan.md`.
+- **Pass** → `tp approve`; tell the human in one line, with `plan.md`.
 - **Findings** → verify each; `tp plan triage --accept-all` or `--dismiss F#="<reason>"`; fix,
   check, submit, review again. Only the human can settle it: `tp ask` now. A shrinking review
   continues on its own; if `tp plan review` refuses, show the human the findings, `tp revise`.
@@ -116,8 +116,9 @@ ToolSearch `select:SendMessage,TaskStop` first. Known breakage → `tp baseline`
   the fix needs → `tp widen`; a rebase → `tp head-moved`; a gate finding you proved false → `tp
   accept <id> --override --note "<evidence>"` (even once its fix round is printed); a test
   correction → `tp rebaseline-tests --by manager`; another round → `tp resolve --action retry`; a
-  question the evidence settles → `--action answer --by manager`; a fix task inside the allowance
-  → `tp plan amend --delegated`; plumbing scope → `tp scope amend --delegated`.
+  question the evidence settles → `--action answer --by manager`; a fix task inside the allowance,
+  or plumbing scope → `tp plan|scope amend --delegated`; more than that which strengthens the run
+  → `--review --note`, send the call, `--record` (the reviewer decides; the check says which).
 - **For the human** (Rule 1): `tp ask --about <id>`, keep working, then `tp answer` and the
   `tp resolve … --by human` it prints; a plan change is checked first (`tp plan amend`).
 - **gate / publish** → `tp gate <id>` / `tp publish <id>` (dry run); every ready one in one
@@ -139,7 +140,7 @@ Committing and pushing are theirs.
 - **resume <dir> [answers]** → `tp status`; record answers given with it; if halted `tp resume
   --answer "..."`; then `tp next`. A lost agent: SendMessage its id if known, else `tp lost`.
 - **Long waits**: ending a turn on the human with nothing in flight, add one line: `/clear`, then
-  `/task-pipeline resume <dir> <answers>` continues from files (each turn re-reads the session).
+  `/task-pipeline resume <dir> <answers>` continues from files.
 - **status <dir>** → `tp status`, present it, stop.
 - Unattended: sandbox-writable workflow and workspaces; allow
   `Bash(python3 ~/.claude/skills/task-pipeline/scripts/tp.py:*)` — code authors run `tp red`.

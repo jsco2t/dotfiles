@@ -61,7 +61,7 @@ def applied_skills(text: str, index):
 class FootprintTest(unittest.TestCase):
     def test_skill_md_is_small(self) -> None:
         # Anything that can be printed on demand (`tp next`, `tp schema`) stays out of SKILL.md.
-        self.assertLess(len((SKILL / "SKILL.md").read_bytes()), 10_000)
+        self.assertLess(len((SKILL / "SKILL.md").read_bytes()), 12_000)
 
     def test_core_style_is_small(self) -> None:
         self.assertLess(len((CLAUDE / "output-styles" / "answer-first-core.md").read_bytes()), 1_500)

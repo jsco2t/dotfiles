@@ -47,7 +47,7 @@ class OneAnswerPerAmendmentTest(unittest.TestCase):
         h = self.h
         self.add_faq()
         out = h.tp("plan", "amend").out
-        self.assertIn("Ask the human once", out)
+        self.assertIn("independent review", out)                         # the reviewer judges an added task
         self.assertIn("T04", out)
         self.assertIn("faq.md", out)
         self.assertIn("10 min", out)
@@ -419,12 +419,12 @@ class FixTaskDelegationTest(unittest.TestCase):
         out = h.tp("plan", "amend", "--delegated", "--note", "re-estimate T01 and add the small fix").out
         self.assertIn("amended under the standing delegation", out)
 
-    def test_no_delegation_means_every_fix_is_asked(self) -> None:
+    def test_no_delegation_means_every_fix_is_reviewed(self) -> None:
         h = self.h
         self.approve(fix_tasks=NO_FIXES)
         self.add(self.fix("T02", "a.md"))
         h.tp("plan", "amend")
-        self.assertIn("ask", h.tp("plan", "amend", "--delegated", "--note", "a small doc fix", expect=2).text)
+        self.assertIn("--review", h.tp("plan", "amend", "--delegated", "--note", "a small doc fix", expect=2).text)
 
     def test_the_budget_is_reported_never_a_gate(self) -> None:
         # Time budgets are estimates: running past one is reported, and never changes who approves

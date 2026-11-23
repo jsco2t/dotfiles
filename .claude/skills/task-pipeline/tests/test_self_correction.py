@@ -402,35 +402,62 @@ class PlumbingScopeAmendTest(unittest.TestCase):
         self.assertRegex((h.wf / "decisions.md").read_text(), r"scope amend \(manager-settled plumbing\)")
         self.assertFalse((h.wf / "scope-amend.json").exists())
 
-    def test_requirements_quoting_the_humans_recorded_answer_are_plumbing(self) -> None:
+    def test_an_added_requirement_goes_to_independent_review(self) -> None:
+        # The reviewer, not a string match on its source, judges whether it is what the human asked for.
         h = self.h
         self.ask_and_answer()
         self.write(self.windows_requirement("Q1: Yes, cover Windows builds as well."))
-        self.assertIn("settle it yourself", h.tp("scope", "amend").out)
-        h.tp("scope", "amend", "--delegated", "--note", "Q1's answer becomes R2 in the ledger.")
-        self.assertIn("R2", [r["id"] for r in h.read_json("scope.json")["requirements"]])
-
-    def test_a_verbatim_quote_of_their_answer_needs_no_question_id(self) -> None:
-        # The real run's R11-R14 quoted the answers word for word without naming Q#.
-        h = self.h
-        self.ask_and_answer()
-        self.write(self.windows_requirement("Yes, cover Windows builds as well."))
-        self.assertIn("settle it yourself", h.tp("scope", "amend").out)
-
-    def test_a_short_answer_cannot_vouch_for_text_it_does_not_name(self) -> None:
-        h = self.h
-        h.tp("ask", "--question", "Should the build guide cover Windows builds too?")
-        h.tp("answer", "Q1", "--answer", "Yes", "--by", "human")
-        self.write(self.windows_requirement("Yes, and also every BSD and the mainframe build."))
-        self.assertIn("Ask the human once", h.tp("scope", "amend").out)
-
-    def test_a_requirement_the_human_never_gave_still_asks(self) -> None:
-        h = self.h
-        self.ask_and_answer(by="manager")                                # the manager's answer is not theirs
-        self.write(self.windows_requirement("Q1: Yes, cover Windows builds as well."))
-        self.assertIn("Ask the human once", h.tp("scope", "amend").out)
+        out = h.tp("scope", "amend").out
+        self.assertIn("independent review", out)
+        self.assertNotIn("Ask the human once", out)
         text = h.tp("scope", "amend", "--delegated", "--note", "Q1 becomes R2.", expect=2).text
-        self.assertIn("requirement ledger", text)
+        self.assertIn("R2", text)
+
+    def test_rewriting_an_agreed_requirement_goes_to_the_human(self) -> None:
+        h = self.h
+        d = self.draft()
+        d["requirements"][0]["text"] = "A KB for the calc build only"
+        self.write(d)
+        self.assertIn("Ask the human once", h.tp("scope", "amend").out)
+        self.assertIn("goes to the human", h.tp("scope", "amend", "--review", "--note",
+                                                "R1 narrowed to the build, which is all that matters.", expect=2).text)
+
+    def test_a_deliverable_changing_kind_or_destination_asks(self) -> None:
+        h = self.h
+        d = self.draft()
+        d["deliverables"][0]["where"] = "jira:KUB-1"
+        self.write(d)
+        self.assertIn("Ask the human once", h.tp("scope", "amend").out)
+
+    def test_dropping_the_test_author_or_an_unknown_field_asks(self) -> None:
+        h = self.h
+        d = self.draft()
+        d["split_tests"] = False                                         # the separate test author goes
+        self.write(d)
+        self.assertIn("Ask the human once", h.tp("scope", "amend").out)
+        d = self.h.read_json("scope.json")
+        d["flavour"] = "something tp has never heard of"
+        self.write(d)
+        self.assertIn("Ask the human once", h.tp("scope", "amend").out)
+
+    def test_dropping_a_reviewer_asks_and_narrowing_a_role_is_reviewed(self) -> None:
+        m = Mixed()
+        try:
+            scope = m.scope(["code", "docs", "integration"],
+                            ["tests", "code", "docs", "liaison", "correctness", "doc-review"], review="final")
+            m.h.confirmed(**scope)
+            m.h.tp("scope", "amend")
+            d = m.h.read_json("scope-amend.json")
+            d["participants"] = [p for p in d["participants"] if p["agent"] != "correctness-reviewer"]
+            (m.h.wf / "scope-amend.json").write_text(json.dumps(d))
+            self.assertIn("Ask the human once", m.h.tp("scope", "amend").out)
+            d["participants"] = [p if p["agent"] != "atlassian-liaison" else
+                                 dict(p, role="research", why="Reads KUB-1; the publish task posts the draft.")
+                                 for p in m.h.read_json("scope.json")["participants"]]
+            (m.h.wf / "scope-amend.json").write_text(json.dumps(d))
+            self.assertIn("independent review", m.h.tp("scope", "amend").out)   # the routing fix: less authority
+        finally:
+            m.close()
 
     def test_dropping_a_non_goal_still_asks(self) -> None:
         h = self.h
@@ -441,7 +468,7 @@ class PlumbingScopeAmendTest(unittest.TestCase):
         text = h.tp("scope", "amend", "--delegated", "--note", "Trust me, it is plumbing.", expect=2).text
         self.assertIn("non-goals", text)
 
-    def test_granting_write_authority_still_asks(self) -> None:
+    def test_granting_a_role_goes_to_independent_review(self) -> None:
         # The 05:08 question of the run: the liaison, listed for research, needed to author Jira writes.
         m = Mixed()
         try:
@@ -452,11 +479,170 @@ class PlumbingScopeAmendTest(unittest.TestCase):
             d = m.h.read_json("scope-amend.json")
             d["participants"][1]["role"] = "author"
             (m.h.wf / "scope-amend.json").write_text(json.dumps(d))
-            self.assertIn("Ask the human once", m.h.tp("scope", "amend").out)
+            out = m.h.tp("scope", "amend").out
+            self.assertIn("independent review", out)
+            self.assertNotIn("Ask the human once", out)
             text = m.h.tp("scope", "amend", "--delegated", "--note", "The liaison files the tickets.", expect=2).text
             self.assertIn("write authority", text)
         finally:
             m.close()
+
+
+def verdict(h: Harness, n: int, what: str,
+            reason: str = "It adds an independent check the request's accuracy needs, and nothing else.") -> None:
+    d = h.wf / "runs" / "amend"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"result-review-{n}.json").write_text(json.dumps(
+        {"review": "amendment", "round": n, "verdict": what, "reason": reason, "concerns": []}))
+
+
+class AmendmentReviewTest(unittest.TestCase):
+    """A change that strengthens the run — another reviewer, more tests, a task beyond the allowance —
+    is judged by an independent reviewer, not the human. Only a change to what is delivered, or the
+    removal of an agent or a check, goes to the human."""
+
+    def setUp(self) -> None:
+        self.h = Harness()
+
+    def tearDown(self) -> None:
+        self.h.close()
+
+    def add_reviewer(self) -> None:
+        h = self.h
+        h.confirmed()
+        h.tp("scope", "amend")
+        d = h.read_json("scope-amend.json")
+        d["review"] = "final"
+        d["participants"].append({"agent": "doc-reviewer", "role": "reviewer", "why": "Checks the KB against the code."})
+        (h.wf / "scope-amend.json").write_text(json.dumps(d))
+        self.assertIn("independent review", h.tp("scope", "amend").out)
+
+    def test_an_added_reviewer_is_approved_by_the_reviewer_not_the_human(self) -> None:
+        h = self.h
+        self.add_reviewer()
+        out = h.tp("scope", "amend", "--review", "--note",
+                   "The KB cites code paths; an accuracy review catches wrong citations before delivery.").out
+        self.assertIn('Agent(subagent_type="plan-reviewer"', out)
+        brief = (h.wf / "runs" / "amend" / "brief-review-1.md").read_text()
+        self.assertIn("Build a KB for the calc repo.", brief)             # judged against the request
+        self.assertIn("doc-reviewer", brief)                              # and the change itself
+        verdict(h, 1, "approve")
+        out = h.tp("scope", "amend", "--record", "--agent-id", "amend-rev-1").out
+        self.assertIn("scope amended", out)
+        self.assertIn("doc-reviewer", [p["agent"] for p in h.read_json("scope.json")["participants"]])
+        self.assertIn("independent review", (h.wf / "decisions.md").read_text())
+
+    def test_a_rejected_change_is_not_applied(self) -> None:
+        h = self.h
+        self.add_reviewer()
+        h.tp("scope", "amend", "--review", "--note", "An accuracy review would catch wrong citations early.")
+        verdict(h, 1, "reject", "The request asks for no review and the KB is two short articles; it adds cost only.")
+        out = h.tp("scope", "amend", "--record", "--agent-id", "amend-rev-1").out
+        self.assertIn("adds cost only", out)
+        self.assertNotIn("doc-reviewer", [p["agent"] for p in h.read_json("scope.json")["participants"]])
+        self.assertTrue((h.wf / "scope-amend.json").exists())
+
+    def test_an_escalated_change_goes_to_the_human(self) -> None:
+        h = self.h
+        self.add_reviewer()
+        h.tp("scope", "amend", "--review", "--note", "An accuracy review would catch wrong citations early.")
+        verdict(h, 1, "escalate", "Whether the KB is reviewed at all is a delivery choice the requester made.")
+        self.assertIn("Ask the human once", h.tp("scope", "amend", "--record", "--agent-id", "amend-rev-1").out)
+        self.assertNotIn("doc-reviewer", [p["agent"] for p in h.read_json("scope.json")["participants"]])
+        h.tp("scope", "amend", "--answer", "Yes, add the review.")
+        self.assertIn("doc-reviewer", [p["agent"] for p in h.read_json("scope.json")["participants"]])
+
+    def test_a_draft_changed_under_review_is_not_applied(self) -> None:
+        h = self.h
+        self.add_reviewer()
+        h.tp("scope", "amend", "--review", "--note", "An accuracy review would catch wrong citations early.")
+        d = h.read_json("scope-amend.json")
+        d["non_goals"] = []
+        (h.wf / "scope-amend.json").write_text(json.dumps(d))
+        verdict(h, 1, "approve")
+        self.assertIn("changed", h.tp("scope", "amend", "--record", "--agent-id", "amend-rev-1", expect=2).text)
+        self.assertNotIn("doc-reviewer", [p["agent"] for p in h.read_json("scope.json")["participants"]])
+
+    def test_more_work_beyond_the_allowance_is_reviewed_not_asked(self) -> None:
+        h = self.h
+        h.approved()                                                     # fix_tasks: none without asking
+        d = h.read_json("plan.json")
+        d["tasks"].append(h.task("T04", "build/troubleshooting.md", depends_on=["T02"], estimate_min=10,
+                                 brief="Document the build failures the guide's readers hit."))
+        h.write_json("plan-amend.json", d)
+        out = h.tp("plan", "amend").out
+        self.assertIn("independent review", out)
+        h.tp("plan", "amend", "--review", "--note", "The guide's own review found readers hit three build failures.")
+        verdict(h, 1, "approve")
+        h.tp("plan", "amend", "--record", "--agent-id", "amend-rev-1")
+        self.assertEqual(h.state()["tasks"]["T04"]["status"], "pending")
+
+    def test_a_reviewer_added_mid_run_reviews_the_work_and_the_run_finishes(self) -> None:
+        # The user's own example: during delivery the manager decides the work needs a reviewer.
+        h = self.h
+        h.approved()                                                     # review: none
+        for tid, rel in (("T01", "architecture/overview.md"), ("T02", "build/guide.md")):
+            h.author(tid, rel)
+            h.tp("accept", tid, "--note", "citation holds")
+        h.tp("scope", "amend")
+        d = h.read_json("scope-amend.json")
+        d["review"] = "final"
+        d["participants"].append({"agent": "doc-reviewer", "role": "reviewer", "why": "Checks the KB against the code."})
+        (h.wf / "scope-amend.json").write_text(json.dumps(d))
+        self.assertIn("independent review", h.tp("scope", "amend").out)
+        h.tp("scope", "amend", "--review", "--note", "Both articles cite code lines; nobody has checked a citation.")
+        self.assertIn("scope amend --record", h.tp("next").out)          # a fresh session finds the way back
+        self.assertIn("amend/review:1", h.tp("status").out)
+        verdict(h, 1, "approve")
+        out = h.tp("advance", "amend/review:1", "--agent-id", "amend-rev-1").out
+        self.assertIn("on the reviewer's approval", out)
+        self.assertIn("T03", out)                                        # advance dispatched what is now ready
+        (h.kb / "index.md").write_text("# KB\n\n- [O](architecture/overview.md)\n- [B](build/guide.md)\n")
+        h.result("T03", "author", changed=["index.md"])
+        h.tp("record", "T03", "--agent-id", "a-3")
+        h.tp("accept", "T03", "--note", "links hold")
+        self.assertEqual([a["id"] for a in h.next()["actions"] if a["action"] == "review"], ["B1/doc-reviewer"])
+        h.tp("dispatch", "B1/doc-reviewer")
+        (h.wf / "runs" / "B1" / "doc-reviewer-1.json").write_text(
+            json.dumps({"batch": "B1", "verdict": "pass", "findings": []}))
+        h.tp("record", "B1/doc-reviewer", "--agent-id", "rev-1")
+        h.tp("final")
+        self.assertIn("Changes an independent reviewer approved", (h.wf / "report.md").read_text())
+
+    def test_a_rejected_draft_cannot_be_sent_to_another_reviewer_unchanged(self) -> None:
+        h = self.h
+        self.add_reviewer()
+        h.tp("scope", "amend", "--review", "--note", "An accuracy review would catch wrong citations early.")
+        verdict(h, 1, "reject", "The request asks for no review and the KB is two short articles; it adds cost only.")
+        h.tp("scope", "amend", "--record", "--agent-id", "amend-rev-1")
+        h.tp("scope", "amend")
+        text = h.tp("scope", "amend", "--review", "--note", "Asking again in case another reviewer agrees.",
+                    expect=2).text
+        self.assertIn("rejected", text)
+        d = h.read_json("scope-amend.json")
+        d["participants"][-1]["why"] = "Checks the three citations the overview makes against calc.go."
+        (h.wf / "scope-amend.json").write_text(json.dumps(d))
+        h.tp("scope", "amend")
+        h.tp("scope", "amend", "--review", "--note", "Narrowed to the three citations the overview makes.")
+        self.assertIn("adds cost only", (h.wf / "runs" / "amend" / "brief-review-2.md").read_text())  # it sees round 1
+
+    def test_removing_agreed_work_or_a_check_goes_to_the_human(self) -> None:
+        h = self.h
+        h.approved()
+        d = h.read_json("plan.json")
+        d["tasks"] = [t for t in d["tasks"] if t["id"] != "T02"]
+        for t in d["tasks"]:
+            t["depends_on"] = [x for x in t.get("depends_on", []) if x != "T02"]
+        h.write_json("plan-amend.json", d)
+        self.assertIn("Ask the human once", h.tp("plan", "amend").out)
+        self.assertIn("goes to the human", h.tp("plan", "amend", "--review", "--note",
+                                                "The build guide duplicates the README now.", expect=2).text)
+        d = h.read_json("plan.json")
+        d["tasks"][0]["acceptance"] = []
+        d["tasks"][0]["checks"] = []
+        h.write_json("plan-amend.json", d)
+        out = h.tp("plan", "amend", expect=None).text
+        self.assertNotIn("independent review", out)
 
 
 class CloseoutTest(unittest.TestCase):

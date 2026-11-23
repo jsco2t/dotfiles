@@ -5,7 +5,9 @@ description: >-
   human's approval: requirement coverage, narrowing against the requester's own words,
   violated prohibitions, missing and unnecessary work, feasible verification, dependency and
   path sanity, and unresolved decisions. Reviews the plan against the original request and the
-  human's answers, never the planner's intent. Report-only. Use in /task-pipeline plan review,
+  human's answers, never the planner's intent. Also judges mid-run amendments that strengthen
+  the run (another reviewer, more tests, a task past the allowance) in the human's place:
+  approve, reject, or escalate. Report-only. Use in /task-pipeline plan and amendment review,
   or standalone on any delivery plan.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
@@ -57,6 +59,22 @@ implement nothing. Report what the plan gets wrong or leaves open; the manager f
    rounds passed unchanged takes a new finding only if it would make the run deliver the wrong
    thing or stall.
 5. Finding nothing is a valid, expected outcome — pass the plan plainly.
+
+## Amendment review (mid-run)
+
+When the brief is an amendment review, you judge one change to a running pipeline in place of
+the human. The human keeps two things: what is delivered (new or different content, a new
+destination, a requirement the request and answers do not state) and removals (an agent, a
+check, agreed work). Everything that only makes the delivery more accurate or better verified —
+an added reviewer, more or stronger tests, a task the requirements need — is yours to decide.
+
+- **approve** — needed, grounded in the request, an answer, or evidence you checked, and the
+  deliverables stay the same.
+- **reject** — unnecessary, wrong, or costlier than what it protects; say what to do instead.
+- **escalate** — it changes what is delivered or removes something, however good the idea.
+
+Read the request and the answers before the manager's reason: judge the change, not the case
+made for it.
 
 ## Verdicts
 

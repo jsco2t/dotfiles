@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import briefs, docscheck, snapshot
 from . import plan as planmod
@@ -23,6 +23,8 @@ from .common import (TP_SCRIPT, TPError, Workflow, agent_context_tokens, gap_min
 
 DONE_STATES = ("accepted", "skipped")
 CHECK_TIMEOUT = 540
+SUMMARY_WORDS = 80      # what a hand-back summary is shown at
+SUMMARY_CEILING = 300   # past this the agent rewrites it
 
 
 def _research():
@@ -357,9 +359,10 @@ GUIDE = {
     "halting": "Halt requested: record {ids} as they hand back; dispatch nothing new.",
     "halted": "Halted. Tell the human where work stopped (`halt.json`), then stop. `tp resume --answer \"...\"` "
               "continues.",
-    "publish": "`tp publish {id}` (a dry run: renders the reviewed draft and runs the pre-flight checks); show "
-               "the human what it prints and ask once — batch every publish that is ready into the same question, "
-               "in plain text if agents are in flight — then `tp publish {id} --answer \"<their words>\"`.",
+    "publish": "`tp publish {id}` (a dry run: renders the reviewed draft and runs the pre-flight checks), then "
+               "do what it prints: post a pre-approved one with `--preapproved`; otherwise show the human and ask "
+               "once — batch every publish that is ready into the same question, in plain text if agents are in "
+               "flight — then `tp publish {id} --answer \"<their words>\"`.",
     "gate": "`tp gate {id}` prints the human's decision with what it approves; ask it once — in the same "
             "question as every other ready gate and publish, in plain text if agents are in flight — and keep "
             "working the rest. Then `tp gate {id} --answer \"<their words>\"` (go ahead), or `--reopen T##` with "
@@ -770,8 +773,10 @@ def _validate_result(data: Any, tid: str, step: str, criteria: int = 0) -> List[
         errs.append("status must be done, blocked, or needs_input.")
     if not str(data.get("summary", "")).strip():
         errs.append("summary is empty.")
-    elif words(data["summary"]) > 80:
-        errs.append(f"summary is {words(data['summary'])} words; the limit is 80.")
+    elif words(data["summary"]) > SUMMARY_CEILING:
+        # Over 80 words is trimmed where it is shown: sending it back costs a round trip to an
+        # agent whose context is often past 200k tokens. Only a runaway summary goes back.
+        errs.append(f"summary is {words(data['summary'])} words; keep it to about 80.")
     for key in ("changed", "noticed", "questions"):
         if not isinstance(data.get(key, []), list):
             errs.append(f"`{key}` must be a list.")
@@ -780,6 +785,12 @@ def _validate_result(data: Any, tid: str, step: str, criteria: int = 0) -> List[
     if criteria and data.get("status") == "done":
         errs += _evidence_errors(data, criteria)
     return errs
+
+
+def _trimmed(text: str, limit: int = SUMMARY_WORDS) -> str:
+    """A hand-back summary as shown: its first `limit` words."""
+    ws = str(text).split()
+    return " ".join(ws[:limit]) + (" …" if len(ws) > limit else "")
 
 
 def _run_cmd(cmd: str, cwd: Path, log: Path) -> Tuple[bool, str]:
@@ -1110,15 +1121,46 @@ def _freeze_tests_baseline(wf: Workflow, task: Dict[str, Any], scope: Dict[str, 
         shutil.copyfile(p, dest)
 
 
+# A whole-line comment: rewording one weakens nothing (real runs spent fix rounds on reworded doc
+# comments). A line starting with a bare `*` is code (Go's `*p = v`), not a block-comment body.
+_COMMENT_LINE = re.compile(r"^(//|#|/\*|\*/|<!--|--\s)")
+# Comments that are assertions or decide what compiles: Go build constraints, and an example
+# test's `// Output:` block (every comment line after it is expected output).
+_LIVE_COMMENT = re.compile(r"^(//(go:|\s*\+build\b)|#!?\[)")  # and Rust attributes: #[test], #[cfg(test)]
+_OUTPUT_START = re.compile(r"^//\s*(Unordered output|Output):")
+
+
+def _assertion_lines(text: str) -> List[str]:
+    """A test file's lines that can carry a check, whitespace-normalized (gofmt realigns columns
+    when a field is added): comments drop out, except the ones that are assertions."""
+    out, in_output = [], False
+    for raw in text.splitlines():
+        ln = " ".join(raw.split())
+        if not ln:
+            continue
+        if _OUTPUT_START.match(ln):
+            in_output = True
+            out.append(ln)
+            continue
+        if in_output and ln.startswith("//"):
+            out.append(ln)
+            continue
+        in_output = False
+        if _COMMENT_LINE.match(ln) and not _LIVE_COMMENT.match(ln):
+            continue
+        out.append(ln)
+    return out
+
+
 def _tests_weakened(old: Path, new: Path) -> Optional[str]:
-    """None when an edit to a test file only added or reformatted lines; otherwise the lines it
-    dropped without re-adding them (deleted tests, gutted assertions)."""
+    """None when an edit to a test file only added lines, reformatted them, or reworded comments;
+    otherwise the lines it dropped without re-adding them (deleted tests, gutted assertions)."""
     if not old.is_file():
         return None
     if not new.is_file():
         return "the whole file was deleted"
-    kept = {ln.strip() for ln in new.read_text().splitlines()}
-    dropped = [ln.strip() for ln in old.read_text().splitlines() if ln.strip() and ln.strip() not in kept]
+    kept = set(_assertion_lines(new.read_text()))
+    dropped = [ln for ln in _assertion_lines(old.read_text()) if ln not in kept]
     return "; ".join(ln[:70] for ln in dropped[:5]) or None
 
 
@@ -1357,7 +1399,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
         if data["status"] != "done":
             del state["in_flight"][tid]
             ts["status"] = "blocked"
-            asks = data.get("questions") or [data["summary"]]
+            asks = data.get("questions") or [_trimmed(data["summary"])]
             # The dispatch's window (its start and who ran beside it) outlives the wait: the snapshot
             # is still the first dispatch's, so siblings that land while it waits are excused too.
             ts["blocked"] = {"kind": "input", "summary": f"{tid} {data['status']}: " + " | ".join(asks), "step": step,
@@ -2333,30 +2375,101 @@ def _run_final_checks(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any],
             ok, tail = _run_cmd(_expand_cmd(spec["cmd"], None, scope), cwd, log)
             results.append(f"{name}: {'ok' if ok else 'failed'}")
             if not ok:
-                failures.append((f"check:{name}", f"final check {name} failed (log {log}): {tail}"))
+                failures.append((check_key(name, tail), f"final check {name} failed (log {log}): {tail}"))
     return failures, results
 
 
-def cmd_baseline(wf: Workflow) -> str:
+def final_failure_advice(keys: List[str], baseline: Set[str], readonly: bool = False) -> str:
+    """What `tp final` tells the manager to do about the failures it stopped on (keys from check_key)."""
+    if keys and not readonly and all(k in baseline for k in keys):
+        return ("Every failure above pre-dates this run (`tp baseline`): ask the human once whether to fix it in this "
+                "run or leave it. Leave → `tp baseline --leave --answer \"<their words>\"`, then `tp final` finishes "
+                "and reports it.")
+    out = []
+    slow = [k.split(":")[1] for k in keys if k.endswith(":timeout")]
+    if slow:
+        out.append(f"{', '.join(slow)} ran past the {CHECK_TIMEOUT}s limit, which proves nothing either way. A slow "
+                   "check needs no code change: run it under the repo's pinned toolchain (`tp plan amend --delegated`, an "
+                   "env prefix only) or in parallel (`make -j4 ...`); any other rewrite — a narrower command — is a "
+                   "check change the plan reviewer or the human decides (`tp plan amend` says which).")
+    if any(not k.endswith(":timeout") for k in keys) or readonly:
+        out.append("These are the run's to fix, not the human's: a failure in work a task delivered is a fix task "
+                   "(`tp plan amend`; inside the fix-task allowance `--delegated`, past it the check says who decides); "
+                   "a failure from the machine — a toolchain or tool the repo pins to another version — is a pinned "
+                   "check (`tp plan amend --delegated`, an env prefix only).")
+    out.append("Then `tp final` again. Only what neither settles goes to the human: `tp exception --summary ...`.")
+    return " ".join(out)
+
+
+def check_key(name: str, tail: str) -> str:
+    """Which failure a command check is, across runs: by its name (its output shifts run to run),
+    except that a timeout is its own kind — it proves nothing, so it never matches a known failure."""
+    return f"check:{name}:timeout" if "timed out after" in tail else f"check:{name}"
+
+
+def cmd_baseline(wf: Workflow, leave: Optional[str] = None) -> str:
     """Record which final checks already fail before this run touches anything (machine quirks,
     sandbox limits, breakage already on the branch), so `tp final` can name them pre-existing
-    instead of presenting them as the run's own. Run it right after approval."""
+    instead of presenting them as the run's own. Run it right after approval, and put any failure
+    to the human then, while they are still there — not at the end of the run, when they are not.
+    `leave`: the human's words choosing to leave the recorded failures; `tp final` then finishes
+    over them (a new failure, or a timeout, still stops it) and the report lists them."""
+    if leave is not None:
+        return _leave_baseline(wf, leave)
     with wf.locked():
         state = wf.load()
         if state["phase"] != "EXECUTING":
             raise TPError(f"baseline runs while EXECUTING; the workflow is {state['phase']}.")
         if state["in_flight"]:
             raise TPError(f"agents are in flight ({', '.join(state['in_flight'])}) — record them before baselining.")
+        landed = [t for t, ts in state["tasks"].items() if ts.get("started") or ts.get("status") != "pending"]
+        if landed:
+            raise TPError(f"work has already landed ({', '.join(landed[:6])}): a baseline is taken before the first "
+                          "dispatch, or it would record the run's own breakage as pre-existing. A failure found now "
+                          "is the run's to fix — unless the same checks fail on a clean copy of the approval commit, "
+                          "which is evidence to show the human with the failure.")
         plan, scope, _ = _loaded(wf, state)
         failures, results = _run_final_checks(wf, state, plan, scope)
         state["final_baseline"] = sorted({key for key, _ in failures})
+        state.pop("baseline_left", None)  # a new baseline needs a new decision
         wf.save(state)
         wf.event("baseline", failures=len(state["final_baseline"]))
         n = len(state["final_baseline"])
-        head = (f"baseline recorded: {n} final-check failure(s) pre-date this run." if n
-                else "baseline recorded: every final check passes right now.")
-        return "\n".join([head] + [f"  - {r}" for r in results]
-                         + ["`tp final` names these as pre-existing; the human still decides what to do with them."])
+        if not n:
+            return "\n".join(["baseline recorded: every final check passes right now."]
+                             + [f"  - {r}" for r in results])
+        timeouts = [k for k in state["final_baseline"] if k.endswith(":timeout")]
+        return "\n".join(
+            [f"baseline recorded: {n} final-check failure(s) pre-date this run."] + [f"  - {r}" for r in results]
+            + [f"  ! {f}" for _, f in failures[:10]]
+            + (["A timed-out check proves nothing either way: make it finish (a narrower command, the repo's pinned "
+                "toolchain) before you rely on it."] if timeouts else [])
+            + ["A failure from the machine — a toolchain or tool the repo pins to another version (the survey's "
+               "TOOLCHAIN line) — is not breakage: pin the check (`tp plan amend --delegated`, an env prefix only) "
+               "and baseline again.",
+               "Anything left is the branch's own. Ask the human now, while they are here — not at the end: leave it "
+               "(the report lists it; `tp final` finishes over it, and still stops on any new failure) or fix it in "
+               "this run (a plan amendment). Say that while a check fails it proves nothing past its failure point; "
+               "each task's own test_cmd still runs. Leave → `tp baseline --leave --answer \"<their words>\"`."])
+
+
+def _leave_baseline(wf: Workflow, answer: str) -> str:
+    if not answer.strip():
+        raise TPError("--answer needs the human's words, verbatim.")
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] != "EXECUTING":
+            raise TPError(f"baseline runs while EXECUTING; the workflow is {state['phase']}.")
+        known = [k for k in state.get("final_baseline", []) if not k.endswith(":timeout")]
+        if not known:
+            raise TPError("nothing failed at the recorded baseline, so there is nothing to leave — `tp baseline` "
+                          "first (before any work lands); a failure that appears later is the run's to fix.")
+        state["baseline_left"] = {"keys": known, "answer": answer, "ts": now_iso()}
+        wf.save(state)
+        wf.decision("leave the final-check failures that pre-date the run", answer, who="human")
+        wf.event("baseline_left", keys=known)
+        return (f"left as pre-existing: {', '.join(known)} — `tp final` finishes over them and the report lists them; "
+                "a new failure, or a timeout, still stops it.")
 
 
 def cmd_final(wf: Workflow) -> str:
@@ -2378,17 +2491,17 @@ def cmd_final(wf: Workflow) -> str:
                           "`tp closeout --decide --answer \"...\"`).")
         keyed, results = _run_final_checks(wf, state, plan, scope)
         baseline = set(state.get("final_baseline", []))
+        left = state.get("baseline_left") or {}
+        stopping = [(key, f) for key, f in keyed if key not in set(left.get("keys", []))]
         failures = [f + (" [pre-existing: it failed at the recorded baseline too]" if key in baseline else "")
-                    for key, f in keyed] + _readonly_changes(wf, state, scope)
+                    for key, f in stopping] + _readonly_changes(wf, state, scope)
         if failures:
             state["final_failed"] = failures[:50]
             wf.save(state)
-            pre_only = all(key in baseline for key, _ in keyed) and len(keyed) == len(failures)
-            raise TPError(*failures[:40], "Every failure above pre-dates this run (`tp baseline`): ask the human "
-                          "whether to fix it in this run or leave it." if pre_only else
-                          "Fix path: `tp exception --summary ...` and ask the human, or "
-                          "`tp resolve --task T## --action reopen --answer ... --by human` if the human already "
-                          "decided.")
+            readonly_only = len(stopping) != len(failures)
+            raise TPError(*failures[:40], final_failure_advice([key for key, _ in stopping], baseline,
+                                                               readonly=readonly_only))
+        state["final_left"] = [f for key, f in keyed if key in set(left.get("keys", []))]
         state["phase"] = "DONE"
         state["done"] = now_iso()
         state.pop("final_failed", None)
@@ -2507,6 +2620,10 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
     if research:
         out += ["", "## Research", "", f"- {research}"]
     out += ["", "## Final checks", ""] + ([f"- {r}" for r in results] or ["- none planned"])
+    if state.get("final_left"):
+        left = state.get("baseline_left") or {}
+        out += ["", f"Left as pre-existing (they failed before the run began; the human: \u201c{left.get('answer', '')}"
+                    "\u201d):", ""] + [f"- {f.splitlines()[0][:300]}" for f in state["final_left"]]
     groups: Dict[str, List[str]] = {c: [] for c in CLOSEOUT_CLASSES + ("unclassified",)}
     for raw in wf.noticed_items():
         e = _closeout_marks(state, wf).get(_noticed_text(raw), {})

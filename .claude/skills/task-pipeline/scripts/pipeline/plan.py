@@ -11,7 +11,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import scope as scopemod
-from .common import TPError, Workflow, limit, load_json, minutes_since, now_iso, sha_file, words
+from .common import (TPError, Workflow, gap_minutes, limit, load_json, minutes_since, now_iso, sha_file, waiting_gaps,
+                     words)
 
 BUILTIN_TASK_CHECKS = {"docs": "every relative link resolves, and every code citation is written repo-relative "
                                "(`path/to/file.go:12`, `:12-20`) and points at a real line (a citation whose lines "
@@ -518,8 +519,13 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
     for d in sorted(deliverables - served):
         errs.append(f"{d} is served by no task.")
     if contract >= 2:
-        for r in sorted(set(ledger) - cited, key=lambda x: int(x[1:]) if x[1:].isdigit() else 0):
+        unserved = sorted(set(ledger) - cited, key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
+        for r in unserved:
             errs.append(f"{r} ({ledger[r].get('text', '')}) is served by no task.")
+        if unserved:
+            errs.append("A run-wide constraint (conventions, a gate, test-forward, a required tool) is served by "
+                        "citing it in `requirements` of every task it governs; one already met while scoping is cited "
+                        "by the tasks that rely on that work. Never drop an agreed requirement to pass this check.")
     if not computable:
         return errs
 
@@ -894,8 +900,10 @@ def _remaining(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any
     budget = scope.get("budget_minutes")
     if not budget:
         return [line + "."], False
-    left = budget - minutes_since(state["created"])
-    out = [f"{line}; the budget has {left:.0f} of {budget} min left, wall-clock."]
+    waited = gap_minutes(state["created"], None, waiting_gaps(state))
+    left = budget - (minutes_since(state["created"]) - waited)
+    out = [f"{line}; the budget has {left:.0f} of {budget} min left"
+           + (f" ({waited:.0f} min waiting on the human not counted)." if waited >= 1 else ".")]
     if remaining > left:
         out.append("WARN: the remaining work runs past the budget — say so when you ask the human.")
     return out, remaining > left
@@ -926,6 +934,40 @@ def _change_lines(approved: Dict[str, Any], draft: Dict[str, Any]) -> List[str]:
     return out
 
 
+# Variables that only choose which toolchain runs a check. Running a check under the version the
+# repository pins changes nothing it proves, so the manager settles it; any other variable could
+# change what the check tests (GOFLAGS=-run=..., SKIP_...), so it is not on the list.
+_PIN_VARS = {"GOTOOLCHAIN", "GOROOT", "PATH", "RUSTUP_TOOLCHAIN", "PYENV_VERSION", "NODE_VERSION"}
+_ASSIGNMENT = r"""[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|[^\s;&'"]+)"""
+_ENV_PREFIX = re.compile(rf"^(?:export\s+)?((?:{_ASSIGNMENT}\s*)+)(?:;|&&)?\s*")
+
+
+def toolchain_pinned(old: str, new: str) -> bool:
+    """True when `new` is `old` run under toolchain-selecting variables only (`GOTOOLCHAIN=... cmd`,
+    `export GOTOOLCHAIN=... PATH=...; cmd`)."""
+    m = _ENV_PREFIX.match(new.strip())
+    if not m or new.strip()[m.end():].strip() != old.strip():
+        return False
+    names = [a.group(0).split("=", 1)[0] for a in re.finditer(_ASSIGNMENT, m.group(1))]
+    return bool(names) and set(names) <= _PIN_VARS
+
+
+def _pinned_checks(approved: Dict[str, Any], draft: Dict[str, Any]) -> Optional[List[str]]:
+    """The checks an amendment only pinned to a toolchain; None if it changed checks any other way."""
+    old, new = approved.get("checks") or {}, draft.get("checks") or {}
+    if set(old) != set(new):
+        return None
+    pinned = []
+    for name, spec in old.items():
+        if new[name] == spec:
+            continue
+        rest_same = {k: v for k, v in spec.items() if k != "cmd"} == {k: v for k, v in new[name].items() if k != "cmd"}
+        if not rest_same or not toolchain_pinned(str(spec.get("cmd", "")), str(new[name].get("cmd", ""))):
+            return None
+        pinned.append(name)
+    return pinned
+
+
 def _delegation_misfit(approved: Dict[str, Any], draft: Dict[str, Any], scope: Dict[str, Any],
                        state: Dict[str, Any], changes: List[str]) -> List[str]:
     """Why this amendment falls outside the human's standing fix-task delegation; [] when it fits.
@@ -934,6 +976,11 @@ def _delegation_misfit(approved: Dict[str, Any], draft: Dict[str, Any], scope: D
     reported, and never a gate (nor a reason to shrink a task to fit)."""
     fx = scopemod.fix_tasks(scope)
     allow = int(fx.get("allow") or 0)
+    pins_only = _pinned_checks(approved, draft) is not None
+    if pins_only:
+        changes = [c for c in changes if c != "checks changed"]
+        if not changes:
+            return []  # checks run under the repo's pinned toolchain: the same checks, no new work
     if not allow:
         return ["the human allowed no fix tasks without review"]
     before = {t["id"]: t for t in approved["tasks"]}
@@ -1103,7 +1150,10 @@ def cmd_amend(wf: Workflow, answer: Optional[str], delegated: bool = False, note
                               "report shows it to the human).")
             added = [t["id"] for t in draft["tasks"] if t["id"] not in {a["id"] for a in approved["tasks"]}]
             state["delegated"] = list(state.get("delegated", [])) + added
-            label = f"plan amend (fix-task delegation, {len(state['delegated'])} of {allow})"
+            pinned = _pinned_checks(approved, draft)
+            label = (f"plan amend (fix-task delegation, {len(state['delegated'])} of {allow})" if added else
+                     f"plan amend (checks pinned to the repo's toolchain: {', '.join(pinned or [])})" if pinned else
+                     "plan amend (manager-settled)")
             _apply_amendment(wf, state, draft, scope, changes, {"delegated": True, "note": " ".join(note.split()),
                                                                 "tasks": added})
             wf.save(state)
@@ -1268,6 +1318,7 @@ _SCOPE_LABELS = {"title": "the title", "output": "the output summary", "requirem
                  "terms": "the significant terms", "non_goals": "the non-goals",
                  "answers": "the human's recorded answers", "limits": "what the gates enforce (limits)",
                  "ignore": "what the gates ignore", "fix_tasks": "the fix-task allowance", "review": "the review mode",
+                 "outside_writes": "the approval of outside writes",
                  "workspaces": "the workspaces", "split_tests": "who writes the tests (split_tests)"}
 
 
@@ -1363,7 +1414,8 @@ def _plan_human_reasons(approved: Dict[str, Any], draft: Dict[str, Any], scope: 
             out.append(f"{tid} changes what it posts or asks")
     if set(approved.get("final_checks", [])) - set(draft.get("final_checks", [])):
         out.append("it drops a final check")
-    if any(k not in (draft.get("checks") or {}) or draft["checks"][k] != v for k, v in (approved.get("checks") or {}).items()):
+    if (any(k not in (draft.get("checks") or {}) or draft["checks"][k] != v
+            for k, v in (approved.get("checks") or {}).items()) and _pinned_checks(approved, draft) is None):
         out.append("it removes or rewrites a check command")
     if approved.get("questions") != draft.get("questions"):
         out.append("it changes the plan's questions")

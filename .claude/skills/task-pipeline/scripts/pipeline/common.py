@@ -117,11 +117,17 @@ def waiting_gaps(state: Dict[str, Any]) -> List[List[Optional[str]]]:
 def _waiting_on_human(state: Dict[str, Any]) -> bool:
     if state.get("phase") != "EXECUTING" or state.get("in_flight"):
         return False
+    tasks = state.get("tasks", {}).values()
     return bool(state.get("halt") or state.get("blocked")
                 # A task waiting on its siblings' red tests waits on the manager's work, not the human.
                 or any(t.get("status") == "blocked" and (t.get("blocked") or {}).get("kind") != "sibling"
-                       for t in state.get("tasks", {}).values())
-                or any(s.get("status") == "blocked" for s in state.get("reviews", {}).values()))
+                       for t in tasks)
+                or any(s.get("status") == "blocked" for s in state.get("reviews", {}).values())
+                # Asked and not yet answered: a question, a gate, a publish whose dry run was shown.
+                or any(not q.get("answered") for q in (state.get("questions") or {}).values())
+                or any(t.get("status") not in ("accepted", "skipped")
+                       and (t.get("asked") or ((t.get("publish") or {}).get("sha") and not t["publish"].get("posted")))
+                       for t in tasks))
 
 
 def _tick_idle(state: Dict[str, Any]) -> None:

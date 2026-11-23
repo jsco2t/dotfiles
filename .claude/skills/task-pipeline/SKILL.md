@@ -47,11 +47,13 @@ dispatches it and prints the calls to send.
 1. Save the request verbatim, then `tp init <location> --title "..." --request-file <file>`
    (no `-w`; it prints the workflow dir). No location given: ask.
 2. Size it yourself, no agents: `tp survey <repo> --name <ws>`; `tp survey-issue jira:KEY` or
-   `gh:owner/repo#N` for a named ticket.
+   `gh:owner/repo#N` for a named ticket. A `TOOLCHAIN` line: every check and `test_cmd` carries
+   the prefix it prints, and conventions.md says so.
 3. `tp roster suggest --kinds <kinds>`; keep only agents with a direct bearing on the output,
    specific reviewers (correctness, security, api-compat, test) over broad ones.
 4. **One AskUserQuestion round**: output (kind, format, where), participants, review (`none` or
-   `final`), conventions, and **fix tasks** — how many small fix tasks you may add unreviewed, how big.
+   `final`), conventions, **fix tasks** — how many small fix tasks you may add unreviewed, how big —
+   and, for posts to Jira/Confluence/GitHub, **outside writes**: pre-approved or each at its dry run.
    Never ask them to pick a budget or whether to proceed.
 5. `scope.json` (`tp schema scope`) with the **requirements ledger**: each requested outcome,
    format, destination, constraint, and ticket acceptance criterion as `R#`, with `source` — the
@@ -103,7 +105,9 @@ for a reader who was not in the conversation.
 
 ## Stage 5 — Execute (autonomous)
 
-ToolSearch `select:SendMessage,TaskStop` first. Known breakage → `tp baseline` once. Loop:
+ToolSearch `select:SendMessage,TaskStop` first. Known or suspected breakage → `tp baseline`
+before the first dispatch; any failure goes to the human then, not at the end (leave → `tp
+baseline --leave --answer "..."`). Loop:
 
 - **dispatch / fix / review** → `tp dispatch <ids…>` in one call; send every printed
   `Agent(...)`/`SendMessage(...)` call (from any command) in one message.
@@ -117,19 +121,20 @@ ToolSearch `select:SendMessage,TaskStop` first. Known breakage → `tp baseline`
   accept <id> --override --note "<evidence>"` (even once its fix round is printed); a test
   correction → `tp rebaseline-tests --by manager`; another round → `tp resolve --action retry`; a
   question the evidence settles → `--action answer --by manager`; a fix task inside the allowance,
-  or plumbing scope → `tp plan|scope amend --delegated`; more than that which strengthens the run
+  a check pinned to the repo's toolchain, or plumbing scope → `tp plan|scope amend --delegated`; more than that which strengthens the run
   → `--review --note`, send the call, `--record` (the reviewer decides; the check says which).
 - **For the human** (Rule 1): `tp ask --about <id>`, keep working, then `tp answer` and the
   `tp resolve … --by human` it prints; a plan change is checked first (`tp plan amend`).
-- **gate / publish** → `tp gate <id>` / `tp publish <id>` (dry run); every ready one in one
-  question; then `--answer "<their words>"` (a gate: `--reopen T##` for changes first).
+- **gate / publish** → `tp gate <id>` / `tp publish <id>` (dry run); pre-approved posts:
+  `tp publish <id> --preapproved`, no question; else every ready one in one question; then
+  `--answer "<their words>"` (a gate: `--reopen T##` for changes first).
 - **wait** → end your turn. `tp digest` on a status question; TaskStop only an agent it calls
   stuck; lost → `tp lost <id> --summary "..."`.
 
 ## Stage 6 — Closeout and final
 
-`tp closeout`: classify in bulk. Fix gaps in this run's own work yourself (`tp plan amend
---delegated`); out-of-scope follow-ups go to the report unasked; only deferred work (asked for,
+`tp closeout`: classify in bulk. Fix gaps in this run's own work — a final check it broke
+included — yourself (`tp plan amend --delegated`); out-of-scope follow-ups go to the report unasked; only deferred work (asked for,
 left undone) goes to the human, once. `tp final` writes `report.md`; present it answer-first —
 delivered work, coverage, time, review outcome, gates you settled, what they decide.
 Committing and pushing are theirs.

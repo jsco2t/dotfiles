@@ -157,7 +157,7 @@ class RecordTest(unittest.TestCase):
     def test_missing_or_malformed_result_is_refused_with_a_hint(self) -> None:
         self.h.tp("dispatch", "T01")
         self.assertIn("result-author.json", self.h.tp("record", "T01", expect=2).text)
-        self.h.result("T01", "author", summary="word " * 120)
+        self.h.result("T01", "author", summary="word " * 500)  # a runaway; 80-300 words is trimmed, not refused
         self.assertIn("summary", self.h.tp("record", "T01", expect=2).text)
 
     def test_clean_author_pass_goes_to_the_manager_fact_check(self) -> None:

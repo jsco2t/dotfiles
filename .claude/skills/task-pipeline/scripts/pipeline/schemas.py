@@ -28,6 +28,10 @@ SCHEMAS = {
         "answers": [{"q": "What output?", "a": "<the human's words>"}],
         "fix_tasks": {"allow": "2  (0: every fix task is asked)", "max_minutes": 15,
                       "answer": "<the human's words to: may I add small fix tasks without asking — how many, how big?>"},
+        "outside_writes": {"approval": "pre-approved | each", "answer": "<the human's words>"},
+        "_outside_writes": "only with integration deliverables: the human pre-approves the posts (each still "
+                           "dry-runs and reads back; `tp publish T## --preapproved`) or approves each one at its dry "
+                           "run — asked in the Stage 1 round",
         "split_tests": False,
         "_split_tests": "optional: true runs code tasks as two agents (test author, then code author) when "
                         "independent test authorship is wanted; default is one fused build round",

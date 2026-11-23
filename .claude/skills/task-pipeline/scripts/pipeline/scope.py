@@ -180,6 +180,15 @@ def requirement_warnings(scope: Dict[str, Any], wf_root: Path) -> List[str]:
     return out
 
 
+# What a run posts to Jira, Confluence, or GitHub is two deliverables, and planning needs both.
+POST_PAIR = ("A comment, page, or issue the run posts is two deliverables: its text, kind docs at "
+             "`wf:drafts/<name>.md` (a doc-author draft, reviewed like any document; a Confluence page edit is the "
+             "whole storage body, `.xml`), and the post, kind integration at `jira:KEY` (or `confluence:PAGE-ID`, "
+             "`gh:owner/repo#N`), which a publish task sends after its dry run.")
+_EXTERNAL = re.compile(r"\b(jira|confluence|github|gh|comment|page|post|publish)\b|^[A-Z][A-Z0-9]+-\d+$|\b[A-Z][A-Z0-9]+-\d+\b",
+                       re.I)
+
+
 def validate(scope: Dict[str, Any], require_fix_tasks: bool = True, contract: int = 1) -> List[str]:
     """require_fix_tasks: False for a scope confirmed before the fix-task question existed — a
     revision or amendment of it must not force that question on the human mid-run (it allows
@@ -200,9 +209,17 @@ def validate(scope: Dict[str, Any], require_fix_tasks: bool = True, contract: in
             errs.append(f"deliverable id {did!r} must be unique and look like D1.")
         ids.add(did)
         if d.get("kind") not in cat["kinds"]:
-            errs.append(f"{did}: kind {d.get('kind')!r} is not one of {', '.join(cat['kinds'])}.")
+            errs.append(f"{did}: kind {d.get('kind')!r} is not one of {', '.join(cat['kinds'])}."
+                        + (f" {POST_PAIR}" if _EXTERNAL.search(f"{d.get('kind')} {d.get('where', '')}") else ""))
         if not d.get("what"):
             errs.append(f"{did}: say `what` is delivered, in the human's terms.")
+    if "integration" not in {d.get("kind") for d in scope["deliverables"]}:
+        drafts = [d.get("id") for d in scope["deliverables"]
+                  if d.get("kind") == "docs" and str(d.get("where", "")).strip().startswith("wf:drafts")]
+        if drafts:
+            errs.append(f"{', '.join(drafts)}: a draft in wf:drafts/ is text the run posts, and nothing posts it. "
+                        f"{POST_PAIR} Add the integration deliverable now: added after confirmation, it is a scope "
+                        "change the human must approve.")
     if len(scope["deliverables"]) > 8:
         errs.append(f"{len(scope['deliverables'])} deliverables; the limit is 8 — group them.")
     kinds = deliverable_kinds(scope)
@@ -291,6 +308,7 @@ def validate(scope: Dict[str, Any], require_fix_tasks: bool = True, contract: in
     if require_fix_tasks or "fix_tasks" in scope:
         errs += _fix_task_errors(scope)
     errs += _limits_and_ignore_errors(scope)
+    errs += _outside_writes_errors(scope)
     if contract >= 2:
         errs += requirement_errors(scope)
     return errs
@@ -322,6 +340,10 @@ def _limits_and_ignore_errors(scope: Dict[str, Any]) -> List[str]:
 def warnings(scope: Dict[str, Any]) -> List[str]:
     """What the scope check reports but never refuses: budgets are estimates, not gates."""
     out = []
+    kinds = {d.get("kind") for d in scope.get("deliverables", []) if isinstance(d, dict)}
+    if "integration" in kinds and "docs" not in kinds:
+        out.append("nothing drafts what the integration deliverable posts. " + POST_PAIR + " A transition, link, "
+                   "or worklog posts no text and needs no draft.")
     budget, rb = scope.get("budget_minutes"), research_budget(scope)
     lanes = limit("max_in_flight")
     if rb and isinstance(budget, int) and math.ceil(rb / lanes) >= budget:
@@ -338,7 +360,8 @@ def render(scope: Dict[str, Any]) -> str:
     out += [f"**Budget:** {budget} min, planning included." if budget else "**Budget:** none set.",
             f"**Research budget:** {rb} agent-min — {scope['research'].get('why', '')}" if rb
             else "**Research:** none — the work is specified well enough to plan directly.",
-            f"**Review:** {scope['review']}.", _fix_tasks_line(scope), "", "## Deliverables"]
+            f"**Review:** {scope['review']}.", _fix_tasks_line(scope)]
+    out += [line for line in (_outside_writes_line(scope),) if line] + ["", "## Deliverables"]
     out += [f"- {d['id']} ({d['kind']}): {d['what']}" + (f" — in `{d['where']}`" if d.get("where") else "")
             for d in scope["deliverables"]]
     if scope.get("requirements"):
@@ -366,6 +389,38 @@ def render(scope: Dict[str, Any]) -> str:
     if scope.get("answers"):
         out += ["", "## Human answers"] + [f"- {a['q']} — {a['a']}" for a in scope["answers"]]
     return "\n".join(out) + "\n"
+
+
+def preapproval(scope: Dict[str, Any]) -> Optional[str]:
+    """The human's words pre-approving the run's outside writes (each still dry-runs and reads
+    back), or None when each post waits on their OK after its dry run."""
+    ow = scope.get("outside_writes")
+    if isinstance(ow, dict) and ow.get("approval") == "pre-approved" and str(ow.get("answer", "")).strip():
+        return " ".join(str(ow["answer"]).split())
+    return None
+
+
+def _outside_writes_errors(scope: Dict[str, Any]) -> List[str]:
+    ow = scope.get("outside_writes")
+    if ow is None:
+        return []
+    if not isinstance(ow, dict) or ow.get("approval") not in ("pre-approved", "each"):
+        return ["outside_writes must be {\"approval\": \"pre-approved\" | \"each\", \"answer\": \"<the human's "
+                "words>\"}."]
+    if not str(ow.get("answer", "")).strip():
+        return ["outside_writes.answer: the human's words, verbatim — only they can pre-approve a write outside the "
+                "workspaces."]
+    return []
+
+
+def _outside_writes_line(scope: Dict[str, Any]) -> str:
+    if "integration" not in deliverable_kinds(scope):
+        return ""
+    pre = preapproval(scope)
+    if pre:
+        return (f"**Outside writes:** pre-approved — each post is dry-run, sent, and read back without a further "
+                f"question. Your answer: {pre}")
+    return "**Outside writes:** each post waits for your OK after its dry run."
 
 
 def _fix_tasks_line(scope: Dict[str, Any]) -> str:

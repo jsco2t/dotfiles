@@ -19,6 +19,7 @@ import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import adf, run
+from . import scope as scopemod
 from . import plan as planmod
 from .common import TPError, Workflow, now_iso
 
@@ -216,12 +217,20 @@ def _read_back(pub: Dict[str, Any], posted: str, doc: Any) -> Tuple[bool, str]:
     return True, f"matches what was sent ({len(adf.text_of(doc).split())} words, rich text)"
 
 
-def cmd_publish(wf: Workflow, tid: str, answer: Optional[str]) -> str:
+def cmd_publish(wf: Workflow, tid: str, answer: Optional[str], preapproved: bool = False) -> str:
     with wf.locked():
         state = wf.load()
         if state["phase"] != "EXECUTING":
             raise TPError(f"publish runs while EXECUTING; the workflow is {state['phase']}.")
         plan, scope, tasks = run._loaded(wf, state)
+        pre = scopemod.preapproval(scope)
+        if preapproved:
+            if answer is not None:
+                raise TPError("--preapproved or --answer, not both.")
+            if not pre:
+                raise TPError("outside writes are not pre-approved in this scope (scope.json `outside_writes`): show the "
+                              f"human the dry run and `tp publish {tid} --answer \"<their words>\"`.")
+            answer = f"pre-approved at the start: {pre}"
         task = tasks.get(tid)
         if task is None or not planmod.is_publish(task):
             raise TPError(f"{tid} is not a publish task in the approved plan.")
@@ -282,11 +291,13 @@ def cmd_publish(wf: Workflow, tid: str, answer: Optional[str]) -> str:
                                for k in before if after[k] < before[k]]
             out_file.parent.mkdir(parents=True, exist_ok=True)
             out_file.write_text(doc if page_edit else json.dumps(doc, indent=1) + "\n")
-            ts["publish"] = {"sha": sha, "head": head, "seen": seen, "ts": now_iso()}
+            markup = [] if page_edit else adf.literal_markup(doc)
+            warns = [ln for ln in page_lines if ln.startswith("WARN")] + (
+                [f"WARN: Markdown the renderer left as text: {markup[0][:80]!r}"] if markup else [])
+            ts["publish"] = {"sha": sha, "head": head, "seen": seen, "ts": now_iso(), "warnings": warns}
             ts["started"] = ts.get("started") or now_iso()
             wf.save(state)
             wf.event("publish_dry_run", id=tid, sha=sha[:12])
-            markup = [] if page_edit else adf.literal_markup(doc)
             preview = [ln for ln in body.read_text().splitlines() if ln.strip()][:30]
             return "\n".join(
                 [f"DRY RUN {tid}: {_what(pub)} — nothing was written.",
@@ -297,14 +308,22 @@ def cmd_publish(wf: Workflow, tid: str, answer: Optional[str]) -> str:
                  *([f"WARN: Markdown the renderer left as text: {markup[0][:80]!r}"] if markup else []),
                  "draft (what the human approves):"] + [f"  {ln}" for ln in preview]
                 + (["  …"] if len(preview) == 30 else [])
-                + ["Show the human the draft path and what it says, and ask once — every publish that is ready in "
-                   "the same question, in plain text if agents are in flight — then "
-                   f"`tp publish {tid} --answer \"<their words>\"`. A change to the draft, HEAD, or {pub['target']} "
-                   "before then means a new dry run and a new ask."])
+                + ([f"The human pre-approved outside writes at the start (\u201c{pre}\u201d): check the payload says "
+                    f"what the reviewed draft says, then post it — `tp publish {tid} --preapproved`, no question. "
+                    "Tell the human in your next update what was posted."] if pre and not warns else
+                   ([f"The pre-approval does not cover a dry run that warns ({len(warns)} WARN line(s) above): the "
+                     "human approved before this content existed."] if pre else []) +
+                   ["Show the human the draft path and what it says, and ask once — every publish that is ready in "
+                    "the same question, in plain text if agents are in flight — then "
+                    f"`tp publish {tid} --answer \"<their words>\"`. A change to the draft, HEAD, or {pub['target']} "
+                    "before then means a new dry run and a new ask."]))
 
         dry = ts.get("publish")
         if not dry:
             raise TPError(f"run the dry run first (`tp publish {tid}`) and show the human what it prints.")
+        if preapproved and dry.get("warnings"):
+            raise TPError(*dry["warnings"], "The dry run warned, and the pre-approval was given before this content "
+                          f"existed: show the human these lines and `tp publish {tid} --answer \"<their words>\"`.")
         if dry.get("posted"):
             raise TPError(f"{tid} was already posted ({dry['posted']}); its read-back needs the human's decision.")
         if sha != dry["sha"]:

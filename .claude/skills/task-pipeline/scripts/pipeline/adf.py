@@ -36,7 +36,9 @@ def inline(text: str, marks: Optional[List[Node]] = None) -> List[Node]:
             out.append(_text(text[pos:m.start()], base))
         code, strong, strong2, label, href, em, em2 = m.groups()
         if code is not None:
-            out.append(_text(code, base + [{"type": "code"}]))
+            # ADF allows code beside a link only: code inside bold or italic is refused by Jira
+            # (400 INVALID_INPUT), so the code span sheds those marks.
+            out.append(_text(code, [m for m in base if m["type"] == "link"] + [{"type": "code"}]))
         elif strong is not None or strong2 is not None:
             out += inline(strong if strong is not None else strong2, base + [{"type": "strong"}])
         elif label is not None:

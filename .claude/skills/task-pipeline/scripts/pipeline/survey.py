@@ -4,11 +4,13 @@ entry points, build targets, docs, and tests."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import tempfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .snapshot import SKIP_DIRS
 
@@ -66,6 +68,86 @@ def _go_doc(text: str) -> str:
             first = re.split(r"(?<=\.)\s", para, maxsplit=1)[0]
             return first[:160]
     return ""
+
+
+# Where a repository pins its Go toolchain, most specific first. `go 1.x` in go.mod is a minimum
+# (a newer local Go satisfies it), so it is no pin; `toolchain go1.x.y` is.
+_GO_TOOLCHAIN = re.compile(r"^toolchain\s+go(\d+\.\d+(?:\.\d+)?)\s*$", re.M)
+_GO_VERSION_FILE = re.compile(r"^\s*v?(\d+\.\d+(?:\.\d+)?)\s*$")
+_TOOL_VERSIONS = re.compile(r"^\s*(?:golang|go)\s+(\d+\.\d+(?:\.\d+)?)\s*$", re.M)
+_MAKE_PIN = re.compile(r"^\s*(?:export\s+|override\s+)*(?:go_version|GO_VERSION|GOLANG_VERSION)\s*[:?]?=\s*v?"
+                       r"(\d+\.\d+(?:\.\d+)?)\s*(?:#.*)?$", re.M)
+_SETUP_GO = re.compile(r"go-version:\s*[\"']?(\d+\.\d+(?:\.\d+)?)[\"']?\s*$", re.M)
+
+
+def _read(p: Path) -> str:
+    try:
+        return p.read_text(errors="replace")[:MAX_BYTES]
+    except OSError:
+        return ""
+
+
+def toolchain_pins(root: Path) -> List[Dict[str, str]]:
+    """The Go versions the repository pins, with the file that pins each: go.mod's `toolchain`
+    line, .go-version, .tool-versions, a make variable (go_version / GO_VERSION) in a Makefile or
+    *.mk at the top or one directory down, and a literal setup-go version in CI workflows."""
+    pins: List[Tuple[str, str]] = []
+    pins += [(v, "go.mod") for v in _GO_TOOLCHAIN.findall(_read(root / "go.mod"))]
+    m = _GO_VERSION_FILE.match(_read(root / ".go-version").strip() or "-")
+    if m:
+        pins.append((m.group(1), ".go-version"))
+    pins += [(v, ".tool-versions") for v in _TOOL_VERSIONS.findall(_read(root / ".tool-versions"))]
+    makefiles = sorted({*root.glob("Makefile"), *root.glob("GNUmakefile"), *root.glob("*.mk"), *root.glob("*/*.mk")})
+    for mk in makefiles:
+        pins += [(v, mk.relative_to(root).as_posix()) for v in _MAKE_PIN.findall(_read(mk))]
+    for wf in sorted((root / ".github" / "workflows").glob("*.y*ml")):
+        pins += [(v, wf.relative_to(root).as_posix()) for v in _SETUP_GO.findall(_read(wf))]
+    seen, out = set(), []
+    for version, source in pins:
+        if (version, source) not in seen:
+            seen.add((version, source))
+            out.append({"tool": "go", "version": version, "source": source})
+    return out
+
+
+def _local_go() -> Optional[str]:
+    """The Go on PATH itself (GOTOOLCHAIN=local, outside any module, so nothing switches it)."""
+    try:
+        out = subprocess.run(["go", "env", "GOVERSION"], capture_output=True, text=True, timeout=30,
+                             cwd=tempfile.gettempdir(), env=dict(os.environ, GOTOOLCHAIN="local"))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"go(\d+\.\d+(?:\.\d+)?)", out.stdout)
+    return m.group(1) if out.returncode == 0 and m else None
+
+
+def pin_prefix(version: str) -> str:
+    """Run a command under the pinned Go: GOTOOLCHAIN switches `go`; the pinned GOROOT/bin first
+    on PATH makes a bare `gofmt` (a make target's) the pinned one too."""
+    return (f'export GOTOOLCHAIN=go{version} PATH="$(GOTOOLCHAIN=go{version} go env GOROOT)/bin:$PATH"; ')
+
+
+def toolchain_notes(root: Path, pins: Optional[List[Dict[str, str]]] = None) -> List[str]:
+    """Lines for the survey when the Go on PATH is not the one the repo pins: a newer local Go
+    fails gates (gofmt, vet, goldens) on files no task touched, which real runs mistook for
+    regressions at the very end."""
+    pins = toolchain_pins(root) if pins is None else pins
+    if not pins:
+        return []
+    local = _local_go()
+    want = pins[0]["version"]
+    if local is None or local == want or local.startswith(want + "."):
+        return []
+    where = ", ".join(sorted({p["source"] for p in pins if p["version"] == want}))
+    others = sorted({f"{p['version']} ({p['source']})" for p in pins if p["version"] != want})
+    self_pinned = any("GOTOOLCHAIN" in _read(mk) for mk in (root / "Makefile", root / "GNUmakefile"))
+    return [f"TOOLCHAIN: the repo pins Go {want} ({where}); PATH has go {local}"
+            + (f" (other pins: {', '.join(others)})" if others else "") + ".",
+            ("  The Makefile sets GOTOOLCHAIN itself, so make targets run under the pin; prefix every other check "
+             "and test_cmd that calls go or gofmt directly" if self_pinned else
+             "  Run every check and every task's test_cmd under the pin, or gates fail on code no task touched. "
+             "Prefix each") + f" with: {pin_prefix(want)}",
+            "  — and say so in conventions.md for the authors."]
 
 
 def survey(root: Path) -> Dict[str, Any]:
@@ -167,6 +249,7 @@ def survey(root: Path) -> Dict[str, Any]:
         d["languages"] = dict(sorted(d["languages"].items(), key=lambda kv: -kv[1])[:4])
     return {
         "root": str(root), "git": git, "files": len(files), "lines": sum(langs.values()),
+        "toolchains": toolchain_pins(root),
         "languages": dict(sorted(langs.items(), key=lambda kv: -kv[1])),
         "dirs": top[:80], "go_packages": sorted(go_pkgs.values(), key=lambda g: g["dir"]),
         "entry_points": sorted(set(entry)), "build_targets": targets,
@@ -179,8 +262,9 @@ def summary(data: Dict[str, Any], out_path: Path) -> str:
     g = data["git"]
     pin = f"{g['commit'][:10]} on {g['branch']}{' (dirty)' if g['dirty'] else ''}" if g else "not a git repo"
     langs = ", ".join(f"{k} {v}" for k, v in list(data["languages"].items())[:6])
-    out = [f"survey {data['root']} — {pin}; {data['files']} files, {data['lines']} lines ({langs}).",
-           f"full map: {out_path}", "largest directories (files / lines):"]
+    out = [f"survey {data['root']} — {pin}; {data['files']} files, {data['lines']} lines ({langs})."]
+    out += toolchain_notes(Path(data["root"]), data.get("toolchains") or [])
+    out += [f"full map: {out_path}", "largest directories (files / lines):"]
     out += [f"  {d['path']:<40} {d['files']:>5} {d['lines']:>8}" for d in data["dirs"][:30]]
     pkgs = data["go_packages"]
     if pkgs:

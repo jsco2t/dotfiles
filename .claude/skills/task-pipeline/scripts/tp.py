@@ -236,7 +236,10 @@ def parser() -> argparse.ArgumentParser:
                                     "on a stuck agent): frees the slot, blocks the task for a fresh re-run")
     s.add_argument("id")
     s.add_argument("--summary", required=True, help="what happened, and the evidence")
-    sub.add_parser("baseline", help="record which final checks already fail before the run (right after approval)")
+    s = sub.add_parser("baseline", help="record which final checks already fail before the run (right after "
+                                         "approval); --leave --answer records the human's choice to leave them")
+    s.add_argument("--leave", action="store_true")
+    s.add_argument("--answer")
 
     s = sub.add_parser("approve", help="enter execution: after a passing independent plan review (new runs), or "
                                        "with the human's approval (runs from before it)")
@@ -260,6 +263,8 @@ def parser() -> argparse.ArgumentParser:
                                        "with the human's words, the post itself, then a read-back")
     s.add_argument("id")
     s.add_argument("--answer", help="the human's OK, verbatim, given after they saw the dry run")
+    s.add_argument("--preapproved", action="store_true",
+                   help="post after the dry run on the human's pre-approval recorded in scope.json (outside_writes)")
     s = sub.add_parser("red", help="(the code author, inside a fused build round) run the task's tests after writing "
                                    "them and before any production code: the pipeline records red")
     s.add_argument("id")
@@ -392,7 +397,9 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "lost":
         return run.cmd_lost(wf, args.id, args.summary)
     if c == "baseline":
-        return run.cmd_baseline(wf)
+        if args.leave and not args.answer:
+            raise TPError("--leave needs --answer \"<the human's words>\".")
+        return run.cmd_baseline(wf, args.answer if args.leave else None)
     if c == "survey":
         return cmd_survey(wf, args)
     if c == "scope":
@@ -454,7 +461,7 @@ def dispatch(args: argparse.Namespace) -> str:
     if c == "advance":
         return run.cmd_advance(wf, args.id, args.agent_id)
     if c == "publish":
-        return publish.cmd_publish(wf, args.id, args.answer)
+        return publish.cmd_publish(wf, args.id, args.answer, preapproved=args.preapproved)
     if c == "sample":
         return run.cmd_sample(wf, args.id)
     if c == "head-moved":

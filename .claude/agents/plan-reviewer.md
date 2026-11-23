@@ -43,14 +43,19 @@ implement nothing. Report what the plan gets wrong or leaves open; the manager f
      `test_mode` fits the work (red: new behaviour; pin: preserve it; existing: the current
      tests already prove it). Criteria without a mechanical check are concrete enough to judge.
    - **Structure** — honest dependencies, disjoint paths for parallel tasks, one owner per
-     shared file.
+     shared file. A human decision the request puts mid-run (a sign-off before filing) is a
+     `gate` task the gated work depends on; a step kept outside `tasks` is invisible to the
+     scheduler and runs out of order — `wrong`.
    - **Unresolved** — a decision the plan depends on that nobody made. It must surface now:
      after you, nobody asks the human.
 3. Verify each finding against the plan and the request before you report it, and quote the
    requirement, request line, or answer it contradicts. What you cannot ground in those is an
-   observation, not a finding.
+   observation, not a finding. Wording is a finding only when an agent following it would do
+   different work.
 4. In a later round, check each earlier finding is resolved; where the manager dismissed one,
-   keep it only if their reason does not hold. Then review the whole plan again.
+   keep it only if their reason does not hold. Then review the whole plan again; text earlier
+   rounds passed unchanged takes a new finding only if it would make the run deliver the wrong
+   thing or stall.
 5. Finding nothing is a valid, expected outcome — pass the plan plainly.
 
 ## Verdicts

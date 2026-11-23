@@ -63,7 +63,7 @@ def new_reviews(plan: Dict[str, Any], scope: Dict[str, Any], existing: Dict[str,
 
 
 def integration_ids(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
-    return [t["id"] for t in plan["tasks"] if planmod.is_integration(t, scope)]
+    return [t["id"] for t in plan["tasks"] if planmod.is_integration(t, scope) and not planmod.is_gate(t)]
 
 
 def sessions(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -88,24 +88,37 @@ def _all_accepted(state: Dict[str, Any], ids: Optional[List[str]] = None) -> boo
     return all(tasks[t]["status"] in run.DONE_STATES for t in ids) and not any(t in state["in_flight"] for t in ids)
 
 
-def _ready(state: Dict[str, Any], s: Dict[str, Any]) -> bool:
-    """Whether a session can be dispatched now. Code review starts once its own tasks are accepted;
+def waits_on(state: Dict[str, Any], s: Dict[str, Any]) -> List[str]:
+    """What a pending session still waits for — tasks not yet accepted and code reviews not done —
+    or [] when it can be dispatched now. Code review starts once its own tasks are accepted;
     document review waits for every non-integration task and every code review, so the documents
-    it judges already describe the final code. Sessions from before kind-aware review wait for
-    every task, as they always did."""
+    it judges already describe the final code — except work behind a gate when the session's own
+    work is before it (the human signs off reviewed work, and that work cannot start until they
+    do). Sessions from before kind-aware review wait for every task, as they always did. `tp status`
+    prints the result, so "why has this review not started" is never read from the source."""
+    tasks = state["tasks"]
+    open_ = lambda ids: [t for t in ids if tasks[t]["status"] not in run.DONE_STATES or t in state["in_flight"]]
     if s["status"] == "waiting_fixes":
-        return _all_accepted(state, s["fix_tasks"])
+        return open_(s["fix_tasks"])
     if s["status"] != "pending":
-        return False
+        return []
     if "tasks" not in s:
-        return _all_accepted(state)
-    if not _all_accepted(state, s["tasks"]):
-        return False
-    if s.get("code"):
-        return True
-    work = [t for t in state["tasks"] if t not in state.get("integration", [])]
-    return _all_accepted(state, work) and all(o["status"] == "done" for o in sessions(state).values()
-                                              if o.get("code"))
+        return open_(list(tasks))
+    own = open_(s["tasks"])
+    if own or s.get("code"):
+        return own
+    # Work behind a gate that comes after this session's own work: the human signs this work off
+    # before that work can start, so waiting for it would deadlock (per gate: a run may have several).
+    mine = set(s["tasks"])
+    behind = {t for d in (state.get("gates") or {}).values() if not mine & set(d) for t in d}
+    work = [t for t in tasks if t not in state.get("integration", []) and t not in behind]
+    return open_(work) + [sid for sid, o in sessions(state).items()
+                          if o.get("code") and o["status"] != "done" and not behind & set(o.get("tasks", []))]
+
+
+def _ready(state: Dict[str, Any], s: Dict[str, Any]) -> bool:
+    """Whether a session can be dispatched now (see waits_on)."""
+    return s["status"] in ("pending", "waiting_fixes") and not waits_on(state, s)
 
 
 def actions(state: Dict[str, Any], free: int) -> List[Dict[str, Any]]:

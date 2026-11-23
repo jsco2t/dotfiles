@@ -373,8 +373,9 @@ def plan_review(rnd: int, ctx: Dict[str, Any], result: Path) -> str:
     if ctx.get("prior"):
         out += ["## Your previous round", "",
                 "The plan was revised since. Check each earlier finding is resolved, then review the whole plan "
-                "again: a revision can open a new gap. Where the manager dismissed a finding, its reason is shown; "
-                "keep the finding only if the reason does not hold.", ""] + [f"- {p}" for p in ctx["prior"]] + [""]
+                "again: a revision can open a new gap. Text earlier rounds passed unchanged takes a new finding only "
+                "if it would make the run deliver the wrong thing or stall. Where the manager dismissed a finding, its "
+                "reason is shown; keep the finding only if the reason does not hold.", ""] + [f"- {p}" for p in ctx["prior"]] + [""]
     out += ["## Check, in order", "",
             "1. **Coverage.** Each requirement is served by a task whose acceptance criteria would fail if it were "
             "unmet. A task title is not coverage.",
@@ -390,11 +391,14 @@ def plan_review(rnd: int, ctx: Dict[str, Any], result: Path) -> str:
             "(red: new behaviour; pin: preserve behaviour; existing: current tests already prove it — removals, "
             "ports, refactors). Criteria without a mechanical check are concrete enough to judge by reading.",
             "7. **Structure.** Dependencies are honest (a task that needs another's output says so); parallel "
-            "tasks write disjoint files; a shared file has one owner.",
+            "tasks write disjoint files; a shared file has one owner. A human decision the request puts mid-run (a "
+            "sign-off before filing) is a `gate` task the gated work depends on; a step kept outside `tasks` is "
+            "invisible to the scheduler and runs out of order — `wrong`.",
             "8. **Unresolved.** A decision the plan depends on that nobody has made. Name it; the manager asks the "
             "human before execution, so it must surface now.", "",
             "Ground every finding in a requirement, a request line, or a settled answer you can quote; anything "
-            "else is an observation. Finding nothing is a valid, expected outcome: say so and pass the plan.", ""]
+            "else is an observation. Wording is a finding only when an agent following it would do different work; "
+            "otherwise it is an observation. Finding nothing is a valid, expected outcome: say so and pass the plan.", ""]
     out += _style()
     note = (f"`coverage` has one entry per requirement. `pass` only with every requirement covered and no "
             "findings; `changes` with at least one finding.")

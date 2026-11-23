@@ -113,13 +113,13 @@ class CloseoutSortingTest(unittest.TestCase):
     def test_several_items_classify_in_one_call(self) -> None:
         h = self.run_to_closeout(["first gap in the parser.", "second gap in the parser.",
                                   "third gap in the parser."])
-        h.tp("closeout", "--items", "1,3", "--class", "followup", "--note", "the parser needs its own task")
+        h.tp("closeout", "--items", "1,3", "--class", "deferred", "--note", "the parser needs its own task")
         h.tp("closeout", "--items", "2", "--class", "observation")
-        self.assertEqual(h.next()["actions"][0]["why"], "deferred or follow-up work awaits the human's decision")
+        self.assertEqual(h.next()["actions"][0]["why"], "deferred work awaits the human's decision")
 
     def test_the_question_offers_fixing_or_filing_never_a_local_file(self) -> None:
         h = self.run_to_closeout(["webhookauth.go still writes the pair non-atomically."])
-        h.tp("closeout", "--item", "1", "--class", "followup", "--note", "a crash can tear the config file")
+        h.tp("closeout", "--item", "1", "--class", "deferred", "--note", "a crash can tear the config file")
         out = h.tp("closeout", "--ask").out
         self.assertIn("fix them now", out)
         self.assertIn("file them as tickets", out)

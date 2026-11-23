@@ -438,6 +438,7 @@ def _keep_approved_plan(wf: Workflow, state: Dict[str, Any]) -> bool:
     planmod.merge_baselines(wf, state, scope)
     state["reviews"] = review.new_reviews(plan, scope, state.get("reviews", {}))
     state["integration"] = review.integration_ids(plan, scope)
+    state["gates"] = planmod.gate_descendants(plan)
     (wf.root / "plan.md").write_text(planmod.render(plan, scope, wf))
     return True
 
@@ -473,6 +474,38 @@ def cmd_budget_extend(wf: Workflow, minutes: int, answer: Optional[str], note: O
                 "report; it gates nothing.")
 
 
+# What `tp publish` posts by itself, and what it cannot: those writes need the liaison as an author,
+# confirmed at scope time (a real run found out at plan review and spent a question mid-run on it).
+PUBLISH_CAN = ("jira-comment (add or edit a comment), jira-description (replace an issue's description), "
+               "jira-issue (create one child issue: summary from the draft's first line; project, type, labels), "
+               "confluence-comment, confluence-page (replace a page's storage body)")
+PUBLISH_CANNOT = ("a transition, an assignee or priority, issue links, attachments, many issues filed together, "
+                  "or any GitHub write")
+
+
+def cmd_describe() -> str:
+    """The capability map: every agent's roles and the deliverable kinds it takes in each, what the
+    manager runs itself (publish, gate), and the role fences — straight from the catalog `tp plan check`
+    enforces, so "what can this agent do" is never answered by reading tp's source."""
+    cat = catalog()
+    out = ["AGENTS — role: deliverable kinds (what it is for)"]
+    for agent, entry in cat["agents"].items():
+        parts = [f"{role}: {', '.join(agent_kinds(agent, role)) or '—'}" for role in entry.get("roles", [])]
+        out.append(f"  {agent} — {'; '.join(parts)} ({entry.get('use', '')})")
+    r = roles()
+    out += ["FENCES",
+            f"  transport only (move approved content, own only wf: files): {', '.join(r.get('transport', []))}",
+            f"  never own source code (a code change, comments included, is a code task): {', '.join(r.get('no_code', []))}",
+            "MANAGER-RUN TASKS (no agent; plan.json `tp schema plan`)",
+            f"  publish — `tp publish` posts a reviewed wf: draft after the human's OK: {PUBLISH_CAN}.",
+            f"    It cannot make {PUBLISH_CANNOT}: plan those as an integration task for atlassian-liaison or "
+            "github-liaison as author (list it as author in scope.json at scope time).",
+            "  gate — a human decision mid-run (a sign-off): `\"gate\": {\"ask\": \"...\"}`, depends_on the work it "
+            "decides; that work is reviewed before it is asked, and the tasks after it wait for the answer.",
+            f"KINDS: {', '.join(cat['kinds'])}"]
+    return "\n".join(out)
+
+
 def cmd_suggest(kinds: List[str]) -> str:
     cat = catalog()
     out = ["Minimal participants — confirm each with the human; drop any without a direct bearing on the output:"]
@@ -482,6 +515,10 @@ def cmd_suggest(kinds: List[str]) -> str:
         s = cat["suggest"][kind]
         if s.get("author"):
             out.append(f"  {kind}: author    {s['author']} — {cat['agents'][s['author']]['use']}")
+        elif kind == "integration":
+            out.append(f"  {kind}: author    none for what `tp publish` posts itself ({PUBLISH_CAN.split(' (')[0]}, "
+                       f"jira-description, jira-issue, confluence-*); a liaison as AUTHOR for anything it cannot "
+                       f"make — {PUBLISH_CANNOT}. Decide it now: found later, it costs the human a question.")
         else:
             out.append(f"  {kind}: author    ask the human which system and which liaison writes to it")
         for agent, entry in cat["agents"].items():

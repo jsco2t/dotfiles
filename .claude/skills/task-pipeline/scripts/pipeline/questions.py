@@ -125,4 +125,6 @@ def status_line(state: Dict[str, Any]) -> Optional[str]:
         return None
     parts = [f"{qid}{' (' + q['about'] + ')' if q.get('about') else ''} {minutes_since(q['asked']):.0f}m"
              for qid, q in sorted(qs.items(), key=lambda kv: kv[1]["asked"])]
-    return "waiting on the human: " + ", ".join(parts) + " — keep working the rest."
+    first = min(qs.items(), key=lambda kv: kv[1]["asked"])[0]
+    return ("waiting on the human: " + ", ".join(parts) + " — keep working the rest. Their reply: "
+            f"`tp answer {first} --answer \"<their words>\"` per question (texts: clarifications.md).")

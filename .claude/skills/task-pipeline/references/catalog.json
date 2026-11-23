@@ -378,7 +378,10 @@
     "max_delegated_fix_tasks": 5,
     "review_near_miss_floor": 60,
     "review_full_finding_floor": 70,
-    "_max_plan_review_rounds": "independent plan-review rounds before the open findings go to the human (tp revise resets the count)",
-    "max_plan_review_rounds": 3
+    "_max_plan_review_rounds": "independent plan-review rounds before the human is asked \u2014 unless the review is converging (fewer findings each round, every one accepted, none unresolved), which continues up to plan_review_ceiling (tp revise resets the count)",
+    "max_plan_review_rounds": 3,
+    "plan_review_ceiling": 5,
+    "_max_delegated_scope_amends": "scope amendments the manager may settle without a question when the check proves them plumbing (tp scope amend --delegated)",
+    "max_delegated_scope_amends": 3
   }
 }

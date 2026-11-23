@@ -120,13 +120,17 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("path")
     s.add_argument("--name", required=True)
 
-    s = sub.add_parser("roster", help="participant suggestions")
-    s.add_argument("what", choices=["suggest"])
-    s.add_argument("--kinds", required=True, help="comma-separated deliverable kinds")
+    s = sub.add_parser("roster", help="participant suggestions (suggest), or the capability map (describe): every "
+                                      "agent's roles and kinds, what publish and gate tasks do")
+    s.add_argument("what", choices=["suggest", "describe"])
+    s.add_argument("--kinds", help="suggest: comma-separated deliverable kinds")
 
     s = sub.add_parser("scope", help="check or confirm scope.json; amend the confirmed scope (scope-amend.json)")
     s.add_argument("what", choices=["check", "confirm", "amend"])
     s.add_argument("--answer", help="the human's words, verbatim (confirm; amend: approves the checked draft)")
+    s.add_argument("--delegated", action="store_true",
+                   help="amend: settle a checked plumbing-only amendment yourself (the check says when)")
+    s.add_argument("--note", help="with --delegated: what changed and why, in plain words")
 
     s = sub.add_parser("survey-issue", help="deterministic sizing of a Jira or GitHub issue (jira:KEY, gh:o/r#N)")
     s.add_argument("ref")
@@ -282,6 +286,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--assign", action="append", default=[], help="--review reopen: F#=T## for a finding no task "
                    "path matches")
     s.add_argument("--force", action="store_true", help="--review accept: ship although blocking findings are held")
+    s = sub.add_parser("gate", help="a human decision the plan scheduled (a sign-off): print it to ask, then record "
+                                    "the answer — go ahead, or --reopen upstream tasks with their words")
+    s.add_argument("id")
+    s.add_argument("--answer", help="the human's words, verbatim")
+    s.add_argument("--reopen", help="changes first: comma-separated upstream tasks that get a fix round with their words")
+
     s = sub.add_parser("note", help="log something noticed outside the plan")
     s.add_argument("text")
     sub.add_parser("final", help="package checks and the report")
@@ -335,6 +345,10 @@ def _then(wf: Workflow, out: str) -> str:
 
 def dispatch(args: argparse.Namespace) -> str:
     if args.cmd == "roster":
+        if args.what == "describe":
+            return scopemod.cmd_describe()
+        if not args.kinds:
+            raise TPError("roster suggest needs --kinds (comma-separated deliverable kinds).")
         return scopemod.cmd_suggest([k.strip() for k in args.kinds.split(",") if k.strip()])
     if args.cmd == "check-docs":
         return cmd_check_docs(args)
@@ -378,7 +392,7 @@ def dispatch(args: argparse.Namespace) -> str:
         if args.what == "check":
             return scopemod.cmd_check(wf)
         if args.what == "amend":
-            return planmod.cmd_scope_amend(wf, args.answer)
+            return planmod.cmd_scope_amend(wf, args.answer, args.delegated, args.note)
         if not args.answer:
             raise TPError("scope confirm needs --answer with the human's words.")
         return scopemod.cmd_confirm(wf, args.answer)
@@ -455,6 +469,9 @@ def dispatch(args: argparse.Namespace) -> str:
             return _then(wf, out)
         out = run.cmd_resolve(wf, args.task, args.action, args.answer, args.by)
         return out if "back in flight" in out else _then(wf, out)
+    if c == "gate":
+        out = run.cmd_gate(wf, args.id, args.answer, args.reopen)
+        return _then(wf, out) if args.answer else out
     if c == "note":
         wf.load()
         wf.noticed("manager", args.text)

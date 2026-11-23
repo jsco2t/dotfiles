@@ -185,10 +185,27 @@ def split_tests(scope: Dict[str, Any], state: Dict[str, Any]) -> bool:
     return int(state.get("contract", 1)) < 2
 
 
+def _gate_waits_on(tid: str, tasks: Dict[str, Dict[str, Any]], state: Dict[str, Any]) -> List[str]:
+    """What a gate still waits for before the human is asked: the tasks it depends on, then every
+    review session over work upstream of it (the human signs off reviewed work)."""
+    waits = _deps_open(tasks[tid], state)
+    if waits:
+        return waits
+    upstream = planmod._ancestors(tasks).get(tid, set())
+    return [sid for sid, s in state.get("reviews", {}).items()
+            if s.get("status") != "done" and upstream & set(s.get("tasks") or [])]
+
+
 def _action_for(tid: str, ts: Dict[str, Any], task: Dict[str, Any], scope: Dict[str, Any],
-                state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                state: Dict[str, Any], tasks: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     status = ts["status"]
     act: Dict[str, Any] = {"id": tid, "model": task.get("model"), "agent_id": None}
+    if status == "pending" and planmod.is_gate(task):
+        if _gate_waits_on(tid, tasks or {tid: task}, state):
+            return None
+        return ({"action": "asked", "id": tid,
+                 "why": f"gate {tid} (their reply: `tp gate {tid} --answer \"<their words>\"`)"} if ts.get("asked")
+                else {"action": "gate", "id": tid})
     if status == "pending":
         if _deps_open(task, state) or _integration_held(task, scope, state):
             return None
@@ -245,9 +262,10 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
             return [{"action": "plan_triage", "id": f"round {pr['round']}"}]
         if status == "changes":
             return [{"action": "plan_fix"}]
-        if pr.get("round", 0) >= limit("max_plan_review_rounds"):
-            return [{"action": "human", "why": f"the plan failed {pr['round']} independent review rounds — show "
-                                              "the human the open findings; `tp revise --feedback` with their words"}]
+        stop = planmod.plan_review_exhausted(pr)
+        if stop:
+            return [{"action": "human", "why": f"{stop} — show the human the open findings; `tp revise --feedback` "
+                                              "with their words"}]
         return [{"action": "plan_review"}]
 
     plan, scope, tasks = _loaded(wf, state)
@@ -271,8 +289,8 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
     order = {"needs_fix": 0, "needs_review": 1, "needs_impl": 2, "pending": 3}
     ranked = sorted((order[ts["status"]], tid) for tid, ts in state["tasks"].items() if ts["status"] in order)
     for _, tid in ranked:
-        act = _action_for(tid, state["tasks"][tid], tasks[tid], scope, state)
-        if act and act["action"] == "publish":  # the manager posts it; no agent slot
+        act = _action_for(tid, state["tasks"][tid], tasks[tid], scope, state, tasks)
+        if act and act["action"] in ("publish", "gate", "asked"):  # the manager's own work; no agent slot
             acts.append(act)
         elif act and free > 0:
             acts.append(act)
@@ -284,7 +302,8 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
             and not _review().open_sessions(state)):
         pending = _closeout_pending(wf, state)
         acts.append({"action": "closeout", "why": pending} if pending else {"action": "final"})
-    if (not any(a["action"] in ("dispatch", "fix", "review", "final", "closeout", "rerun", "publish") for a in acts)
+    if (not any(a["action"] in ("dispatch", "fix", "review", "final", "closeout", "rerun", "publish", "gate")
+                for a in acts)
             and state["in_flight"]):
         acts.append({"action": "wait", "ids": list(state["in_flight"])})
     return acts
@@ -313,8 +332,9 @@ GUIDE = {
     "human": "Needs a decision{about}: {why}. First settle it yourself if the scope, plan, answers, or evidence "
              "already do, or if it is routine mechanics — a retry (`--action retry --by manager`), a test fix "
              "(`--action tests`), a test correction (`tp rebaseline-tests {id} --by manager`), a gate you have "
-             "shown false (`tp accept {id} --override`), a file the fix needs (`tp widen`), a fix task inside the "
-             "allowance (`tp plan amend --delegated`). Only what changes the outcome, drops work, or writes "
+             "shown false (`tp accept {id} --override`, even once its fix round is printed), a file the fix needs "
+             "(`tp widen`), a fix task inside the allowance (`tp plan amend --delegated`), plumbing scope (`tp scope "
+             "amend --delegated`). Only what changes the outcome, drops work, or writes "
              "outside the run goes to the human: `tp ask --about {id} --question \"...\"`, put it to them in plain "
              "text, and keep working everything else — never AskUserQuestion while agents are in flight. If "
              "settling it changes the plan, draft and check the amendment first (`tp plan amend`) and show its "
@@ -330,12 +350,17 @@ GUIDE = {
     "publish": "`tp publish {id}` (a dry run: renders the reviewed draft and runs the pre-flight checks); show "
                "the human what it prints and ask once — batch every publish that is ready into the same question, "
                "in plain text if agents are in flight — then `tp publish {id} --answer \"<their words>\"`.",
+    "gate": "`tp gate {id}` prints the human's decision with what it approves; ask it once — in the same "
+            "question as every other ready gate and publish, in plain text if agents are in flight — and keep "
+            "working the rest. Then `tp gate {id} --answer \"<their words>\"` (go ahead), or `--reopen T##` with "
+            "their words (changes first).",
     "final": "`tp final` — package checks and the report.",
-    "closeout": "Closeout ({why}): `tp closeout` lists what was noticed; classify each (`tp closeout --item N "
-                "--class deferred|followup|observation --note \"<the issue and its consequence>\"`). To offer fixing "
-                "them now, draft and check that amendment first (`tp plan amend`): `tp closeout --ask` then carries "
-                "it, so one question shows the cost. Ask it once; the answer goes to `tp closeout --decide --answer` "
-                "and, if they chose the fix, to `tp plan amend --answer` too.",
+    "closeout": "Closeout ({why}): `tp closeout` lists what was noticed; classify each (`tp closeout --items N,M "
+                "--class deferred|followup|observation --note \"<the issue and its consequence>\"`). Fix gaps in this "
+                "run's own deliverables yourself inside the allowance (`tp plan amend --delegated`); follow-ups go to "
+                "the report unasked. Only deferred work goes to the human: draft and check its fix first (`tp plan "
+                "amend`) so `tp closeout --ask` shows the cost, ask once, then `tp closeout --decide --answer` (and "
+                "`tp plan amend --answer` if they chose the fix).",
     "done": "Report to the human from report.md.",
     "asked": "Waiting on the human for {why} — asked already; keep working the rest.",
 }
@@ -637,6 +662,9 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
         if planmod.is_publish(task):
             raise TPError(f"{tid} is posted by the manager, never by an agent: `tp publish {tid}` (a dry run), then "
                           f"`tp publish {tid} --answer \"<the human's words>\"`.")
+        if planmod.is_gate(task):
+            raise TPError(f"{tid} is a gate — the human's decision, never an agent's: `tp gate {tid}` prints it to ask, "
+                          f"then `tp gate {tid} --answer \"<their words>\"`.")
         if ts["status"] == "pending" and _deps_open(task, state):
             raise TPError(f"{tid} waits on {', '.join(_deps_open(task, state))} (not accepted yet).")
         if ts["status"] == "pending" and _integration_held(task, scope, state):
@@ -1310,9 +1338,12 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
             del state["in_flight"][tid]
             ts["status"] = "blocked"
             asks = data.get("questions") or [data["summary"]]
+            # The dispatch's window (its start and who ran beside it) outlives the wait: the snapshot
+            # is still the first dispatch's, so siblings that land while it waits are excused too.
             ts["blocked"] = {"kind": "input", "summary": f"{tid} {data['status']}: " + " | ".join(asks), "step": step,
                              "snap": fl["snap"], "head": fl.get("head"), "evidence": fl.get("evidence"),
-                             "since": now_iso()}
+                             "window": fl.get("window") or fl.get("since"),
+                             "concurrent": list(fl.get("concurrent") or []), "since": now_iso()}
             wf.save(state)
             wf.event("record", id=tid, step=step, status=data["status"], minutes=round(minutes, 1))
             return "\n".join([f"{tid} {data['status']} — answer from scope.md / plan.json / decisions.md only if they "
@@ -1465,7 +1496,8 @@ def _others_paths(wf: Workflow, state: Dict[str, Any], tasks: Dict[str, Dict[str
     did not run in this window stay guarded: nothing else should touch their files."""
     ws = tasks[tid]["workspace"]
     ran = set(fl.get("concurrent", [])) | set(state["in_flight"])
-    since = fl.get("since") or ""
+    # `window`: the first dispatch's start, kept across a needs_input wait (the snapshot is that old).
+    since = fl.get("window") or fl.get("since") or ""
     ran |= {e.get("id") for e in wf.events() if e.get("kind") == "dispatch" and e.get("ts", "") >= since}
     return [p for o in sorted(x for x in ran if isinstance(x, str)) if o != tid and o in tasks
             and tasks[o].get("workspace") == ws for p in tasks[o].get("paths", []) if planmod.wf_rel(p) is None]
@@ -1687,8 +1719,13 @@ def cmd_accept(wf: Workflow, tids: List[str], note: str, override: bool = False)
         state = wf.load()
         _, scope, tasks = _loaded(wf, state)
         want = OVERRIDABLE if override else ("needs_check",)
-        bad = [t for t in tids if state["tasks"].get(t, {}).get("status") not in want
-               or (override and t in state["in_flight"])
+        # A gate's fix round is dispatched the moment the gate fails (`tp advance` prints its call); the
+        # manager who proves the finding false before sending that call must still reach the override —
+        # a real run otherwise spent ten calls on lost/retry/dispute to free the task.
+        unsent = {t for t in tids if override and (state["in_flight"].get(t) or {}).get("step") == "fix"
+                  and state["tasks"].get(t, {}).get("fix_source") == "gate"}
+        bad = [t for t in tids if (state["tasks"].get(t, {}).get("status") not in want and t not in unsent)
+               or (override and t in state["in_flight"] and t not in unsent)
                or (override and state["tasks"][t].get("fix_source") != "gate")
                or (override and state["tasks"][t]["status"] == "blocked"
                    and (state["tasks"][t].get("blocked") or {}).get("kind") not in ("rounds", "sibling"))]
@@ -1703,6 +1740,8 @@ def cmd_accept(wf: Workflow, tids: List[str], note: str, override: bool = False)
                                                           "findings": list(ts.get("findings") or [])})
                 if ts["status"] == "blocked":
                     _pause(ts, (ts.get("blocked") or {}).get("since"))
+                if tid in unsent:
+                    state["in_flight"].pop(tid)
                 ts.update(blocked=None, fixing=None, findings=[])
             ts.update(status="accepted", accepted=now_iso(), note=note)
             task = tasks.get(tid)
@@ -1714,7 +1753,9 @@ def cmd_accept(wf: Workflow, tids: List[str], note: str, override: bool = False)
             wf.event("accept", id=tid, minutes=round(mins, 1), wall=round(minutes_since(ts["started"]), 1),
                      override=override or None)
             out.append(f"accepted {tid}{' over its gate findings' if override else ''} ({mins:.0f} min, "
-                       f"{ts['round']} fix rounds).")
+                       f"{ts['round']} fix rounds)."
+                       + (" Its fix round is cancelled: if you already sent that call, TaskStop the agent."
+                          if tid in unsent else ""))
         wf.save(state)
         if override:
             for tid in tids:
@@ -1958,10 +1999,13 @@ def _resolve(wf: Workflow, state: Dict[str, Any], tid: Optional[str], action: st
         _keep_decision(ts, ts["blocked"]["summary"], answer, by)
         _pause(ts, since)
         step = ts["blocked"]["step"]
-        state["in_flight"][tid] = {"step": step, "since": now_iso(), "snap": ts["blocked"]["snap"],
-                                   "agent": None, "concurrent": list(state["in_flight"]),
-                                   "from": _STEP_STATUS[step], "head": ts["blocked"].get("head"),
-                                   "evidence": ts["blocked"].get("evidence")}
+        blocked = ts["blocked"]
+        state["in_flight"][tid] = {"step": step, "since": now_iso(), "snap": blocked["snap"],
+                                   "window": blocked.get("window"),
+                                   "agent": None,
+                                   "concurrent": sorted(set(blocked.get("concurrent") or []) | set(state["in_flight"])),
+                                   "from": _STEP_STATUS[step], "head": blocked.get("head"),
+                                   "evidence": blocked.get("evidence")}
         ts.update(status="in_flight", blocked=None)
         effective = ts["fixing"] if step == "fix" else step
         agent_id = ts["agents"].get(effective)
@@ -1988,12 +2032,80 @@ def _resolve(wf: Workflow, state: Dict[str, Any], tid: Optional[str], action: st
     return f"{tid} resolved ({action}). `tp next`."
 
 
+# --- gates ----------------------------------------------------------------------------------
+
+def cmd_gate(wf: Workflow, tid: str, answer: Optional[str] = None, reopen: Optional[str] = None) -> str:
+    """A human decision the plan scheduled (a sign-off): print it once the work before it is accepted
+    and reviewed, then record the human's answer. Go-ahead opens it — every later brief quotes the
+    answer; changes first (`--reopen`) sends their words to the named upstream tasks as a fix round and
+    keeps it closed until those are accepted again."""
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] != "EXECUTING":
+            raise TPError(f"gates are asked while EXECUTING; the workflow is {state['phase']}.")
+        plan, scope, tasks = _loaded(wf, state)
+        task, ts = tasks.get(tid), state["tasks"].get(tid)
+        if task is None or not planmod.is_gate(task):
+            raise TPError(f"{tid} is not a gate task (plan.json: `\"gate\": {{\"ask\": \"...\"}}`).")
+        if ts["status"] in DONE_STATES:
+            raise TPError(f"{tid} is already decided — {ts.get('note')}.")
+        waits = _gate_waits_on(tid, tasks, state)
+        if waits:
+            raise TPError(f"{tid} is not ready to ask: it waits on {', '.join(waits)}. `tp next` offers it once they "
+                          "are done — the human signs off accepted, reviewed work.")
+        ask = str(task["gate"].get("ask", "")).strip()
+        upstream = sorted(planmod._ancestors(tasks)[tid])
+        if answer is None:
+            if reopen:
+                raise TPError("--reopen needs --answer \"<the human's words>\": their words are the fix round's finding.")
+            first = not ts.get("asked")
+            ts.setdefault("asked", now_iso())
+            wf.save(state)
+            if first:
+                wf.event("gate_ask", id=tid)
+            files = [f"`{p}`" for u in upstream for p in tasks[u].get("paths", [])]
+            reviewed = [sid for sid, s in state.get("reviews", {}).items() if set(upstream) & set(s.get("tasks") or [])]
+            return "\n".join([
+                f"GATE {tid} — {task['title']}",
+                f"Ask the human: {ask}",
+                f"It decides on {', '.join(upstream)}" + (f" ({', '.join(files[:8])})" if files else "")
+                + (f", reviewed in {', '.join(reviewed)}." if reviewed else "."),
+                "Ask once: put every ready gate and publish in the same question — AskUserQuestion only while nothing "
+                "is in flight, otherwise plain text at the end of your turn — and keep working the rest.",
+                f"Go ahead: `tp gate {tid} --answer \"<their words>\"`. Changes first: `tp gate {tid} --reopen "
+                f"{upstream[-1] if upstream else 'T##'} --answer \"<their words>\"` (a fix round for the named tasks; "
+                "the gate is offered again once they are accepted)."])
+        if not answer.strip():
+            raise TPError("--answer needs the human's words, verbatim.")
+        if reopen:
+            ids = [x.strip() for x in reopen.split(",") if x.strip()]
+            bad = [x for x in ids if x not in upstream]
+            if bad:
+                raise TPError(f"--reopen {', '.join(bad)}: only the work {tid} decides on can be reopened "
+                              f"({', '.join(upstream) or 'none'}).")
+            outs = [add_fix(wf, state, x, [f"Gate {tid} — the human asked for changes: {answer}"],
+                            fixing=_authoring_step(tasks[x], scope, state["tasks"][x])) for x in ids]
+            ts.pop("asked", None)
+            _keep_decision(state, f"Gate {tid}: {ask}", f"changes first — {answer}", "human")
+            wf.save(state)
+            wf.decision(f"gate {tid}: changes first ({', '.join(ids)})", answer, who="human")
+            wf.event("gate", id=tid, reopened=ids)
+            return "\n".join([f"{tid} stays closed: {', '.join(ids)} reopened with the human's words."] + outs)
+        ts.update(status="accepted", accepted=now_iso(), note=f"the human: {answer}")
+        ts.pop("asked", None)
+        _keep_decision(state, f"Gate {tid}: {ask}", answer, "human")  # every later brief quotes it
+        wf.save(state)
+        wf.decision(f"gate {tid}: {ask}", answer, who="human")
+        wf.event("gate", id=tid)
+        return f"{tid} open — the human: {answer}"
+
+
 # --- final ----------------------------------------------------------------------------------
 
 # --- closeout -------------------------------------------------------------------------------
 
 CLOSEOUT_CLASSES = ("deferred", "followup", "observation")
-_UNDECIDED = "deferred or follow-up work awaits the human's decision"
+_UNDECIDED = "deferred work awaits the human's decision"
 
 
 def _noticed_text(raw: str) -> str:
@@ -2023,13 +2135,14 @@ def _closeout_unclassified(wf: Workflow, state: Dict[str, Any]) -> int:
 
 
 def _closeout_pending(wf: Workflow, state: Dict[str, Any]) -> Optional[str]:
-    """What still keeps the report back, or None: noticed items nobody classified, or deferred or
-    follow-up work without the human's recorded answer."""
+    """What still keeps the report back, or None: noticed items nobody classified, or deferred work
+    without the human's recorded answer. A follow-up (outside this run's scope) is a suggestion the
+    report lists — no question: a real run spent its last two questions on hygiene noticed in passing."""
     unclassified = _closeout_unclassified(wf, state)
     if unclassified:
         return f"{unclassified} noticed item(s) unclassified"
     open_ = {_noticed_text(r) for r in wf.noticed_items()}
-    if (any(v.get("class") in ("deferred", "followup") for k, v in _closeout_marks(state, wf).items() if k in open_)
+    if (any(v.get("class") == "deferred" for k, v in _closeout_marks(state, wf).items() if k in open_)
             and not state.get("closeout", {}).get("decision")):
         return _UNDECIDED
     return None
@@ -2086,7 +2199,7 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
         marks = _closeout_marks(state, wf)
         open_ = {_noticed_text(r) for r in items}
         chosen = sorted(((text, e) for text, e in marks.items()
-                         if text in open_ and e.get("class") in ("deferred", "followup")), key=lambda kv: kv[1]["class"])
+                         if text in open_ and e.get("class") == "deferred"), key=lambda kv: kv[1]["class"])
         if ask or decide:
             if decide and not answer:
                 raise TPError("--decide needs --answer \"<the human's words>\".")
@@ -2096,10 +2209,17 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
             if unclassified:
                 raise TPError(f"{unclassified} noticed item(s) unclassified — classify them first (`tp closeout`).")
             if not chosen:
-                raise TPError("nothing is deferred or a follow-up, so no human decision is needed — `tp final`.")
+                raise TPError("nothing is deferred, so no human decision is needed — `tp final` (follow-ups are "
+                              "listed in the report as suggestions).")
         if ask:
-            out = [f"DEFERRAL DECISION — {len(chosen)} noticed item(s) are work this run did not do. How should they "
-                   "be handled: fix them now, file them as tickets, or accept them as recorded?", ""]
+            fx = scopemod.fix_tasks(scopemod.load_scope(wf))
+            left = int(fx.get("allow") or 0) - len(state.get("delegated", []))
+            out = [f"DEFERRAL DECISION — {len(chosen)} noticed item(s) are requested work this run did not do. How "
+                   "should they be handled: fix them now, file them as tickets, or accept them as recorded?", ""]
+            if left > 0:
+                out += [f"First: {left} fix task(s) of your standing allowance remain. A gap in this run's own "
+                        "deliverables is yours to fix without asking (`tp plan amend --delegated`); class it an "
+                        "observation that names the fix. Ask only about work the allowance cannot cover.", ""]
             for i, (text, e) in enumerate(chosen, 1):
                 out += [f"{i}. [{e['class']}] {text}", f"   Why it matters: {e.get('note')}"]
             out += _closeout_amendment(wf, state)
@@ -2128,7 +2248,7 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
             entry = {"class": cls, **({"note": " ".join(note.split())} if note else {})}
             for n in numbers:
                 state.setdefault("closeout", {}).setdefault("items", {})[_noticed_text(items[n - 1])] = dict(entry)
-            if cls != "observation":
+            if cls == "deferred":
                 state["closeout"].pop("decision", None)  # new deferred work needs its own answer
             wf.save(state)
             wf.event("closeout_class", cls=cls, items=len(numbers))
@@ -2149,9 +2269,11 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
             if show_all or not e:
                 out.append(f"  {n}. [{e.get('class', 'UNCLASSIFIED')}] {raw}" + (f" — {e['note']}" if e.get("note") else ""))
         out += ["Classify them, several at a time: tp closeout --items 1,3,5-7 --class deferred|followup|observation "
-                "--note \"<the issue and its consequence>\" (deferred: work left undone; followup: its own task to "
-                "file; observation: no action). Then, if anything is deferred or a follow-up: tp closeout --ask, and "
-                "ask the human once."]
+                "--note \"<the issue and its consequence>\". deferred: requested work this run leaves undone — the "
+                "only class the human decides (tp closeout --ask, once). A gap in this run's own deliverables is not "
+                "deferred: fix it inside the fix-task allowance (`tp plan amend --delegated`) and class it observation, "
+                "naming the fix. followup: outside this run's scope, worth its own ticket — the report suggests it, "
+                "no question. observation: no action."]
         return "\n".join(out)
 
 
@@ -2345,6 +2467,11 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
                 "Added by the manager without a question, inside the fix-task allowance you gave at scope time:", ""]
         out += [f"- {tid} — {tasks[tid]['title'] if tid in tasks else '?'}: {a.get('note')}"
                 for a in delegated for tid in a.get("tasks", [])]
+    plumbing = [a for a in state.get("scope_amendments", []) if a.get("delegated")]
+    if plumbing:
+        out += ["", "## Scope plumbing the manager settled", "",
+                "Nothing you agreed changed (requirements added only from your own recorded answers):", ""]
+        out += [f"- {a.get('note')} ({'; '.join(c.strip() for c in a.get('changes', []))})" for a in plumbing]
     review_lines = _review().report_lines(state)
     if review_lines:
         out += ["", "## Review", ""] + review_lines
@@ -2357,7 +2484,7 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
         e = _closeout_marks(state, wf).get(_noticed_text(raw), {})
         groups[e.get("class", "unclassified")].append(f"- {raw}" + (f" — {e['note']}" if e.get("note") else ""))
     titles = {"deferred": "Deferred with the human's OK (their decision is in `decisions.md`)",
-              "followup": "Follow-ups this run did not do (the human's decision is in `decisions.md`)",
+              "followup": "Suggested follow-ups (outside this run's scope — file them if you agree)",
               "observation": "Observations — no action taken",
               "unclassified": "Noticed, not in plan (for you to decide)"}
     for cls, lines in groups.items():
@@ -2409,7 +2536,10 @@ def cmd_status(wf: Workflow, as_json: bool) -> str:
         out.append("  research: " + ", ".join(f"{rid} {r['status']}" for rid, r in list(research.items())[:12]))
     reviews = state.get("reviews", {})
     if reviews:
-        out.append("  reviews: " + ", ".join(f"{sid} {s['status']}" for sid, s in reviews.items()))
+        def _wait(s: Dict[str, Any]) -> str:
+            w = _review().waits_on(state, s)
+            return f" (waits on {', '.join(w[:8])}{' …' if len(w) > 8 else ''})" if w else ""
+        out.append("  reviews: " + ", ".join(f"{sid} {s['status']}{_wait(s)}" for sid, s in reviews.items()))
     out.append(cmd_next(wf, False, probe=False).splitlines()[-1])  # status looks; it never counts as a look
     return "\n".join(out[:24])
 

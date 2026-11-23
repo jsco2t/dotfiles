@@ -6,7 +6,7 @@ description: >
   The human is asked everything at the start (confirm, investigate, clarify); the plan is a
   readable markdown document of discrete tasks, checked by an independent reviewer instead of
   the human; delivery is then hands-off. Invoked explicitly.
-argument-hint: "<location for planning docs> <request> | resume <workflow dir> | halt (or hault) | status <workflow dir>"
+argument-hint: "<location for planning docs> <request> | resume <workflow dir> [answers] | halt (or hault) | status <workflow dir>"
 disable-model-invocation: true
 ---
 
@@ -20,24 +20,27 @@ routine problems yourself. `tp.py` holds the state and enforces the rules.
 python3 ~/.claude/skills/task-pipeline/scripts/tp.py -w <workflow dir> <command>
 ```
 
-`tp <command>` means exactly that line, spelled out in every Bash call. **`tp next` says what to
-do next**; every command that unblocks work (`advance`, `accept`, `triage`, `resolve`, `answer`)
+`tp <command>` means exactly that line in every Bash call — no `W=`/`TP=`/`$HOME` variables, no
+`cd &&`, never piped to `tail`/`grep`/`head`: the allow rule matches only the literal line, and
+the output is your guidance (cut, it lost the call to send). **`tp next` says what to do next**;
+every command that unblocks work (`advance`, `accept`, `triage`, `resolve`, `answer`, `gate`)
 dispatches it and prints the calls to send.
 
 ## Rules
 
 1. **The human decides at the start; you deliver at the end.** During execution only skipping
-   agreed work, changing a deliverable, shipping review findings unfixed, and writes outside the
-   run (Jira, GitHub, commits) go to them.
-2. **Asking never stops the run.** `tp ask` each question, keep working, `tp answer` with their
-   words. AskUserQuestion only while nothing is in flight; otherwise put the question in plain
-   text at the end of your turn — AskUserQuestion holds the turn, and finished agents' hand-backs
-   wait unrecorded (real runs lost 8 to 42 hours).
+   agreed work, changing a deliverable, shipping review findings unfixed, scheduled `gate`s,
+   and writes outside the run (Jira, GitHub, commits) go to them.
+2. **Asking never stops the run.** `tp ask`, keep working, `tp answer` with their words.
+   AskUserQuestion only while nothing is in flight (it holds the turn; hand-backs wait
+   unrecorded — real runs lost 8 to 42 hours); otherwise plain text at the end of your turn.
 3. **At most 3 agents in flight**, only agents confirmed in scope.json. Never the Workflow tool.
-4. **Structured files, not messages.** Read only what you need: `tp show <id> --part …`.
-5. Outside the plan: `tp note "<one line>"`. **Script before judgment.**
-6. **Answer-first** (`~/.claude/output-styles/answer-first-core.md`) for everything you write.
-7. **Never write deliverables or agents' result files.** Budgets forecast; they never cut work.
+4. **tp is the contract**: `tp next`, `tp roster describe` (what agents, publish, gates do), `tp
+   schema`, and its messages answer every "how". Never read its scripts or hand-edit its files. A
+   refusal is a diagnosis, not a question for the human: take the path it names.
+5. Outside the plan: `tp note "<one line>"`. **Script before judgment.** **Answer-first**
+   (`~/.claude/output-styles/answer-first-core.md`) for everything you write.
+6. **Never write deliverables or agents' result files.** Budgets forecast; they never cut work.
 
 ## Stage 1 — Confirm (one round with the human)
 
@@ -57,17 +60,16 @@ dispatches it and prints the calls to send.
 
 ## Stage 2 — Investigate and clarify
 
-- **Research only what the plan needs.** Each item: one agent, ≤3 narrow questions, ≤15 min,
-  purpose `map` | `requirements` | `investigate`: `tp research add R1 --agent <a> --purpose <p>
-  --questions-file <f> --done-when "..."`, `tp dispatch R1 R2`, `tp advance` each, fact-check one
-  answer each, decide every followup (`--from R1.F2` or `tp research dismiss`).
+- **Research only what the plan needs.** Each item: one agent, ≤3 narrow questions of ≤40 words,
+  ≤15 min, purpose `map` | `requirements` | `investigate`: `tp research add R1 --agent <a>
+  --purpose <p> --questions-file <f> --done-when "..."`, `tp dispatch R1 R2`, `tp advance` each,
+  fact-check one answer each, decide every followup (`--from R1.F2` or `tp research dismiss`).
 - When the human pushes back on an approach, research alternatives openly — including what the
   system already provides. Never fence a design question to the approach on the table.
-- **Clarify in one round**: `tp ask --question "..."` each open decision (intent, priority,
-  trade-off, design choice); present them together with options and consequences — a
-  "(Recommended)" option must respect what the request forbids; `tp answer Q# --answer "..."`
-  (`--by manager` when evidence settles it). Answers go to `clarifications.md`; cite
-  `wf:clarifications.md` in tasks they bear on. A ledger research proved wrong: `tp scope amend`.
+- **Clarify in one round**: `tp ask --question "..."` each open decision, all presented together
+  with options and consequences ("(Recommended)" respects what the request forbids); `tp answer
+  Q# --answer "..."` (`--by manager` if evidence settles it); tasks cite `wf:clarifications.md`.
+- Scope changes: `tp scope amend` (a requirement from an answer quotes it: `"Q3: <their words>"`).
 
 ## Stage 3 — Plan
 
@@ -77,16 +79,15 @@ for a reader who was not in the conversation.
 - **Planning maps the work, never does it.** One task per unit, ~15 min (30 max), 1–6 objective
   acceptance criteria, a brief ≤150 words, `requirements` it serves, `research:R#` sources. Paths
   name the files written, never `.` or `**`. Parallel tasks write disjoint paths.
-- **Route work to the agent built for it** (`tp plan check` enforces): code, comments included,
-  is a code task; doc authors never own source files; a liaison only transports. Jira or
-  Confluence text is a doc-author task writing `wf:drafts/<name>.md`; a `publish` task posts it
-  from this session after review. A Confluence page edit drafts the whole storage body
-  (`.xml`) from `wf:sources/page.json` (`confluence page <id> --raw --body-format storage`).
+- **Every step is a task tp schedules.** A sign-off mid-run is a `gate` task; what needs its
+  answer `depends_on` it.
+- **Route work to the agent built for it** (`tp plan check` enforces). Jira or Confluence text is
+  a doc-author draft (`wf:drafts/<name>.md`) a `publish` task posts; a Confluence page edit drafts
+  the whole storage body (`.xml`) from `wf:sources/page.json`.
 - Conventions: one `wf:conventions.md`, seeded from the repo's AGENTS.md / CLAUDE.md rules.
-- **Code is test-forward**: `test_cmd` (the task's package), `tests_paths`, `test_mode` `red` (new
-  behaviour) | `pin` (preserve it) | `existing` (current tests prove it: removals, ports,
-  refactors). One code author runs a fused round — tests, `tp red`, implementation;
-  `split_tests: true` restores a separate test author.
+- **Code is test-forward**: `test_cmd`, `tests_paths`, `test_mode` `red` (new behaviour) | `pin`
+  (preserve it) | `existing` (current tests prove it). One code author runs a fused round —
+  tests, `tp red`, implementation; `split_tests: true` restores a separate test author.
 - Checks: `docs` per task, `docs-all` final, repo commands in `checks` with `{dirs}`. Over 10
   tasks: `review_batches`. No `questions` in the plan. `tp plan check` until clean, `tp plan submit`.
 
@@ -97,9 +98,8 @@ for a reader who was not in the conversation.
 
 - **Pass** → `tp approve`; tell the human in one line that delivery started, with `plan.md`.
 - **Findings** → verify each; `tp plan triage --accept-all` or `--dismiss F#="<reason>"`; fix,
-  check, submit, review again (the same reviewer weighs your dismissals). A finding only the human
-  can settle: `tp ask` it now.
-- Three rounds without a pass: present the findings to the human, `tp revise --feedback "..."`.
+  check, submit, review again. Only the human can settle it: `tp ask` now. A shrinking review
+  continues on its own; if `tp plan review` refuses, show the human the findings, `tp revise`.
 
 ## Stage 5 — Execute (autonomous)
 
@@ -112,33 +112,34 @@ ToolSearch `select:SendMessage,TaskStop` first. Known breakage → `tp baseline`
   --note "..."` for the wave, or `tp reject <id> --reason "..."`.
 - **triage** → `tp show <id> --part blocking`, verify, then `tp triage <id> --accept-all`, or
   `--dismiss F# --reason "..."`, `--assign F#=T##`, `--route F#=impl|tests-green|tests-red`.
-- **Settle routine problems yourself** (each is reported and judged by the final review):
-  a file the fix needs → `tp widen`; the human rebased a workspace → `tp head-moved <ws> --reason "..." --answer "<their words>"`; a wrong gate → `tp accept <id> --override --note
-  "<evidence>"`; an honest test correction → `tp rebaseline-tests <id> --by manager --answer
-  "<what was wrong>"`; one more round → `tp resolve --task <id> --action retry --by manager`;
-  a question the scope, answers, or code settle → `--action answer --answer "..." --by manager`; a small fix
-  task or re-ordering inside the allowance → `tp plan amend`, then `--delegated --note "..."`.
-- **For the human** (Rule 1): `tp ask --about <id> --question "..."`, keep working, then
-  `tp answer` and the `tp resolve … --by human` it prints. If it changes the plan, check the
-  amendment first (`tp plan amend`) so one question shows it.
-- **publish** → `tp publish <id>` (dry run), ask once for every ready publish, `--answer "..."`.
-- **wait** → end your turn. `tp digest` only on a status question or after hours. TaskStop only an
-  agent the digest calls stuck; lost → `tp lost <id> --summary "..."`.
+- **Settle routine problems yourself** (each is reported and judged by the final review): a file
+  the fix needs → `tp widen`; a rebase → `tp head-moved`; a gate finding you proved false → `tp
+  accept <id> --override --note "<evidence>"` (even once its fix round is printed); a test
+  correction → `tp rebaseline-tests --by manager`; another round → `tp resolve --action retry`; a
+  question the evidence settles → `--action answer --by manager`; a fix task inside the allowance
+  → `tp plan amend --delegated`; plumbing scope → `tp scope amend --delegated`.
+- **For the human** (Rule 1): `tp ask --about <id>`, keep working, then `tp answer` and the
+  `tp resolve … --by human` it prints; a plan change is checked first (`tp plan amend`).
+- **gate / publish** → `tp gate <id>` / `tp publish <id>` (dry run); every ready one in one
+  question; then `--answer "<their words>"` (a gate: `--reopen T##` for changes first).
+- **wait** → end your turn. `tp digest` on a status question; TaskStop only an agent it calls
+  stuck; lost → `tp lost <id> --summary "..."`.
 
 ## Stage 6 — Closeout and final
 
-`tp closeout` lists what needs a class; classify in bulk (`--items 1,3-5 --class ... --note
-"..."`). Only deferred or follow-up items need the human: `tp closeout --ask`, once (fix now, file
-tickets, or accept). `tp final` writes `report.md`; present it answer-first — delivered work,
-requirement coverage, time, review outcome, gates you settled, what they should decide.
+`tp closeout`: classify in bulk. Fix gaps in this run's own work yourself (`tp plan amend
+--delegated`); out-of-scope follow-ups go to the report unasked; only deferred work (asked for,
+left undone) goes to the human, once. `tp final` writes `report.md`; present it answer-first —
+delivered work, coverage, time, review outcome, gates you settled, what they decide.
 Committing and pushing are theirs.
 
 ## Halt, resume, status
 
 - **halt** (or `hault`) → `tp halt --reason "<their words>"`; record in-flight agents as they reply.
-- **resume <dir>** → `tp status`; if halted `tp resume --answer "..."`; then `tp next`. A lost
-  agent: SendMessage its id if known, else `tp lost`. A run from before the plan review keeps its
-  human approval (`tp approve --answer`).
+- **resume <dir> [answers]** → `tp status`; record answers given with it; if halted `tp resume
+  --answer "..."`; then `tp next`. A lost agent: SendMessage its id if known, else `tp lost`.
+- **Long waits**: ending a turn on the human with nothing in flight, add one line: `/clear`, then
+  `/task-pipeline resume <dir> <answers>` continues from files (each turn re-reads the session).
 - **status <dir>** → `tp status`, present it, stop.
 - Unattended: sandbox-writable workflow and workspaces; allow
   `Bash(python3 ~/.claude/skills/task-pipeline/scripts/tp.py:*)` — code authors run `tp red`.

@@ -224,7 +224,7 @@ class AskOnceWhereTheQuestionStartsTest(unittest.TestCase):
 
     def test_closeout_carries_the_drafted_amendment_into_its_one_question(self) -> None:
         h = self.h
-        h.tp("closeout", "--item", "1", "--class", "followup", "--note", "readers of the guide pass floats and fail")
+        h.tp("closeout", "--item", "1", "--class", "deferred", "--note", "readers of the guide pass floats and fail")
         guide = h.tp("next").out
         self.assertIn("draft", guide.lower())
         d = draft(h)

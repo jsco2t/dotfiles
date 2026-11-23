@@ -34,6 +34,39 @@ def is_publish(task: Dict[str, Any]) -> bool:
     return bool(task.get("publish"))
 
 
+def is_gate(task: Dict[str, Any]) -> bool:
+    """A human decision mid-run (a sign-off, a go/no-go): a task the scheduler sees, so the work
+    before it is reviewed first and the work after it waits. The manager asks it (`tp gate`)."""
+    return bool(task.get("gate"))
+
+
+def gate_descendants(plan: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Each gate with itself and every task downstream of it: the work that waits on its answer."""
+    tasks = {str(t.get("id")): t for t in plan.get("tasks", []) if isinstance(t, dict)}
+    try:
+        anc = _ancestors(tasks)
+    except TPError:
+        return {}
+    return {g: [tid for tid in tasks if tid == g or g in anc.get(tid, set())]
+            for g, t in tasks.items() if is_gate(t)}
+
+
+def gated_ids(plan: Dict[str, Any]) -> List[str]:
+    """Every gate and every task downstream of one."""
+    behind = {tid for d in gate_descendants(plan).values() for tid in d}
+    return [str(t.get("id")) for t in plan.get("tasks", []) if str(t.get("id")) in behind]
+
+
+def gate_level(tid: str, desc: Dict[str, List[str]]) -> Tuple[str, ...]:
+    """The gates a task waits behind: tasks at one level are reviewed together, before the next gate."""
+    return tuple(sorted(g for g, d in desc.items() if tid in d))
+
+
+# What plan.json may hold. Anything else is work tp cannot see, so cannot schedule (a real run kept
+# its sign-off and its Jira filing in `manager_steps`; tp dispatched the work that needed both first).
+PLAN_KEYS = ("title", "summary", "conventions", "tasks", "checks", "final_checks", "review_batches", "questions")
+
+
 def wf_rel(path: str) -> Optional[str]:
     """`wf:<rel>` → rel; None for a workspace path."""
     return str(path)[3:] if str(path).startswith("wf:") else None
@@ -48,8 +81,15 @@ def review_batches(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[Dict[str
         return plan["review_batches"]
     # By default code and documents are separate batches, so code review can start before the
     # documents are written, and the documents are reviewed against the reviewed code.
-    work = [t for t in plan["tasks"] if not is_integration(t, scope)]
-    groups = [[t["id"] for t in work if is_code(t, scope)], [t["id"] for t in work if not is_code(t, scope)]]
+    # Work behind a gate is reviewed in its own batches, so the work before a gate is reviewed before
+    # the human is asked to sign it off.
+    work = [t for t in plan["tasks"] if not is_integration(t, scope) and not is_gate(t)]
+    desc = gate_descendants(plan)
+    levels = sorted({gate_level(t["id"], desc) for t in work}, key=lambda lv: (len(lv), lv))
+    groups = []
+    for lv in levels:
+        part = [t for t in work if gate_level(t["id"], desc) == lv]
+        groups += [[t["id"] for t in part if is_code(t, scope)], [t["id"] for t in part if not is_code(t, scope)]]
     return [{"id": f"B{i}", "tasks": ids} for i, ids in enumerate((g for g in groups if g), 1)]
 
 
@@ -98,10 +138,20 @@ def _validate_batches(plan: Dict[str, Any], scope: Dict[str, Any], frozen: Set[s
     errs = []
     seen: Dict[str, str] = {}
     by_id = {t.get("id"): t for t in plan["tasks"]}
+    desc = gate_descendants(plan)
     for b in batches:
         bid = str(b.get("id", ""))
         if not re.fullmatch(r"B\d+", bid):
             errs.append(f"review batch id {bid!r} must look like B1.")
+        mine = [tid for tid in b.get("tasks", []) if tid in by_id]
+        if any(is_gate(by_id[tid]) for tid in mine):
+            errs.append(f"{bid}: a gate is the human's decision, never reviewed — leave it out of review_batches.")
+        elif desc and len({gate_level(tid, desc) for tid in mine}) > 1:
+            levels = [set(gate_level(tid, desc)) for tid in mine]
+            split = sorted(set().union(*levels) - set.intersection(*levels))
+            errs.append(f"{bid} straddles gate {', '.join(split)}: it mixes work before the gate with work after it, "
+                        "so its review would wait for the gate and the human would sign off unreviewed work. Put "
+                        "the work before and after each gate in separate batches.")
         for tid in b.get("tasks", []):
             if tid not in ids:
                 errs.append(f"{bid}: unknown task {tid}.")
@@ -119,7 +169,7 @@ def _validate_batches(plan: Dict[str, Any], scope: Dict[str, Any], frozen: Set[s
                         f"at most {cap} min and {limit('max_batch_tasks')} tasks — split the work into smaller "
                         "review_batches.")
     for tid in ids:
-        if tid not in seen and not is_integration(by_id[tid], scope):
+        if tid not in seen and not is_integration(by_id[tid], scope) and not is_gate(by_id[tid]):
             errs.append(f"{tid} is in no review batch.")
     return errs
 
@@ -143,7 +193,7 @@ def is_code(task: Dict[str, Any], scope: Dict[str, Any]) -> bool:
 
 def reviewer_for(task: Dict[str, Any], scope: Dict[str, Any]) -> Optional[str]:
     """The reviewer of a task, or None when this task gets no per-task review."""
-    if scope.get("review") not in ("per-task", "both") or task.get("review") is False:
+    if scope.get("review") not in ("per-task", "both") or task.get("review") is False or is_gate(task):
         return None
     if task.get("reviewer"):
         return task["reviewer"]
@@ -263,7 +313,7 @@ def _role_errors(tid: str, t: Dict[str, Any], kind: Optional[str]) -> List[str]:
     moves approved content and owns only `wf:` files; a document author never owns source code."""
     agent, paths = t.get("agent"), [str(p) for p in t.get("paths", [])]
     roles = scopemod.roles()
-    if t.get("publish"):
+    if t.get("publish") or t.get("gate"):
         return []
     errs = []
     if scopemod.is_transport(agent):
@@ -334,6 +384,12 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
 
     if not plan.get("title"):
         errs.append("plan.json needs a `title`.")
+    if not frozen:
+        for key in sorted(k for k in plan if not str(k).startswith("_") and k not in PLAN_KEYS):
+            errs.append(f"plan.json has `{key}`, which tp does not schedule — work it cannot see runs out of order. "
+                        "Model each step as a task: a human decision mid-run (a sign-off) is a `gate` task; a "
+                        "Jira/GitHub write is a `publish` task, or an integration task for the liaison; everything "
+                        "else is a task for an agent (`tp schema plan`, `tp roster describe`).")
     if words(plan.get("summary", "")) > 80:
         errs.append("summary is over 80 words.")
     if not tasks_list:
@@ -371,8 +427,9 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
             computable = False
             continue
         tasks[tid] = t
-        publish = t.get("publish")
-        required = ("title", "workspace", "serves", "publish") if publish else \
+        publish = t.get("publish") or t.get("gate")  # the manager runs both: no agent, brief, or paths
+        required = ("title", "workspace", "serves", "publish") if t.get("publish") else \
+            ("title", "workspace", "serves", "gate") if t.get("gate") else \
             ("title", "agent", "workspace", "paths", "brief", "acceptance", "serves")
         for key in required:
             if not t.get(key):
@@ -424,7 +481,7 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
             if c not in checks:
                 errs.append(f"{tid}: unknown check {c!r} (built in: {', '.join(BUILTIN_TASK_CHECKS)}; "
                             "or define it in plan `checks`).")
-        est = t.get("estimate_min", 5 if publish else None)
+        est = t.get("estimate_min", (1 if t.get("gate") else 5) if publish else None)
         if not isinstance(est, int) or est < 1:
             errs.append(f"{tid}: estimate_min must be a whole number of minutes.")
             computable = False
@@ -441,7 +498,17 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
             if t.get("test_mode", "red") not in ("red", "pin", "existing"):
                 errs.append(f"{tid}: test_mode must be red (new behaviour), pin (characterize current behaviour), "
                             "or existing (the current tests already prove it: removals, ports, refactors).")
-        if scope.get("review") in ("per-task", "both") and t.get("review") is not False:
+        if t.get("gate"):
+            gate = t["gate"] if isinstance(t["gate"], dict) else {}
+            if words(str(gate.get("ask", ""))) < 6:
+                errs.append(f"{tid}: gate.ask is the question the human answers, in a full sentence that names what "
+                            "they approve (\"Do you sign off plan.md and jira-tasks.md, and the filing of K01-K16?\").")
+            if t.get("paths") or t.get("agent"):
+                errs.append(f"{tid}: a gate is the human's decision: no agent and no paths (the work it approves is "
+                            "in the tasks it depends on).")
+            if not t.get("depends_on"):
+                errs.append(f"{tid}: a gate depends_on the work the human decides on.")
+        if scope.get("review") in ("per-task", "both") and t.get("review") is not False and not t.get("gate"):
             rev = reviewer_for(t, scope)
             if rev is None or rev not in scopemod.participants(scope, "reviewer"):
                 errs.append(f"{tid}: no confirmed reviewer for {kind} tasks.")
@@ -463,6 +530,14 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
     for tid, t in tasks.items():
         if t.get("publish") and tid not in frozen:
             errs += _publish_errors(tid, t, tasks, ancestors[tid], kinds=task_kind(t, scope))
+        if t.get("gate") and tid not in frozen:
+            # External writes wait for every other task, this gate included: a gate behind one never opens.
+            late = sorted(a for a in ancestors[tid] if is_integration(tasks[a], scope)
+                          and tasks[a].get("when", "after_review") != "anytime")
+            if late:
+                errs.append(f"{tid}: a gate cannot wait on {', '.join(late)} — integration work runs after the final "
+                            "review, which waits for the gate. Mark each `\"when\": \"anytime\"` if it may run "
+                            "first, or put the gate before it.")
     ids = list(tasks)
     for i, a in enumerate(ids):
         for b in ids[i + 1:]:
@@ -572,6 +647,9 @@ def render(plan: Dict[str, Any], scope: Dict[str, Any], wf: Workflow) -> str:
             pub = t["publish"]
             writes = f"{pub['to']} {pub['target']} ← `{pub['body']}`"
             agent = "tp publish"
+        elif t.get("gate"):
+            writes = "— (the human decides)"
+            agent = "the human (gate)"
         else:
             writes = f"{t['workspace']}: " + ", ".join(f"`{p}`" for p in t["paths"])
             agent = t["agent"]
@@ -602,8 +680,11 @@ def render(plan: Dict[str, Any], scope: Dict[str, Any], wf: Workflow) -> str:
     for t in tasks.values():
         reqs = f"; requirements {', '.join(t['requirements'])}" if t.get("requirements") else ""
         out += ["", f"### {t['id']} — {t['title']} (serves {', '.join(t['serves'])}{reqs})", "",
-                t.get("brief") or f"The manager posts `{t['publish']['body']}` with `tp publish {t['id']}` after the "
-                                  "human's OK.", ""]
+                t.get("brief") or (f"**Gate — the human decides:** {t['gate'].get('ask', '')} Asked with `tp gate "
+                                   f"{t['id']}` once the work before it is accepted and reviewed; the work after it "
+                                   "waits for the answer." if t.get("gate") else
+                                   f"The manager posts `{t['publish']['body']}` with `tp publish {t['id']}` after the "
+                                   "human's OK."), ""]
         out += [f"- [ ] {a}" for a in t.get("acceptance", [])]
         checks = list(t.get("checks", []))
         if t.get("test_cmd"):
@@ -751,6 +832,7 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
     state["write_baseline"] = {**review.write_baseline(scope), **state.get("write_baseline", {})}
     state["reviews"] = review.new_reviews(plan, scope, state.get("reviews", {}))
     state["integration"] = review.integration_ids(plan, scope)
+    state["gates"] = gate_descendants(plan)
     wf.save(state)
     wf.decision("plan approve", answer, who="human" if pr is None else None)
     wf.event("approve")
@@ -900,6 +982,7 @@ def _apply_amendment(wf: Workflow, state: Dict[str, Any], draft: Dict[str, Any],
         state["tasks"].setdefault(tid, run.new_task_state())
     state["reviews"] = review.new_reviews(draft, scope, state.get("reviews", {}))
     state["integration"] = review.integration_ids(draft, scope)
+    state["gates"] = gate_descendants(draft)
     state.setdefault("amendments", []).append(dict({"ts": now_iso(), "changes": changes}, **record))
     (wf.root / "plan.md").write_text(render(draft, scope, wf))
 
@@ -1033,6 +1116,14 @@ def _scope_diff(old: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
             elif before[k] != v:
                 out.append(f"  ~ {label} {k}: {desc}")
         out += [f"  - {label} {k}" for k in before if k not in after]
+    before_r = {r.get("id"): r for r in old.get("requirements") or [] if isinstance(r, dict)}
+    after_r = {r.get("id"): r for r in new.get("requirements") or [] if isinstance(r, dict)}
+    for k, v in after_r.items():
+        if k not in before_r:
+            out.append(f"  + requirement {k}: {v.get('text')} (source: {v.get('source')})")
+        elif before_r[k] != v:
+            out.append(f"  ~ requirement {k}: {v.get('text')}")
+    out += [f"  - requirement {k}" for k in before_r if k not in after_r]
     before = {(p.get("agent"), p.get("role")) for p in old.get("participants", [])}
     after = {(p.get("agent"), p.get("role")) for p in new.get("participants", [])}
     out += [f"  + participant {a} ({r})" for a, r in sorted(after - before)]
@@ -1049,6 +1140,66 @@ def _scope_diff(old: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
     return out
 
 
+# What the human agreed to at scope time: an amendment that touches any of it is theirs to approve.
+# Budgets are absent on purpose — they are the manager's reporting metadata. The requirement ledger
+# is judged separately: an added requirement that quotes the human's own recorded answer is theirs
+# already (a real run spent a question turning four clarification answers into R11-R14).
+_DELEGATION_FROZEN = ("title", "output", "terms", "non_goals", "answers", "limits", "ignore", "fix_tasks", "review",
+                      "workspaces")
+_FROZEN_LABELS = {"title": "the title", "output": "the output summary", "terms": "the significant terms",
+                  "non_goals": "the non-goals", "answers": "the human's recorded answers",
+                  "limits": "what the gates enforce (limits)", "ignore": "what the gates ignore",
+                  "fix_tasks": "the fix-task allowance", "review": "the review mode", "workspaces": "the workspaces"}
+
+
+def _quotes_human_answer(source: str, state: Dict[str, Any], scope: Dict[str, Any]) -> bool:
+    """True when `source` quotes the human's own recorded answer: four of its words in a row (all of it
+    when shorter). An answer of three words or fewer vouches only when `source` names its Q#, so a
+    bare "Yes" cannot make arbitrary text look like theirs. Answers are those recorded `--by human`
+    and the scope-time answers they confirmed."""
+    norm = lambda x: re.sub(r"[^\w\s]", " ", str(x).lower()).split()
+    src = " ".join(norm(source))
+    named = set(re.findall(r"\bQ\d+\b", str(source)))
+    answers = [(qid, q.get("answer")) for qid, q in (state.get("questions") or {}).items()
+               if q.get("answer") and q.get("by", "human") == "human"]
+    answers += [(None, a.get("a")) for a in scope.get("answers") or [] if isinstance(a, dict) and a.get("a")]
+    for qid, answer in answers:
+        ans = norm(answer)
+        if len(ans) <= 3 and qid not in named:
+            continue
+        runs = [" ".join(ans[i:i + 4]) for i in range(max(1, len(ans) - 3))]
+        if any(r and r in src for r in runs):
+            return True
+    return False
+
+
+def _scope_delegation_misfit(old: Dict[str, Any], new: Dict[str, Any], state: Dict[str, Any]) -> List[str]:
+    """Why this scope amendment is the human's to approve; [] when it is plumbing the manager settles
+    alone: nothing they agreed changes, requirements are only added and each quotes their recorded
+    answer, the deliverable set is fixed (each one's wording, kind, or destination may be refined),
+    and no agent gains write authority (an author or tests role)."""
+    out = []
+    changed = [_FROZEN_LABELS[k] for k in _DELEGATION_FROZEN if old.get(k) != new.get(k)]
+    before_r = {str(r.get("id")): r for r in old.get("requirements") or [] if isinstance(r, dict)}
+    after_r = {str(r.get("id")): r for r in new.get("requirements") or [] if isinstance(r, dict)}
+    unsourced = [k for k, r in after_r.items()
+                 if k not in before_r and not _quotes_human_answer(r.get("source", ""), state, old)]
+    if any(k not in after_r or after_r[k] != r for k, r in before_r.items()) or unsourced:
+        changed.append("the requirement ledger" + (f" ({', '.join(unsourced)} quotes no answer the human gave — quote "
+                                                   "their words in `source`, with its Q#)" if unsourced else ""))
+    if changed:
+        out.append("it changes " + ", ".join(changed))
+    ids = lambda sc: {d.get("id") for d in sc.get("deliverables", []) if isinstance(d, dict)}
+    if ids(old) != ids(new):
+        out.append("the deliverable set changes — work is added or dropped")
+    before = {(p.get("agent"), scopemod.role_of(p)) for p in old.get("participants", []) if isinstance(p, dict)}
+    after = {(p.get("agent"), scopemod.role_of(p)) for p in new.get("participants", []) if isinstance(p, dict)}
+    gained = [f"{a} as {r}" for a, r in sorted(after - before) if r in ("author", "tests")]
+    if gained:
+        out.append("it grants write authority (" + ", ".join(gained) + ")")
+    return out
+
+
 def merge_baselines(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any]) -> None:
     """Baselines for workspaces a scope change adds; existing ones keep their original values, so
     the review still diffs against the HEAD recorded at the first approval."""
@@ -1060,10 +1211,12 @@ def merge_baselines(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any]) 
                                .items() if k in names and names[k]["mode"] == "write"}
 
 
-def cmd_scope_amend(wf: Workflow, answer: Optional[str]) -> str:
-    """Change the confirmed scope mid-run with one question: draft scope-amend.json, check it here
-    (with the plan amendment it needs, if any, in plan-amend.json), show the human what the check
-    prints, and their one answer applies both. The run stays where it is."""
+def cmd_scope_amend(wf: Workflow, answer: Optional[str], delegated: bool = False, note: Optional[str] = None) -> str:
+    """Change the confirmed scope mid-run: draft scope-amend.json, check it here (with the plan
+    amendment it needs, if any, in plan-amend.json), then either ask the human once — their one answer
+    applies both — or, when the check proves the change is plumbing (nothing they agreed changes, no
+    write authority gained), settle it with --delegated --note, recorded as the manager's and listed
+    in the report. The run stays where it is."""
     from . import review
     with wf.locked():
         state = wf.load()
@@ -1082,6 +1235,8 @@ def cmd_scope_amend(wf: Workflow, answer: Optional[str]) -> str:
             raise TPError(f"{draft_path} must hold a JSON object.")
         errs = scopemod.validate(draft, require_fix_tasks="fix_tasks" in old, contract=int(state.get("contract", 1)))
         plan_draft = None
+        approved: Dict[str, Any] = {}
+        plan_changes: List[str] = []
         executing = state["phase"] == "EXECUTING"
         if executing and not errs:
             if (wf.root / AMEND_JSON).exists():
@@ -1097,8 +1252,16 @@ def cmd_scope_amend(wf: Workflow, answer: Optional[str]) -> str:
         diff = _scope_diff(old, draft)
         if not diff and plan_draft is None:
             return f"{draft_path.name} changes nothing yet."
+        misfit = _scope_delegation_misfit(old, draft, state)
+        if plan_draft is not None:
+            misfit += _delegation_misfit(approved, plan_draft, draft, state, plan_changes)
+        cap = limit("max_delegated_scope_amends")
+        used = len([a for a in state.get("scope_amendments", []) if a.get("delegated")])
+        if used >= cap:
+            misfit.append(f"the run already settled {used} scope amendment{'s' if used != 1 else ''} without a "
+                          f"question (the cap is {cap}) — this one goes to the human")
         plan_sha = sha_file(wf.root / AMEND_JSON) if plan_draft is not None else None
-        if answer is None:
+        if answer is None and not delegated:
             (wf.root / "scope-amend.md").write_text(scopemod.render(draft))
             state["scope_amend_checked"] = {"sha": sha_file(draft_path), "plan_sha": plan_sha, "ts": now_iso()}
             wf.save(state)
@@ -1107,16 +1270,33 @@ def cmd_scope_amend(wf: Workflow, answer: Optional[str]) -> str:
                 remaining, _ = _remaining(plan_draft, draft, state)
                 out += [f"with the plan amendment — {'; '.join(plan_changes)}:"] + _change_lines(approved, plan_draft)
                 out += remaining
-            return "\n".join(out + [
-                f"Ask the human once, showing this change (full scope: {wf.root / 'scope-amend.md'}); their answer "
-                "approves the scope" + (" and the plan amendment together" if plan_draft is not None else "")
-                + " — do not ask again: `tp scope amend --answer \"<their words>\"`. A change to either draft after "
-                "this check needs a new check and a new answer."])
+            if misfit:
+                out.append(f"Ask the human once, showing this change (full scope: {wf.root / 'scope-amend.md'}); their "
+                           "answer approves the scope" + (" and the plan amendment together" if plan_draft is not None
+                                                          else "")
+                           + " — do not ask again: `tp scope amend --answer \"<their words>\"`. A change to either "
+                           "draft after this check needs a new check and a new answer. (Theirs because "
+                           + "; ".join(misfit) + ".)")
+            else:
+                out.append("This is plumbing — nothing the human agreed changes, and no agent gains write authority — "
+                           "so settle it yourself: `tp scope amend --delegated --note \"<what changed and why>\"` "
+                           f"({used} of {cap} used; recorded as yours, listed in the report).")
+            return "\n".join(out)
+        if delegated and answer:
+            raise TPError("pass either --answer (the human's words) or --delegated (settle it yourself), not both.")
         checked = state.get("scope_amend_checked") or {}
         if checked.get("sha") != sha_file(draft_path) or checked.get("plan_sha") != plan_sha:
             raise TPError("scope-amend.json (or plan-amend.json) changed since the check, or was never checked: run "
-                          "`tp scope amend`, show the human what it prints, and ask again — an answer approves only "
-                          "the change it was shown.")
+                          "`tp scope amend`, " + ("read what it prints before settling anything." if delegated else
+                                                  "show the human what it prints, and ask again — an answer approves "
+                                                  "only the change it was shown."))
+        if delegated:
+            if misfit:
+                raise TPError("Not plumbing the manager may settle: " + "; ".join(misfit) + ".",
+                              "Ask the human once, showing what `tp scope amend` printed, then "
+                              "`tp scope amend --answer \"<their words>\"`.")
+            if not note or words(note) < 4:
+                raise TPError("--delegated needs --note: what changed and why, in plain words (the report shows it).")
         wf.scope_json.write_text(json.dumps(draft, indent=2) + "\n")
         (wf.root / "scope.md").write_text(scopemod.render(draft))
         n = len([p for p in wf.meta.glob("scope-amend-*.json")]) + 1
@@ -1125,20 +1305,37 @@ def cmd_scope_amend(wf: Workflow, answer: Optional[str]) -> str:
         state.pop("scope_amend_checked", None)
         state["scope_sha"] = state["scope_checked_sha"] = sha_file(wf.scope_json)
         state["budget_minutes"] = draft.get("budget_minutes")
+        allow = 0
         if executing:
             merge_baselines(wf, state, draft)
-            if plan_draft is not None:
+            if plan_draft is not None and delegated:
+                # The plan side rides along only inside the standing fix-task delegation (proved above).
+                added = [t["id"] for t in plan_draft["tasks"] if t["id"] not in {a["id"] for a in approved["tasks"]}]
+                state["delegated"] = list(state.get("delegated", [])) + added
+                allow = int(scopemod.fix_tasks(draft).get("allow") or 0)
+                _apply_amendment(wf, state, plan_draft, draft, plan_changes,
+                                 {"delegated": True, "note": " ".join(note.split()), "tasks": added, "with_scope": True})
+            elif plan_draft is not None:
                 _apply_amendment(wf, state, plan_draft, draft, plan_changes, {"answer": answer, "with_scope": True})
             else:
                 plan = load_plan(wf)
                 state["reviews"] = review.new_reviews(plan, draft, state.get("reviews", {}))
                 state["integration"] = review.integration_ids(plan, draft)
+                state["gates"] = gate_descendants(plan)
                 (wf.root / "plan.md").write_text(render(plan, draft, wf))
+        state.setdefault("scope_amendments", []).append(
+            {"ts": now_iso(), "changes": diff, "delegated": bool(delegated), "note": " ".join((note or "").split())})
         wf.save(state)
-        wf.decision("scope amend", str(answer))
-        if plan_draft is not None:
-            wf.decision("plan amend (approved with the scope amendment)", str(answer))
-        wf.event("scope_amend", changes=diff, plan=plan_draft is not None)
+        if delegated:
+            wf.decision("scope amend (manager-settled plumbing)", str(note), who="manager")
+            if plan_draft is not None:
+                wf.decision(f"plan amend (fix-task delegation, {len(state['delegated'])} of {allow})", str(note),
+                            who="manager")
+        else:
+            wf.decision("scope amend", str(answer))
+            if plan_draft is not None:
+                wf.decision("plan amend (approved with the scope amendment)", str(answer))
+        wf.event("scope_amend", changes=diff, plan=plan_draft is not None, delegated=bool(delegated))
         return "\n".join(["scope amended:"] + diff + (["and the plan amendment applied."] if plan_draft else [])
                          + ["`tp next`."])
 
@@ -1171,6 +1368,8 @@ def cmd_widen(wf: Workflow, tid: str, paths: List[str], reason: str, answer: Opt
             raise TPError(f"{tid} is not a task in the approved plan.")
         if task.get("publish"):
             raise TPError(f"{tid} is a publish task: it writes no files.")
+        if is_gate(task):
+            raise TPError(f"{tid} is a gate — the human's decision: it writes no files.")
         added = [p for p in dict.fromkeys(str(p).strip() for p in paths) if p and p not in task["paths"]]
         if not added:
             raise TPError("no new paths: every path is already in the task's write set.")
@@ -1310,10 +1509,10 @@ def cmd_plan_review(wf: Workflow) -> str:
         if pr["status"] in ("needs_triage", "changes"):
             raise TPError(f"round {pr['round']} has findings: triage them (`tp plan triage`), fix the plan, and "
                           "`tp plan submit` before the next round.")
-        if pr["round"] >= limit("max_plan_review_rounds"):
-            raise TPError(f"the plan has had {pr['round']} independent review rounds without passing. Put the open "
-                          "findings to the human (plain text), then `tp revise --feedback \"<their words>\"` starts "
-                          "planning again with their input.")
+        stop = plan_review_exhausted(pr)
+        if stop:
+            raise TPError(f"{stop}. Put the open findings to the human (plain text), then `tp revise --feedback "
+                          "\"<their words>\"` starts planning again with their input.")
         plan, scope = _checked(wf, state)
         pr["round"] += 1
         rnd = pr["round"]
@@ -1332,6 +1531,36 @@ def cmd_plan_review(wf: Workflow) -> str:
         return "\n".join([f"PLAN REVIEW · round {rnd} · {agent}" + (f" · {fresh}" if fresh else ""),
                           f"brief: {brief}", f"send: {call}",
                           "then, when it replies: tp plan record --agent-id <its agent id>"])
+
+
+def plan_review_exhausted(pr: Dict[str, Any]) -> Optional[str]:
+    """Why the plan review now needs the human, or None while it may go on. The round cap stops a
+    review that is going nowhere, not one that is converging: a real run went 11 → 2 → 1 findings,
+    the human was asked at round 3 only to say "run a 4th round", and round 4 passed in 36 seconds.
+    Past the cap the review continues while its findings shrink, every one was accepted (a dismissal
+    is a dispute the human settles), and none is a decision only the human can make — up to the
+    ceiling."""
+    rnd, cap, ceiling = pr.get("round", 0), limit("max_plan_review_rounds"), limit("plan_review_ceiling")
+    if rnd < cap:
+        return None
+    head = f"the plan has had {rnd} independent review rounds without passing"
+    if rnd >= ceiling:
+        return f"{head}, and that is the ceiling, converging or not"
+    hist = [h for h in pr.get("history") or [] if isinstance(h, dict)]
+    if len(hist) < 2:
+        return f"{head}, and the review is not converging"
+    last, prev = hist[-1], hist[-2]
+    n_last, n_prev = len(last.get("findings") or []), len(prev.get("findings") or [])
+    if last.get("dismissed"):
+        return (f"{head}, and round {last.get('round')} ended in a dispute (you dismissed "
+                f"{', '.join(sorted(last['dismissed']))}) — the human settles it")
+    unresolved = [f.get("id") for f in last.get("findings") or [] if f.get("state") == "unresolved"]
+    if unresolved:
+        return f"{head}, and {', '.join(unresolved)} is a decision only the human can make"
+    if n_last >= n_prev:
+        return (f"{head}, and the review is not converging: round {last.get('round')} found {n_last} finding(s) "
+                f"after {n_prev}")
+    return None
 
 
 def catalog_plan_reviewer() -> str:

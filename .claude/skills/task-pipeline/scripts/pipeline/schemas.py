@@ -65,7 +65,12 @@ SCHEMAS = {
                                "labels": ["<jira-issue (optional)>"],
                                "_": "jira-issue creates a child of target (the draft's first line is its summary); "
                                     "confluence-page replaces the page body with the draft's storage XHTML"},
-                   "when": "after_review (default: integration waits for the final review) | anytime"}],
+                   "when": "after_review (default: integration waits for the final review) | anytime"},
+                  {"id": "T04", "title": "Sign-off on the plan and ticket drafts", "serves": ["D2 (docs)"],
+                   "workspace": "repo", "depends_on": ["T02"],
+                   "gate": {"ask": "Do you sign off plan.md and the ticket drafts, and approve filing them?"},
+                   "_": "a human decision mid-run: the work it depends on is accepted and reviewed before `tp gate "
+                        "T04` asks it; tasks that depend on T04 wait for the answer, and their briefs quote it"}],
         "review_batches": [{"id": "B1", "tasks": ["T01", "T02"]}],
         "checks": {"vet": {"cmd": "go vet {dirs}", "cwd": "src",
                            "_": "{files}: the task's changed files; {dirs}: their ./directories (package-scoped)"}},

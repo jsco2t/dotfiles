@@ -934,22 +934,26 @@ def _change_lines(approved: Dict[str, Any], draft: Dict[str, Any]) -> List[str]:
     return out
 
 
-# Variables that only choose which toolchain runs a check. Running a check under the version the
-# repository pins changes nothing it proves, so the manager settles it; any other variable could
-# change what the check tests (GOFLAGS=-run=..., SKIP_...), so it is not on the list.
-_PIN_VARS = {"GOTOOLCHAIN", "GOROOT", "PATH", "RUSTUP_TOOLCHAIN", "PYENV_VERSION", "NODE_VERSION"}
-_ASSIGNMENT = r"""[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|[^\s;&'"]+)"""
-_ENV_PREFIX = re.compile(rf"^(?:export\s+)?((?:{_ASSIGNMENT}\s*)+)(?:;|&&)?\s*")
+# The only prefixes that run a check under the toolchain the repository pins, with a literal
+# version: the survey's own prefix (pinned `go`, and its GOROOT/bin first on PATH for gofmt) and a
+# bare GOTOOLCHAIN. Anything else — another variable, another PATH, a command substitution of its
+# own — could change what the check runs (a fake tool first on PATH), so the human decides it.
+_V = r"\d+\.\d+(?:\.\d+)?"
+_GOROOT_PATH = r'PATH="\$\(GOTOOLCHAIN=go(?P=v) go env GOROOT\)/bin:\$PATH"'
+_PIN_FORMS = [re.compile(rf"export GOTOOLCHAIN=go(?P<v>{_V}) {_GOROOT_PATH}; "),
+              re.compile(rf"GOTOOLCHAIN=go(?P<v>{_V}) {_GOROOT_PATH} "),
+              re.compile(rf"GOTOOLCHAIN=go(?P<v>{_V}) ")]
 
 
 def toolchain_pinned(old: str, new: str) -> bool:
-    """True when `new` is `old` run under toolchain-selecting variables only (`GOTOOLCHAIN=... cmd`,
-    `export GOTOOLCHAIN=... PATH=...; cmd`)."""
-    m = _ENV_PREFIX.match(new.strip())
-    if not m or new.strip()[m.end():].strip() != old.strip():
-        return False
-    names = [a.group(0).split("=", 1)[0] for a in re.finditer(_ASSIGNMENT, m.group(1))]
-    return bool(names) and set(names) <= _PIN_VARS
+    """True when `new` is `old` run under the repository's pinned Go, in one of the exact forms
+    `tp survey` prints (`export GOTOOLCHAIN=go1.x.y PATH="$(...go env GOROOT)/bin:$PATH"; cmd`)."""
+    new = new.strip()
+    for form in _PIN_FORMS:
+        m = form.match(new)
+        if m and new[m.end():].strip() == old.strip():
+            return True
+    return False
 
 
 def _pinned_checks(approved: Dict[str, Any], draft: Dict[str, Any]) -> Optional[List[str]]:

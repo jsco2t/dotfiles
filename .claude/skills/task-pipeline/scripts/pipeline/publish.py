@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import adf, run
 from . import scope as scopemod
 from . import plan as planmod
-from .common import TPError, Workflow, now_iso
+from .common import TPError, Workflow, now_iso, sha_file
 
 TIMEOUT = 120
 
@@ -223,10 +223,16 @@ def cmd_publish(wf: Workflow, tid: str, answer: Optional[str], preapproved: bool
         if state["phase"] != "EXECUTING":
             raise TPError(f"publish runs while EXECUTING; the workflow is {state['phase']}.")
         plan, scope, tasks = run._loaded(wf, state)
-        pre = scopemod.preapproval(scope)
+        # A pre-approval counts only as the human confirmed it: scope.json as it stood then.
+        confirmed = bool(state.get("scope_sha")) and state["scope_sha"] == sha_file(wf.scope_json)
+        pre = scopemod.preapproval(scope) if confirmed else None
         if preapproved:
             if answer is not None:
                 raise TPError("--preapproved or --answer, not both.")
+            if not confirmed:
+                raise TPError("scope.json is not the scope the human confirmed (it changed since), so it pre-approves "
+                              "nothing: restore it, show the human the dry run, and `tp publish "
+                              f"{tid} --answer \"<their words>\"`.")
             if not pre:
                 raise TPError("outside writes are not pre-approved in this scope (scope.json `outside_writes`): show the "
                               f"human the dry run and `tp publish {tid} --answer \"<their words>\"`.")

@@ -321,6 +321,35 @@ class PinnedCheckAmendTest(unittest.TestCase):
         finally:
             h.close()
 
+    def test_a_prefix_that_could_change_what_runs_goes_to_the_human(self) -> None:
+        for cmd in ('PATH=/tmp/fakebin:$PATH true',                                   # a fake tool shadows the real one
+                    'export GOTOOLCHAIN=go1.26.2 PATH="$(touch /tmp/x; echo /bin):$PATH"; true',
+                    'GOTOOLCHAIN=go1.26.2 GOROOT=/tmp/fake true',
+                    'GOTOOLCHAIN="$(id)" true'):
+            with self.subTest(cmd=cmd):
+                h = Harness()
+                try:
+                    h.approved(h.plan(checks={"unit": {"cmd": "true"}}, final_checks=["docs-all", "unit"]))
+                    h.tp("plan", "amend")
+                    draft = h.read_json("plan-amend.json")
+                    draft["checks"]["unit"]["cmd"] = cmd
+                    (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+                    self.assertIn("Ask the human", h.tp("plan", "amend").out)
+                finally:
+                    h.close()
+
+    def test_the_survey_prefix_itself_is_the_managers_to_settle(self) -> None:
+        h = Harness()
+        try:
+            h.approved(h.plan(checks={"unit": {"cmd": "true"}}, final_checks=["docs-all", "unit"]))
+            h.tp("plan", "amend")
+            draft = h.read_json("plan-amend.json")
+            draft["checks"]["unit"]["cmd"] = survey.pin_prefix("1.26.2") + "true"
+            (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+            self.assertNotIn("Ask the human", h.tp("plan", "amend").out)
+        finally:
+            h.close()
+
     def test_any_other_rewrite_still_goes_to_the_human(self) -> None:
         h = Harness()
         try:
@@ -447,6 +476,15 @@ class PreapprovedPostTest(unittest.TestCase):
         self.assertIn("WARN", out)
         self.assertNotIn("--preapproved", out)
         self.assertIn("WARN", self.m.h.tp("publish", "T03", "--preapproved", expect=2).text)
+        self.assertEqual(self.jira.writes(), [])
+
+    def test_a_preapproval_written_into_scope_after_confirmation_counts_for_nothing(self) -> None:
+        self.ready_to_post()
+        scope = json.loads((self.m.h.wf / "scope.json").read_text())
+        scope["outside_writes"] = {"approval": "pre-approved", "answer": "Post them"}
+        (self.m.h.wf / "scope.json").write_text(json.dumps(scope))
+        self.assertNotIn("--preapproved", self.m.h.tp("publish", "T03", expect=None).text)
+        self.assertIn("confirmed", self.m.h.tp("publish", "T03", "--preapproved", expect=2).text)
         self.assertEqual(self.jira.writes(), [])
 
     def test_preapproval_still_needs_the_dry_run(self) -> None:

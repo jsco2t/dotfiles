@@ -105,6 +105,9 @@ baselines once. Reuse stable current evidence with complete source/test/config/d
 environment inputs; external-state checks stay uncached. After two unchanged infrastructure
 failures, diagnose the environment and use `--retry-reason` for an actual change/diagnosis.
 Avoid speculative harnesses, installations or unrequested verification matrices.
+Set explicit `timeout_seconds` for long integration checks from observed baseline runtime;
+the default is five minutes. A timeout is inconclusive, never proof of a product defect.
+For this skill's regression suite, use the isolated parallel runner in [helper.md](references/helper.md).
 
 Batch independent reads; serialize mutations. Use stdin JSON and `batch` for already-known
 transitions, never predicted evidence or agent identities. Read relevant references only when
@@ -118,6 +121,10 @@ and requirement ledger. Reuse component coverage and current logs; inspect fixes
 gaps, preserving any separately requested full-system review. Record `review`, fix confirmed
 in-scope findings, and `final`. Report delivered work, verification and limitations with
 `report.md`. No human completion approval is needed.
+When scope requests independent final review, reserve `purpose: final` after verification,
+collect the actual reviewer, and name both its assignment (`agent`) and host identity
+(`agent_id`) in `review`. The assignment covers the whole monitored source and every
+requirement; changed source or request/plan revisions need a current review. See [delegation.md](references/delegation.md).
 
 Keep human artifacts at the root: request, scope, readable plan, optional compact research,
 report and metrics. Put evidence/drafts/scratch under `.tp/`; logs under `checks/`. Use JSON

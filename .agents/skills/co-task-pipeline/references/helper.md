@@ -2,7 +2,11 @@
 
 Use `python3 "<actual-skill-dir>/scripts/tp.py"` as `tp` below. Python 3.9+ on macOS/Linux,
 standard library only. No global configuration, installations or network calls are needed.
-Run regression tests with `python3 -B -m unittest discover -s <skill-dir>/tests -v`.
+Run regression tests with `python3 -B <skill-dir>/tests/run_parallel.py -j 4`.
+With `-j 4`, threads coordinate at most four isolated class processes; adjust `-j` as needed. Optional
+module, class or exact test IDs select focused coverage, e.g. `test_delivery.DeliveryTest`.
+Unknown selections, discovery failures, empty suites and incomplete workers fail the run.
+The serial fallback is `python3 -B -m unittest discover -s <skill-dir>/tests -v`.
 
 ## New workflow: scope and independently reviewed plan
 
@@ -188,6 +192,10 @@ request requirement. Independent methods identify the actual reviewer. Valid fin
 owners; retain prior coverage and rerun affected checks. `final` refuses missing tasks, dirty
 verification, stale final checks, missing review, unsettled agents/effects or unclassified notes.
 It writes the final human report and metrics. It does not run checks implicitly.
+Autonomous independent final review also requires a completed accepted `purpose: final`
+assignment: name its ID as `agent` and actual host identity as `agent_id` in the review payload.
+Passing review requires `unresolved: []`; a validated `changes` return can retain unresolved
+findings and reopen their owners. Whole-source and request/plan freshness hold through `final`.
 
 New-run JSON state holds references to immutable compressed checkpoint maps in one
 `.tp/snapshots.sqlite3` file. Keep that database with state; missing/corrupt objects fail closed.

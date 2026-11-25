@@ -259,8 +259,16 @@ def execute(wf, args, api):
                 candidate = api.read(path)
                 api.validate_plan(candidate, scope, wf.root)
                 brief["amendment_revision"] = digest([scope, state["plan"], candidate])
+            elif purpose == "final":
+                api.need(state.get("governance") == "autonomous" and scope["review"] == "independent"
+                         and brief["role"] == "review" and not brief.get("task") and "inputs" not in brief
+                         and set(requested) == {r["id"] for r in scope["requirements"]},
+                         "final reviewer must cover the whole independent review and every requirement, without task/inputs narrowing")
+                action = api.next_action(wf)
+                api.need(action.startswith(("review:", "final:")), "final review is not ready: " + action)
+                brief["review_revision"] = api.plan_revision(wf)
             else:
-                api.need(purpose is None, "purpose must be plan or test-correction when supplied")
+                api.need(purpose is None, "purpose must be plan, test-correction, amendment or final when supplied")
             snapshot = wf.snapshot(scope, candidate_plan if purpose == "plan" else state.get("plan") or {"tasks": []}, brief.get("inputs"))
             source = checks.fingerprint(snapshot, {"inputs": brief["inputs"]}) if "inputs" in brief else digest(snapshot)
             agents[args.id] = dict(brief, id=args.id, status="reserved", started=api.now(), source=source,
@@ -285,7 +293,7 @@ def execute(wf, args, api):
                      and type(result.get("accepted")) is bool
                      and api.text(result.get("summary")) and api.text(result.get("validation"))
                      and api.strings(result.get("evidence")), "agent result needs accepted, summary, evidence and parent validation")
-            if agent.get("purpose") in ("plan", "test-correction", "amendment") or "unresolved" in result:
+            if agent.get("purpose") in ("plan", "test-correction", "amendment", "final") or "unresolved" in result:
                 api.need(api.strings(result.get("unresolved"), empty=True),
                          "review result needs unresolved as a list of nonblank issue strings; use [] when clear")
             scope = state["scope"]
@@ -294,6 +302,8 @@ def execute(wf, args, api):
             api.need(not result["accepted"] or current == agent["source"], "review source changed; validate/review affected changes before accepting")
             if agent.get("purpose") == "plan" and result["accepted"]:
                 api.need(agent["plan_revision"] == api.plan_revision(wf), "plan review is stale; review the current request and plan")
+            if agent.get("purpose") == "final" and result["accepted"]:
+                api.need(agent["review_revision"] == api.plan_revision(wf), "final review is stale; review the current request and plan")
             if agent.get("purpose") == "test-correction" and result["accepted"]:
                 import corrections
                 api.need(agent["correction_revision"] == corrections.revision(wf, agent["task"], agent.get("repair"), agent.get("proof"), agent.get("proofs", [])),

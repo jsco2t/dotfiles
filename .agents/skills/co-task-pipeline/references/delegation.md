@@ -12,7 +12,9 @@ it with remaining capacity, or a child runs a bounded review without children.
    The JSON brief names `role: research|review`, requirement IDs, absolute starting `paths`
    inside settled workspaces, one `question`, and `done_when`. Set `purpose: plan` for initial
    plan review, `test-correction` for pin evolution, or `amendment` for an existing check
-   replacement. Other research/review assignments omit purpose. Set the owning `task` when known.
+   replacement, or `final` for an autonomous scope's independent final review. Other
+   research/review assignments omit purpose. Set the owning `task` when known, except for
+   whole-change final review.
 2. Launch an actual host agent with that narrow brief and the necessary raw artifacts.
    Require read-only work, no external mutations and no children. The helper does not launch
    or authenticate agents. Keep reviewed inputs stable until the return is accepted.
@@ -50,6 +52,15 @@ about optional model settings or infer actual identity from a requested override
   preserving every original obligation. See [execution.md](execution.md) for grouped payloads.
 - Check amendment: draft `plan_file` inside the workflow, old/new command, criteria and
   verification obligations. Confirm the replacement executes the required cases/assertions.
+- Independent final review: reserve `purpose: final`, `role: review`, all requirement IDs,
+  no `task` or narrowed `inputs`, after completed work and current verification. Review the
+  original request, decisions, plan, whole monitored diff/source, baseline and current logs.
+  Use the requested review skill and scope. Record the actual host identity and explicit
+  `unresolved` list at finish. Submit `review` with `agent: <assignment-id>` and matching
+  `agent_id: <host-id>`. A passing verdict requires an accepted return with `unresolved: []`;
+  accepted findings may remain unresolved for a `changes` verdict that reopens owners.
+  Changed source or request/plan revision requires review of the affected changes before
+  completion. Legacy final reviews retain their original contract.
 - Component or repair review: exact source/diff scope, pre-existing edits, current logs,
   prior findings and coverage. Return confirmed defects with trigger, consequence, evidence
   and owning task; a clean result is valid. Review fixes and integration gaps without

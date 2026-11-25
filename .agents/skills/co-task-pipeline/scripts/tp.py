@@ -578,8 +578,11 @@ def next_action(wf):
     for name in plan["final_checks"]:
         if not fresh(state["checks"].get(name), snapshot, plan["checks"][name]):
             return f"check: {name}"
-    if scope["review"] != "none" and not (state.get("review") and
-            state["review"]["fingerprint"] == digest(snapshot) and state["review"]["verdict"] == "pass"):
+    review = state.get("review")
+    current_review = bool(review and review["fingerprint"] == digest(snapshot) and review["verdict"] == "pass")
+    if current_review and state.get("governance") == "autonomous" and scope["review"] == "independent":
+        current_review = review.get("review_revision") == plan_revision(wf, scope, plan)
+    if scope["review"] != "none" and not current_review:
         return f"review: complete change ({scope['review']})"
     if any(not item.get("classification") for item in state["notes"]):
         return "closeout: classify worthwhile observations; do not create follow-up obligations for unrelated work"
@@ -1147,6 +1150,24 @@ def execute(wf, args):
         need(isinstance(result.get("findings"), list), "review.findings must be a list")
         need(bool(result["findings"]) == (result["verdict"] == "changes"), "pass must have no findings; changes must have findings")
         need(scope["review"] != "independent" or text(result.get("agent_id")), "identify the actual independent reviewer")
+        if state.get("governance") == "autonomous" and scope["review"] == "independent":
+            if result["verdict"] == "pass":
+                agent = independent(wf, result.get("agent"), "final")
+            else:
+                # A validated review can report unresolved findings. Only a clean return
+                # clears the passing gate; keep the other independent gates strict.
+                agent = state.get("agents", {}).get(result.get("agent"), {})
+                need(agent.get("status") == "done" and agent.get("accepted") is True
+                     and agent.get("role") == "review" and agent.get("purpose") == "final"
+                     and text(agent.get("agent_id")) and agent["agent_id"] != state.get("author_agent_id", "main")
+                     and strings(agent.get("unresolved"), empty=True),
+                     "findings need a completed, accepted independent final reviewer")
+            need(agent["agent_id"] == result["agent_id"], "final review identity differs from its assignment")
+            need(agent.get("review_revision") == plan_revision(wf, scope, plan),
+                 "final review is stale; review the current request and plan")
+            need("inputs" not in agent and agent.get("source") == digest(snapshot),
+                 "final review source changed; review the affected changes")
+            result["review_revision"] = agent["review_revision"]
         if scope.get("requirements"):
             coverage = result.get("requirements")
             need(isinstance(coverage, list) and all(isinstance(r, dict) and text(r.get("id"))

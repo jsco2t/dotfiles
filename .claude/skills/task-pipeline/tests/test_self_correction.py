@@ -166,6 +166,7 @@ class GateTaskTest(unittest.TestCase):
         h.tp("record", "T03", "--agent-id", "a-3")
         h.tp("accept", "T03", "--note", "citation holds")
         self.review_pass("B2/doc-reviewer")
+        h.whole_pass()
         h.tp("final")
         report = (h.wf / "report.md").read_text()
         self.assertIn("Signed off; keep the build guide short.", report)
@@ -205,7 +206,7 @@ class GateTaskTest(unittest.TestCase):
         h.approved(self.two_gate_plan(), **FINAL_REVIEW)
         batches = {s: v["tasks"] for s, v in h.state()["reviews"].items()}
         self.assertEqual(batches, {"B1/doc-reviewer": ["T01"], "B2/doc-reviewer": ["T03"],
-                                   "B3/doc-reviewer": ["T05"]})
+                                   "B3/doc-reviewer": ["T05"], "W/code-reviewer": ["T01", "T03", "T05"]})
         self.land("T01", "architecture/overview.md")
         self.review_pass("B1/doc-reviewer")
         h.tp("gate", "T02", "--answer", "Go ahead.")
@@ -220,6 +221,7 @@ class GateTaskTest(unittest.TestCase):
         h.tp("record", "T05", "--agent-id", "a-T05")
         h.tp("accept", "T05", "--note", "links hold")
         self.review_pass("B3/doc-reviewer")
+        h.whole_pass()
         h.tp("final")
 
     def test_a_batch_may_not_mix_work_behind_different_gates(self) -> None:
@@ -606,6 +608,7 @@ class AmendmentReviewTest(unittest.TestCase):
         (h.wf / "runs" / "B1" / "doc-reviewer-1.json").write_text(
             json.dumps({"batch": "B1", "verdict": "pass", "findings": []}))
         h.tp("record", "B1/doc-reviewer", "--agent-id", "rev-1")
+        h.whole_pass()
         h.tp("final")
         self.assertIn("Changes an independent reviewer approved", (h.wf / "report.md").read_text())
 

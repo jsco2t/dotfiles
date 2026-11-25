@@ -244,6 +244,13 @@ class Harness:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"# {title}\n\n`Add` returns the sum of two ints (`calc/calc.go:5`).\n")
 
+    def whole_pass(self, sid: str = "W/code-reviewer") -> None:
+        """The /reviewomatic pass over the whole change, after the closeout: it finds nothing."""
+        self.tp("dispatch", sid)
+        (self.wf / "runs" / "W" / f"{sid.split('/')[1]}-1.json").write_text(json.dumps(
+            {"batch": "W", "verdict": "pass", "findings": []}))
+        self.tp("record", sid)
+
     def author(self, tid: str, rel: str, step: str = "author", agent_id: Optional[str] = None) -> Result:
         """Dispatch, write a good article, hand back, and record. Each task gets its own agent
         unless told otherwise: tp refuses one agent for two tasks."""

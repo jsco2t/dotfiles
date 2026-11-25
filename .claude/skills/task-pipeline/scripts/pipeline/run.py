@@ -160,8 +160,36 @@ def _integration_held(task: Dict[str, Any], scope: Dict[str, Any], state: Dict[s
     if any("tasks" not in s for s in state.get("reviews", {}).values()):
         return False  # a workflow approved before this rule: its review batches still hold integration tasks
     others = [t for t in state["tasks"] if t not in state.get("integration", [])]
-    return (any(state["tasks"][t]["status"] not in DONE_STATES for t in others)
-            or any(s["status"] != "done" for s in state.get("reviews", {}).values()))
+    if (any(state["tasks"][t]["status"] not in DONE_STATES for t in others)
+            or any(s["status"] != "done" for s in state.get("reviews", {}).values())):
+        return True
+    return _awaits_checks(task, state)
+
+
+def _awaits_checks(task: Dict[str, Any], state: Dict[str, Any]) -> bool:
+    """Last of all, after the closeout and the final checks, so the human's answer ends the run:
+    in a real run the post's question waited nine hours with the closeout, a fix task, its review,
+    and the checks still to do — and the fix task had to keep the posted comment's line citations
+    valid. A publish dry run runs the checks itself; `tp final` runs them before an agent's post.
+    A dry run already shown is not taken back."""
+    shown = (state["tasks"].get(task.get("id"), {}) or {}).get("publish")
+    return not shown and not _prefinal_fresh(state)
+
+
+def _work_sig(state: Dict[str, Any]) -> str:
+    """Everything but the posts: the tasks, the reviews, and the closeout. A pre-post check of
+    the finished work holds while none of it moves."""
+    integ = set(state.get("integration", []))
+    return hashlib.sha1(json.dumps([
+        sorted((t, ts["status"], ts.get("round", 0)) for t, ts in state["tasks"].items() if t not in integ),
+        sorted((sid, s.get("status"), s.get("round")) for sid, s in state.get("reviews", {}).items()),
+        sorted((state.get("closeout") or {}).get("items", {})),
+    ]).encode()).hexdigest()
+
+
+def _prefinal_fresh(state: Dict[str, Any]) -> bool:
+    pre = state.get("prefinal")
+    return bool(pre) and pre.get("sig") == _work_sig(state)
 
 
 def tp_command(wf: Workflow, *args: str) -> str:
@@ -194,8 +222,8 @@ def _gate_waits_on(tid: str, tasks: Dict[str, Dict[str, Any]], state: Dict[str, 
     if waits:
         return waits
     upstream = planmod._ancestors(tasks).get(tid, set())
-    return [sid for sid, s in state.get("reviews", {}).items()
-            if s.get("status") != "done" and upstream & set(s.get("tasks") or [])]
+    return [sid for sid, s in state.get("reviews", {}).items()  # the whole-change review comes after every gate
+            if s.get("status") != "done" and not s.get("whole") and upstream & set(s.get("tasks") or [])]
 
 
 def _action_for(tid: str, ts: Dict[str, Any], task: Dict[str, Any], scope: Dict[str, Any],
@@ -306,12 +334,33 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
             acts.append(act)
             free -= 1
     review_acts = _review().actions(state, free)
+    reviews = _review().sessions(state)
+    whole = [sid for sid, s in reviews.items() if s.get("whole") and s["status"] != "done"]
+    if any(reviews[a["id"]].get("whole") and reviews[a["id"]]["round"] == 0 for a in review_acts
+           if a["action"] == "review") and _closeout_pending(wf, state):
+        # The whole-change review comes after the closeout, which can still add fix tasks.
+        review_acts = [a for a in review_acts if not (a["action"] == "review" and reviews[a["id"]].get("whole"))]
     acts += review_acts + _amend_action(state)
-    everything_done = all(ts["status"] in DONE_STATES for ts in state["tasks"].values())
-    if (everything_done and not state["in_flight"] and not state.get("blocked")
-            and not _review().open_sessions(state)):
+    held = [tid for tid, ts in state["tasks"].items() if ts["status"] == "pending" and tid in tasks
+            and _integration_held(tasks[tid], scope, state)]
+    everything_done = all(ts["status"] in DONE_STATES or tid in held for tid, ts in state["tasks"].items())
+    before_whole = [sid for sid in _review().open_sessions(state)
+                    if not (sid in whole and reviews[sid]["status"] == "pending")]
+    if (everything_done and not state["in_flight"] and not state.get("blocked") and not before_whole):
         pending = _closeout_pending(wf, state)
-        acts.append({"action": "closeout", "why": pending} if pending else {"action": "final"})
+        posts = [t for t in held if planmod.is_publish(tasks[t])]
+        agents = [t for t in held if t not in posts]
+        if pending:
+            acts.append({"action": "closeout", "why": pending})
+        elif whole:
+            pass  # the whole-change review is next (its review action is above)
+        elif agents:
+            acts.append({"action": "final", "why": f" Posts last: it runs the final checks now, before "
+                                                   f"{', '.join(agents)}; the report then reuses their results."})
+        elif posts:
+            acts += [{"action": "publish", "id": t} for t in posts]
+        else:
+            acts.append({"action": "final"})
     if (not any(a["action"] in ("dispatch", "fix", "review", "final", "closeout", "rerun", "publish", "gate")
                 for a in acts)
             and state["in_flight"]):
@@ -359,7 +408,8 @@ GUIDE = {
     "halting": "Halt requested: record {ids} as they hand back; dispatch nothing new.",
     "halted": "Halted. Tell the human where work stopped (`halt.json`), then stop. `tp resume --answer \"...\"` "
               "continues.",
-    "publish": "`tp publish {id}` (a dry run: renders the reviewed draft and runs the pre-flight checks), then "
+    "publish": "`tp publish {id}` (a dry run: renders the reviewed draft and runs the pre-flight checks; the "
+               "first one runs the final checks too — run that one in the background, like `tp final`), then "
                "do what it prints: post a pre-approved one with `--preapproved`; otherwise show the human and ask "
                "once — batch every publish that is ready into the same question, in plain text if agents are in "
                "flight — then `tp publish {id} --answer \"<their words>\"`.",
@@ -367,7 +417,7 @@ GUIDE = {
             "question as every other ready gate and publish, in plain text if agents are in flight — and keep "
             "working the rest. Then `tp gate {id} --answer \"<their words>\"` (go ahead), or `--reopen T##` with "
             "their words (changes first).",
-    "final": "`tp final` — package checks and the report.",
+    "final": "`tp final` — package checks and the report.{why}",
     "closeout": "Closeout ({why}): `tp closeout` lists what was noticed; classify each (`tp closeout --items N,M "
                 "--class deferred|followup|observation --note \"<the issue and its consequence>\"`). Fix gaps in this "
                 "run's own deliverables yourself inside the allowance (`tp plan amend --delegated`); follow-ups go to "
@@ -918,18 +968,28 @@ def _expand_cmd(cmd: str, task: Optional[Dict[str, Any]], scope: Dict[str, Any])
         ws = _ws(scope, task["workspace"])
         files = _expand(ws, task["paths"])
         out = out.replace("{paths}", " ".join(shlex.quote(str(f)) for f in files))
-        # {dirs}: the task's own package directories, so a per-task check (`go vet {dirs}`) is not
-        # failed by another in-flight task's red tests elsewhere in the repository.
-        rels = [f.relative_to(ws) for f in files] + [
-            Path(p) for p in task["paths"] if planmod.wf_rel(p) is None and not any(ch in p for ch in "*?[")]
-        # A directory the task deleted is no package to check (`go vet ./gone` fails on it), and
-        # neither is one without code: fixtures (`testdata/`), templates, docs (`go vet` fails with
-        # "no Go files" — real runs looped fix rounds on it).
-        dirs = sorted({"./" + r.parent.as_posix() if r.parent != Path(".") else "." for r in rels
-                       if (ws / r.parent).is_dir() and "testdata" not in r.parent.parts
-                       and any(scopemod.is_code_file(c) for c in (ws / r.parent).iterdir() if c.is_file())})
-        out = out.replace("{dirs}", " ".join(shlex.quote(d) for d in dirs))
+        out = out.replace("{dirs}", " ".join(shlex.quote(d) for d in _task_dirs(cmd, task, scope)))
     return out
+
+
+# A Go tool in a check command, bare or behind a wrapper (`tools/with-toolchain go vet`).
+_GO_CMD = re.compile(r"(?:^|[\s;&|/(])(?:go|gofmt|golangci-lint|staticcheck)\s")
+
+
+def _task_dirs(cmd: str, task: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
+    """{dirs}: the task's own package directories, so a per-task check (`go vet {dirs}`) is not
+    failed by another in-flight task's red tests elsewhere in the repository."""
+    ws = _ws(scope, task["workspace"])
+    rels = [f.relative_to(ws) for f in _expand(ws, task["paths"])] + [
+        Path(p) for p in task["paths"] if planmod.wf_rel(p) is None and not any(ch in p for ch in "*?[")]
+    # A directory the task deleted is no package to check (`go vet ./gone` fails on it), and
+    # neither is one without code: fixtures (`testdata/`), templates, docs (`go vet` fails with
+    # "no Go files" — real runs looped fix rounds on it). A Go tool needs Go files: a real run
+    # handed `go vet` a scripts folder and a JavaScript mock folder (two fix rounds, two overrides).
+    code = (lambda c: c.suffix == ".go") if _GO_CMD.search(cmd) else (lambda c: scopemod.is_code_file(str(c)))
+    return sorted({"./" + r.parent.as_posix() if r.parent != Path(".") else "." for r in rels
+                   if (ws / r.parent).is_dir() and "testdata" not in r.parent.parts
+                   and any(code(c) for c in (ws / r.parent).iterdir() if c.is_file())})
 
 
 def _task_checks(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Dict[str, Any],
@@ -947,6 +1007,11 @@ def _task_checks(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan
         else:
             spec = plan["checks"][name]
             cwd = _ws(scope, spec["cwd"]) if spec.get("cwd") else ws
+            if "{dirs}" in spec["cmd"] and not _task_dirs(spec["cmd"], task, scope):
+                # Run bare, `go vet` would check the working directory instead: nothing of this
+                # task's is there to check.
+                log.write_text(f"skipped: none of the task's directories holds code for `{spec['cmd']}`")
+                continue
             ok, tail = _run_cmd(_expand_cmd(spec["cmd"], task, scope), cwd, log)
             if not ok:
                 failures.append(f"Check `{name}` failed (log {log}): {tail}")
@@ -2389,9 +2454,10 @@ def final_failure_advice(keys: List[str], baseline: Set[str], readonly: bool = F
     slow = [k.split(":")[1] for k in keys if k.endswith(":timeout")]
     if slow:
         out.append(f"{', '.join(slow)} ran past the {CHECK_TIMEOUT}s limit, which proves nothing either way. A slow "
-                   "check needs no code change: run it under the repo's pinned toolchain (`tp plan amend --delegated`, an "
-                   "env prefix only) or in parallel (`make -j4 ...`); any other rewrite — a narrower command — is a "
-                   "check change the plan reviewer or the human decides (`tp plan amend` says which).")
+                   "check needs no code change: run it under the repo's pinned toolchain (the survey's env prefix) or in "
+                   "parallel (`make -j4 <the same targets>`) — either is yours, `tp plan amend --delegated`; any other "
+                   "rewrite — a narrower command — is a check change the plan reviewer or the human decides (`tp plan "
+                   "amend` says which).")
     if any(not k.endswith(":timeout") for k in keys) or readonly:
         out.append("These are the run's to fix, not the human's: a failure in work a task delivered is a fix task "
                    "(`tp plan amend`; inside the fix-task allowance `--delegated`, past it the check says who decides); "
@@ -2478,29 +2544,13 @@ def cmd_final(wf: Workflow) -> str:
         if state["phase"] != "EXECUTING":
             raise TPError(f"final runs while EXECUTING; the workflow is {state['phase']}.")
         plan, scope, tasks = _loaded(wf, state)
-        open_ = [f"{t} ({ts['status']})" for t, ts in state["tasks"].items() if ts["status"] not in DONE_STATES]
-        if open_ or state["in_flight"]:
-            raise TPError(f"open tasks: {', '.join(open_ or list(state['in_flight']))}.")
-        reviews_open = _review().open_sessions(state)
-        if reviews_open:
-            raise TPError(f"review sessions still open: {', '.join(reviews_open)} — `tp next`.")
-        pending = _closeout_pending(wf, state)
-        if pending:
-            raise TPError(f"the closeout is open: {pending}. `tp closeout` lists the noticed items; classify each, "
-                          "and put deferred or follow-up work to the human (`tp closeout --ask`, then "
-                          "`tp closeout --decide --answer \"...\"`).")
-        keyed, results = _run_final_checks(wf, state, plan, scope)
-        baseline = set(state.get("final_baseline", []))
+        held = _held_posts(state, scope, tasks)
+        keyed, results = final_checks(wf, state, plan, scope, held)
+        if held:
+            return (f"Final checks pass on the finished work ({'; '.join(results) or 'no final checks'}). "
+                    f"Now the posts, last: {', '.join(held)} (`tp next`). Then `tp final` writes the report from "
+                    "these results.")
         left = state.get("baseline_left") or {}
-        stopping = [(key, f) for key, f in keyed if key not in set(left.get("keys", []))]
-        failures = [f + (" [pre-existing: it failed at the recorded baseline too]" if key in baseline else "")
-                    for key, f in stopping] + _readonly_changes(wf, state, scope)
-        if failures:
-            state["final_failed"] = failures[:50]
-            wf.save(state)
-            readonly_only = len(stopping) != len(failures)
-            raise TPError(*failures[:40], final_failure_advice([key for key, _ in stopping], baseline,
-                                                               readonly=readonly_only))
         state["final_left"] = [f for key, f in keyed if key in set(left.get("keys", []))]
         state["phase"] = "DONE"
         state["done"] = now_iso()
@@ -2509,6 +2559,65 @@ def cmd_final(wf: Workflow) -> str:
         (wf.root / "report.md").write_text(_report_md(wf, state, plan, scope, results))
         wf.event("done")
         return f"DONE — report: {wf.root / 'report.md'}. Present it to the human (answer-first)."
+
+
+def _held_posts(state: Dict[str, Any], scope: Dict[str, Any], tasks: Dict[str, Dict[str, Any]]) -> List[str]:
+    return [t for t, ts in state["tasks"].items() if ts["status"] == "pending" and t in tasks
+            and _integration_held(tasks[t], scope, state)]
+
+
+def final_checks(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any],
+                 held: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """The final checks on finished work: refused while work, review, or the closeout is open;
+    raises on a failure. With posts still held (`held`) they run before the posts and are
+    recorded; after the posts, that record is reused while nothing has moved."""
+    open_ = [f"{t} ({ts['status']})" for t, ts in state["tasks"].items()
+             if ts["status"] not in DONE_STATES and t not in held]
+    if open_ or state["in_flight"]:
+        raise TPError(f"open tasks: {', '.join(open_ or list(state['in_flight']))}.")
+    pending = _closeout_pending(wf, state)  # first: the whole-change review waits on it
+    if pending:
+        raise TPError(f"the closeout is open: {pending}. `tp closeout` lists the noticed items; classify each, "
+                      "and put deferred or follow-up work to the human (`tp closeout --ask`, then "
+                      "`tp closeout --decide --answer \"...\"`).")
+    reviews_open = _review().open_sessions(state)
+    if reviews_open:
+        raise TPError(f"review sessions still open: {', '.join(reviews_open)} — `tp next`.")
+    pre = state.get("prefinal") or {}
+    tree = _tree_sig(wf, scope) if (held or pre) else ""
+    if not held and pre.get("tree") == tree and pre.get("sig") == _work_sig(state):
+        # Checked before the post and nothing moved since: the post changed no workspace file.
+        keyed, results = [(k[0], k[1]) for k in pre.get("keyed", [])], list(pre.get("results", []))
+    else:
+        keyed, results = _run_final_checks(wf, state, plan, scope)
+    baseline = set(state.get("final_baseline", []))
+    left = state.get("baseline_left") or {}
+    stopping = [(key, f) for key, f in keyed if key not in set(left.get("keys", []))]
+    failures = [f + (" [pre-existing: it failed at the recorded baseline too]" if key in baseline else "")
+                for key, f in stopping] + _readonly_changes(wf, state, scope)
+    if failures:
+        state["final_failed"] = failures[:50]
+        wf.save(state)
+        readonly_only = len(stopping) != len(failures)
+        raise TPError(*failures[:40], final_failure_advice([key for key, _ in stopping], baseline,
+                                                           readonly=readonly_only))
+    if held:
+        # The tree as the checks left it: a check that writes into the workspace (coverage, build
+        # output) must not make the run after the post look changed.
+        tree = _tree_sig(wf, scope)
+        state["prefinal"] = {"sig": _work_sig(state), "tree": tree, "keyed": [list(k) for k in keyed],
+                             "results": results, "ts": now_iso()}
+        state.pop("final_failed", None)
+        wf.save(state)
+        wf.event("prefinal", held=held)
+    return keyed, results
+
+
+def _tree_sig(wf: Workflow, scope: Dict[str, Any]) -> str:
+    """The write workspaces' content, for reusing a check run: the same snapshot every record takes."""
+    snaps = {name: _take(wf, Path(w["path"])) for name, w in sorted(scopemod.workspaces(scope).items())
+             if w["mode"] == "write"}
+    return hashlib.sha1(json.dumps(snaps, sort_keys=True).encode()).hexdigest()
 
 
 def _published_to(task: Dict[str, Any]) -> str:
@@ -2591,15 +2700,19 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
     calls = manager_calls(state)
     if calls:
         out += ["", "## Gates the manager settled (each read by the final review)", ""] + [f"- {c}" for c in calls]
-    notes = [f"- {tid}: {ts['note']}" for tid, ts in state["tasks"].items() if ts.get("note")]
+    by_note: Dict[str, List[str]] = {}
+    for tid, ts in state["tasks"].items():  # one note for a wave accepted together prints once
+        if ts.get("note"):
+            by_note.setdefault(ts["note"], []).append(tid)
+    notes = [f"- {', '.join(tids)}: {note}" for note, tids in by_note.items()]
     if notes:
         out += ["", "## Manager fact-check notes", ""] + notes
     delegated = [a for a in state.get("amendments", []) if a.get("delegated")]
     if delegated:
         out += ["", "## Fix tasks added under your standing delegation", "",
                 "Added by the manager without a question, inside the fix-task allowance you gave at scope time:", ""]
-        out += [f"- {tid} — {tasks[tid]['title'] if tid in tasks else '?'}: {a.get('note')}"
-                for a in delegated for tid in a.get("tasks", [])]
+        out += [f"- {', '.join(f'{tid} — ' + (tasks[tid]['title'] if tid in tasks else '?') for tid in a['tasks'])}: "
+                f"{a.get('note')}" for a in delegated if a.get("tasks")]
     reviewed = ([f"- {', '.join(a.get('tasks') or []) or 'plan'}: {a.get('note')} — the reviewer: {a.get('reason')}"
                  for a in state.get("amendments", []) if a.get("reviewed")]
                 + [f"- scope: {a.get('note')} — the reviewer: {a.get('reason')}"
@@ -2632,6 +2745,14 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
               "followup": "Suggested follow-ups (outside this run's scope — file them if you agree)",
               "observation": "Observations — no action taken",
               "unclassified": "Noticed, not in plan (for you to decide)"}
+    if groups["observation"]:
+        # Nobody acts on an observation: a real run's ran to 39KB of an 85KB report. They keep
+        # their own file, beside the report.
+        (wf.root / "observations.md").write_text("# Observations — no action taken\n\n"
+                                                 + "\n".join(groups["observation"]) + "\n")
+        n = len(groups["observation"])
+        groups["observation"] = [f"- {n} observation{'s' if n != 1 else ''}, each with the manager's note: "
+                                 "`observations.md`."]
     for cls, lines in groups.items():
         if lines:
             out += ["", f"## {titles[cls]}", ""] + lines

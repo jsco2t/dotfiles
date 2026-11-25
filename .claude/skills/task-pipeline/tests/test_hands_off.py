@@ -308,6 +308,7 @@ class PinnedCheckAmendTest(unittest.TestCase):
     def test_an_env_prefix_on_a_check_is_the_managers_to_settle(self) -> None:
         h = Harness()
         try:
+            (h.src / ".go-version").write_text("1.26.2\n")
             h.approved(h.plan(checks={"unit": {"cmd": "true"}}, final_checks=["docs-all", "unit"]))
             h.tp("plan", "amend")
             draft = h.read_json("plan-amend.json")
@@ -341,6 +342,7 @@ class PinnedCheckAmendTest(unittest.TestCase):
     def test_the_survey_prefix_itself_is_the_managers_to_settle(self) -> None:
         h = Harness()
         try:
+            (h.src / ".go-version").write_text("1.26.2\n")
             h.approved(h.plan(checks={"unit": {"cmd": "true"}}, final_checks=["docs-all", "unit"]))
             h.tp("plan", "amend")
             draft = h.read_json("plan-amend.json")
@@ -349,6 +351,22 @@ class PinnedCheckAmendTest(unittest.TestCase):
             self.assertNotIn("Ask the human", h.tp("plan", "amend").out)
         finally:
             h.close()
+
+    def test_a_version_no_workspace_pins_goes_to_the_human(self) -> None:
+        for pinned in (None, "1.26.2"):
+            with self.subTest(pinned=pinned):
+                h = Harness()
+                try:
+                    if pinned:
+                        (h.src / ".go-version").write_text(pinned + "\n")
+                    h.approved(h.plan(checks={"unit": {"cmd": "true"}}, final_checks=["docs-all", "unit"]))
+                    h.tp("plan", "amend")
+                    draft = h.read_json("plan-amend.json")
+                    draft["checks"]["unit"]["cmd"] = survey.pin_prefix("1.20.0") + "true"
+                    (h.wf / "plan-amend.json").write_text(json.dumps(draft))
+                    self.assertIn("Ask the human", h.tp("plan", "amend").out)
+                finally:
+                    h.close()
 
     def test_any_other_rewrite_still_goes_to_the_human(self) -> None:
         h = Harness()

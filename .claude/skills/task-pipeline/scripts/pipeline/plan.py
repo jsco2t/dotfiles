@@ -111,6 +111,23 @@ def review_sessions(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[Dict[st
     return out
 
 
+WHOLE = "W"
+
+
+def whole_change_session(plan: Dict[str, Any], scope: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """`/reviewomatic` in local mode over the whole change, once, after every batch review and the
+    closeout; everything it reports at 80% confidence or more is fixed. In a real run the batch
+    reviews passed and a /reviewomatic pass afterwards found about eight real defects. It routes
+    code and documents to the right specialist reviewers itself."""
+    if not scopemod.final_reviewers(scope):
+        return None
+    work = [t["id"] for t in plan["tasks"] if not is_integration(t, scope) and not is_gate(t)]
+    if not work:
+        return None
+    return {"sid": f"{WHOLE}/code-reviewer", "batch": WHOLE, "reviewer": "code-reviewer", "lenses": [],
+            "tasks": work, "code": True, "whole": True}
+
+
 def session_minutes(batch: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any]) -> int:
     """How long one reviewer needs for a batch: review time grows with what it reviews."""
     tasks = {t["id"]: t for t in plan["tasks"]}
@@ -644,6 +661,10 @@ def render(plan: Dict[str, Any], scope: Dict[str, Any], wf: Workflow) -> str:
                 "its whole batch. An all-code batch is reviewed once its code is accepted; any other batch once "
                 f"every task is accepted and the code reviews are done (document review once the code reviews are done). Then at most {sessions} verification session{'s' if sessions > 1 else ''} scoped "
                 f"to what they find (about {tail} min). Integration tasks run after the review.", ""]
+        whole = whole_change_session(plan, scope)
+        if whole:
+            out += [f"**Whole-change review:** {whole['sid']} (/reviewomatic) reviews the whole change once, after "
+                    "the batch reviews and the closeout; its fixes get one verification scoped to its findings.", ""]
     out += [
            "| Task | Title | Agent | Review | Est | After | Writes |", "|---|---|---|---|---|---|---|"]
     for t in tasks.values():
@@ -945,28 +966,64 @@ _PIN_FORMS = [re.compile(rf"export GOTOOLCHAIN=go(?P<v>{_V}) {_GOROOT_PATH}; "),
               re.compile(rf"GOTOOLCHAIN=go(?P<v>{_V}) ")]
 
 
-def toolchain_pinned(old: str, new: str) -> bool:
-    """True when `new` is `old` run under the repository's pinned Go, in one of the exact forms
-    `tp survey` prints (`export GOTOOLCHAIN=go1.x.y PATH="$(...go env GOROOT)/bin:$PATH"; cmd`)."""
-    new = new.strip()
+def toolchain_pinned(old: str, new: str, pinned: Set[str]) -> bool:
+    """True when `new` is `old` run under a Go version a workspace pins (`pinned`), in one of the
+    exact forms `tp survey` prints (`export GOTOOLCHAIN=go1.x.y PATH="$(...go env GOROOT)/bin:$PATH"; cmd`)."""
+    pin, rest = _split_pin(new, pinned)
+    return bool(pin) and rest == old.strip()
+
+
+def _split_pin(cmd: str, pinned: Set[str]) -> Tuple[str, str]:
+    """(the pin prefix, the command after it) — ("", cmd) when it carries no pin to a pinned version."""
+    cmd = cmd.strip()
     for form in _PIN_FORMS:
-        m = form.match(new)
-        if m and new[m.end():].strip() == old.strip():
-            return True
-    return False
+        m = form.match(cmd)
+        if m and m.group("v") in pinned:
+            return m.group(0), cmd[m.end():].strip()
+    return "", cmd
 
 
-def _pinned_checks(approved: Dict[str, Any], draft: Dict[str, Any]) -> Optional[List[str]]:
-    """The checks an amendment only pinned to a toolchain; None if it changed checks any other way."""
+# `make -jN <targets>` runs exactly the targets `make <targets>` runs, N at a time: a slow check
+# made to finish inside the limit, never a different check. Only the job count may be added.
+_PARALLEL_MAKE = re.compile(r"make -j(?:[2-9]|[1-5]\d|6[0-4]) (?P<rest>\S.*)")
+
+
+def _parallel_make(old: str, new: str) -> bool:
+    m = _PARALLEL_MAKE.fullmatch(new.strip())
+    return bool(m) and old.strip().startswith("make ") and m.group("rest") == old.strip()[len("make "):].strip()
+
+
+def same_check(old: str, new: str, pinned: Set[str]) -> bool:
+    """True when `new` runs the same work as `old`: under the Go version a workspace pins, in
+    parallel (`make -jN`), or both. Anything else could change what the check proves."""
+    old_pin, old_rest = _split_pin(old, pinned)
+    new_pin, new_rest = _split_pin(new, pinned)
+    if old_pin and new_pin != old_pin:
+        return False  # an existing pin stays exactly as it is
+    base = old_rest if old_pin else old.strip()
+    return new.strip() != old.strip() and (new_rest == base or _parallel_make(base, new_rest))
+
+
+def workspace_pins(scope: Dict[str, Any]) -> Set[str]:
+    """The Go versions the run's workspaces pin, read the way `tp survey` reads them."""
+    from . import survey
+    return {p["version"] for w in scopemod.workspaces(scope).values()
+            for p in survey.toolchain_pins(Path(w["path"]))}
+
+
+def _pinned_checks(approved: Dict[str, Any], draft: Dict[str, Any], scope: Dict[str, Any]) -> Optional[List[str]]:
+    """The checks an amendment only pinned to the toolchain a workspace pins or ran in parallel
+    (`same_check`); None if it changed checks any other way (or to a version no workspace pins)."""
     old, new = approved.get("checks") or {}, draft.get("checks") or {}
     if set(old) != set(new):
         return None
+    versions = workspace_pins(scope) if old != new else set()
     pinned = []
     for name, spec in old.items():
         if new[name] == spec:
             continue
         rest_same = {k: v for k, v in spec.items() if k != "cmd"} == {k: v for k, v in new[name].items() if k != "cmd"}
-        if not rest_same or not toolchain_pinned(str(spec.get("cmd", "")), str(new[name].get("cmd", ""))):
+        if not rest_same or not same_check(str(spec.get("cmd", "")), str(new[name].get("cmd", "")), versions):
             return None
         pinned.append(name)
     return pinned
@@ -980,7 +1037,7 @@ def _delegation_misfit(approved: Dict[str, Any], draft: Dict[str, Any], scope: D
     reported, and never a gate (nor a reason to shrink a task to fit)."""
     fx = scopemod.fix_tasks(scope)
     allow = int(fx.get("allow") or 0)
-    pins_only = _pinned_checks(approved, draft) is not None
+    pins_only = _pinned_checks(approved, draft, scope) is not None
     if pins_only:
         changes = [c for c in changes if c != "checks changed"]
         if not changes:
@@ -1154,9 +1211,9 @@ def cmd_amend(wf: Workflow, answer: Optional[str], delegated: bool = False, note
                               "report shows it to the human).")
             added = [t["id"] for t in draft["tasks"] if t["id"] not in {a["id"] for a in approved["tasks"]}]
             state["delegated"] = list(state.get("delegated", [])) + added
-            pinned = _pinned_checks(approved, draft)
+            pinned = _pinned_checks(approved, draft, scope)
             label = (f"plan amend (fix-task delegation, {len(state['delegated'])} of {allow})" if added else
-                     f"plan amend (checks pinned to the repo's toolchain: {', '.join(pinned or [])})" if pinned else
+                     f"plan amend (checks pinned to the repo's toolchain or run in parallel: {', '.join(pinned or [])})" if pinned else
                      "plan amend (manager-settled)")
             _apply_amendment(wf, state, draft, scope, changes, {"delegated": True, "note": " ".join(note.split()),
                                                                 "tasks": added})
@@ -1419,7 +1476,7 @@ def _plan_human_reasons(approved: Dict[str, Any], draft: Dict[str, Any], scope: 
     if set(approved.get("final_checks", [])) - set(draft.get("final_checks", [])):
         out.append("it drops a final check")
     if (any(k not in (draft.get("checks") or {}) or draft["checks"][k] != v
-            for k, v in (approved.get("checks") or {}).items()) and _pinned_checks(approved, draft) is None):
+            for k, v in (approved.get("checks") or {}).items()) and _pinned_checks(approved, draft, scope) is None):
         out.append("it removes or rewrites a check command")
     if approved.get("questions") != draft.get("questions"):
         out.append("it changes the plan's questions")

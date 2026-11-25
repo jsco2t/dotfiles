@@ -668,6 +668,7 @@ class BatchReviewTest(unittest.TestCase):
         h.tp("dispatch", "B2/doc-reviewer")
         self.review("B2/doc-reviewer", 1, "pass")
         h.tp("record", "B2/doc-reviewer")
+        h.whole_pass()
         h.tp("final")
         report = (h.wf / "report.md").read_text()
         self.assertIn("accepted as is by the human: Stray is mine.", report)
@@ -681,11 +682,13 @@ class BatchReviewTest(unittest.TestCase):
         self.review("B2/doc-reviewer", 1, "pass")
         h.tp("record", S1)
         h.tp("record", "B2/doc-reviewer")
+        self.assertEqual(h.next()["actions"][0]["id"], "W/code-reviewer")  # /reviewomatic over the whole, once
+        h.whole_pass()
         self.assertEqual(h.next()["actions"][0]["action"], "final")
         h.tp("final")
         report = (h.wf / "report.md").read_text()
         self.assertIn("B1/doc-reviewer", report)
-        self.assertIn("2 review sessions", report)
+        self.assertIn("3 review sessions", report)
 
 
 class HaltTest(unittest.TestCase):

@@ -243,6 +243,10 @@ def cmd_publish(wf: Workflow, tid: str, answer: Optional[str], preapproved: bool
         ts = state["tasks"][tid]
         if ts["status"] in run.DONE_STATES:
             raise TPError(f"{tid} is already {ts['status']}: it posts once ({ts.get('note') or ''}).")
+        if ts["status"] == "pending" and run._awaits_checks(task, state) and not run._deps_open(task, state):
+            # The post goes last: the final checks run first, on the finished work (refused while
+            # work, review, or the closeout is still open), so the question can say they passed.
+            run.final_checks(wf, state, plan, scope, run._held_posts(state, scope, tasks))
         act = run._action_for(tid, ts, task, scope, state)
         if not act or act.get("action") != "publish":
             raise TPError(f"{tid} is not ready to publish: it waits on its dependencies, and on every other task and "

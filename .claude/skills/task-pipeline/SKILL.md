@@ -121,11 +121,13 @@ baseline --leave --answer "..."`). Loop:
   accept <id> --override --note "<evidence>"` (even once its fix round is printed); a test
   correction → `tp rebaseline-tests --by manager`; another round → `tp resolve --action retry`; a
   question the evidence settles → `--action answer --by manager`; a fix task inside the allowance,
-  a check pinned to the repo's toolchain, or plumbing scope → `tp plan|scope amend --delegated`; more than that which strengthens the run
+  a check pinned to the repo's toolchain or run as `make -jN`, or plumbing scope → `tp plan|scope amend --delegated`; more than that which strengthens the run
   → `--review --note`, send the call, `--record` (the reviewer decides; the check says which).
 - **For the human** (Rule 1): `tp ask --about <id>`, keep working, then `tp answer` and the
   `tp resolve … --by human` it prints; a plan change is checked first (`tp plan amend`).
-- **gate / publish** → `tp gate <id>` / `tp publish <id>` (dry run); pre-approved posts:
+- **gate / publish** → `tp gate <id>` / `tp publish <id>` (dry run; posts come last, after the
+  closeout; the first dry run runs the final checks:
+  run it in the background); pre-approved posts:
   `tp publish <id> --preapproved`, no question; else every ready one in one question; then
   `--answer "<their words>"` (a gate: `--reopen T##` for changes first).
 - **wait** → end your turn. `tp digest` on a status question; TaskStop only an agent it calls
@@ -133,9 +135,10 @@ baseline --leave --answer "..."`). Loop:
 
 ## Stage 6 — Closeout and final
 
-`tp closeout`: classify in bulk. Fix gaps in this run's own work — a final check it broke
+`tp closeout`: classify in bulk; then `W/code-reviewer` runs /reviewomatic once over the whole change; fix every ≥80% finding. Fix gaps in this run's own work — a final check it broke
 included — yourself (`tp plan amend --delegated`); out-of-scope follow-ups go to the report unasked; only deferred work (asked for,
-left undone) goes to the human, once. `tp final` writes `report.md`; present it answer-first —
+left undone) goes to the human, once. Posts follow the closeout; then `tp final` writes `report.md`
+(reusing the checks the post ran); present it answer-first —
 delivered work, coverage, time, review outcome, gates you settled, what they decide.
 Committing and pushing are theirs.
 

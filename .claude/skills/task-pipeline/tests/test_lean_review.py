@@ -29,7 +29,8 @@ class PackedSessionsTest(unittest.TestCase):
         # code from documents, so code review can start before the documents are written.
         reviews = self.m.h.state()["reviews"]
         units = [LENSES.split("/")[1], "doc-reviewer", "test-reviewer"]
-        self.assertEqual(sorted(reviews), sorted(f"{b}/{u}" for b in ("B1", "B2") for u in units))
+        self.assertEqual(sorted(reviews), sorted([f"{b}/{u}" for b in ("B1", "B2") for u in units]
+                                                 + ["W/code-reviewer"]))  # then /reviewomatic over the whole
         self.assertEqual(reviews[LENSES]["lenses"], ["correctness-reviewer", "security-reviewer"])
         self.assertEqual(reviews[LENSES]["tasks"], ["T01"])
         self.assertEqual(reviews["B1/doc-reviewer"]["tasks"], ["T01"])
@@ -113,7 +114,7 @@ class OneCodeLensIsNotPackedTest(unittest.TestCase):
         m = Mixed()
         try:
             m.approve([m.code_task("T01")], m.scope(["code"], ["tests", "code", "correctness"]))
-            self.assertEqual(list(m.h.state()["reviews"]), ["B1/correctness-reviewer"])
+            self.assertEqual(list(m.h.state()["reviews"]), ["B1/correctness-reviewer", "W/code-reviewer"])
         finally:
             m.close()
 

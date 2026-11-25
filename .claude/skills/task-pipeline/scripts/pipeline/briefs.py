@@ -311,6 +311,33 @@ def batch_review(bid: str, reviewer: str, tasks: List[Dict[str, Any]], ctx: Dict
     return "\n".join(out + _handback(result, BATCH_REVIEW_SCHEMA.format(bid=bid))) + "\n"
 
 
+def whole_review(tasks: List[Dict[str, Any]], ctx: Dict[str, Any], result: Path) -> str:
+    """`/reviewomatic` over the whole change, with fresh eyes: it batches the change across its own
+    sub-agents and routes code and documents to the right specialists. It is told nothing of the
+    plan, the tasks, or the run's decisions — the change has to stand on its own. The pipeline
+    routes each finding to the task that owns its file. Nothing else in the run is in flight."""
+    files = [p for t in tasks for p in ctx["paths"][t["id"]]]
+    out = ["# /task-pipeline whole-change review — W · code-reviewer", "",
+           "This brief is your complete contract: it replaces any result format or report path your definition "
+           "names. " + _estimate("30 min for the whole change"), "",
+           "## Review this change with fresh eyes", "",
+           "You know nothing of why this change was made or what it was meant to do, and that is deliberate: "
+           "judge the code as it stands, as a reviewer meeting it for the first time. Run:", "", "```",
+           "Skill: reviewomatic",
+           f"  args: \"local --confidence=80 -- Review only the change in {ctx['changes']} (the diff: "
+           f"{ctx['diff_file']}). Come at it with fresh eyes: assume nothing about the intent behind it, and "
+           "judge only what the code and documents actually do. Other uncommitted work in the tree is context "
+           "only. Do not ask about scope. Do not post anything anywhere.\"",
+           "```", "",
+           "Use the skill's own sub-agent budget: nothing else runs while you do. Do not edit any file.", "",
+           "Report **every** finding at confidence 80 or more as `blocking: true` — each one gets fixed — with "
+           "the workspace-relative `path:line` it is about; below 80, one line in `near_misses`. `verdict` is "
+           "`changes` exactly when a finding is blocking.", "",
+           "Files in the change:"] + [f"- `{p}`" for p in files]
+    out += _conventions_line(ctx) + [""] + _style()
+    return "\n".join(out + _handback(result, BATCH_REVIEW_SCHEMA.format(bid="W"))) + "\n"
+
+
 def verify(bid: str, reviewer: str, findings: List[Dict[str, Any]], ctx: Dict[str, Any], result: Path,
            same_agent: bool) -> str:
     out = [f"# /task-pipeline verification brief — {bid} · {reviewer}", ""]

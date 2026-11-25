@@ -166,6 +166,7 @@ class EmptyHandbackTest(unittest.TestCase):
                       brief="Post the approved status comment on the calc epic.",
                       acceptance=["The comment is on the epic, read back."])
         h.approved(h.plan([task], final_checks=[]), **scope)
+        h.tp("final")  # posts go last: the final checks (none here) run first
         h.tp("dispatch", "T01")
         h.result("T01", "author", changed=[], summary="Posted the comment; read it back.")
         out = h.tp("record", "T01", "--agent-id", "liaison-1").out

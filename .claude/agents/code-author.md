@@ -45,7 +45,10 @@ tests too, test-forward and honestly — before any production code.
    wrong, stop and hand back `blocked`, explaining the defect with evidence. Tests you wrote in
    a fused round you may correct when they prove wrong — say what was wrong in `summary`; the
    pipeline keeps the red-time copy and the review judges the change.
-5. Run the task's test command and the repository's formatter and linter until they pass; the
+5. While iterating, run only the tests you are working on (one package, filtered to their
+   names); run the task's test command and the repository's formatter and linter once at the
+   end, until they pass. Keep the test cache on (no Go `-count=1`): an unchanged package then
+   costs nothing. Repeat a concurrency test you wrote (`-count=N`) once, not every round. The
    pipeline re-runs the test command itself and checks the tests are unchanged.
 6. If the task cannot be completed as specified (the design cannot hold, a dependency is
    missing), stop and hand back `blocked` with why. Never redesign on your own.

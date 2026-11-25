@@ -56,6 +56,14 @@ def new_reviews(plan: Dict[str, Any], scope: Dict[str, Any], existing: Dict[str,
         if cur["status"] == "pending":
             cur.update(lenses=spec["lenses"], tasks=spec["tasks"], code=spec["code"])
         sessions[spec["sid"]] = cur
+    whole = planmod.whole_change_session(plan, scope)
+    if whole:
+        cur = existing.get(whole["sid"]) or {
+            "batch": whole["batch"], "reviewer": whole["reviewer"], "status": "pending", "round": 0, "agent_id": None,
+            "findings": [], "accepted": [], "dismissed": {}, "fix_tasks": [], "extra_rounds": 0, "whole": True}
+        if cur["status"] == "pending":
+            cur.update(lenses=whole["lenses"], tasks=whole["tasks"], code=True)
+        sessions[whole["sid"]] = cur
     for sid, s in existing.items():
         if sid not in sessions and s["status"] != "pending":
             sessions[sid] = s
@@ -76,6 +84,9 @@ def open_sessions(state: Dict[str, Any]) -> List[str]:
 
 def _batch_tasks(plan: Dict[str, Any], scope: Dict[str, Any], bid: str) -> List[Dict[str, Any]]:
     tasks = {t["id"]: t for t in plan["tasks"]}
+    if bid == planmod.WHOLE:
+        whole = planmod.whole_change_session(plan, scope)
+        return [tasks[t] for t in (whole or {}).get("tasks", []) if t in tasks]
     for b in planmod.review_batches(plan, scope):
         if b["id"] == bid:
             return [tasks[t] for t in b["tasks"]]
@@ -104,6 +115,9 @@ def waits_on(state: Dict[str, Any], s: Dict[str, Any]) -> List[str]:
         return []
     if "tasks" not in s:
         return open_(list(tasks))
+    if s.get("whole"):  # after every code change: all the work, and every batch review
+        work = [t for t in tasks if t not in state.get("integration", [])]
+        return open_(work) + [sid for sid, o in sessions(state).items() if not o.get("whole") and o["status"] != "done"]
     own = open_(s["tasks"])
     if own or s.get("code"):
         return own
@@ -113,7 +127,8 @@ def waits_on(state: Dict[str, Any], s: Dict[str, Any]) -> List[str]:
     behind = {t for d in (state.get("gates") or {}).values() if not mine & set(d) for t in d}
     work = [t for t in tasks if t not in state.get("integration", []) and t not in behind]
     return open_(work) + [sid for sid, o in sessions(state).items()
-                          if o.get("code") and o["status"] != "done" and not behind & set(o.get("tasks", []))]
+                          if o.get("code") and not o.get("whole") and o["status"] != "done"
+                          and not behind & set(o.get("tasks", []))]
 
 
 def _ready(state: Dict[str, Any], s: Dict[str, Any]) -> bool:
@@ -224,6 +239,11 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
             raise TPError(f"{sid} verifies once {', '.join(s['fix_tasks'])} are accepted again.")
     else:
         raise TPError(f"{sid} is {s['status']}; there is nothing to dispatch.")
+    if s.get("whole") and s["status"] == "pending":
+        pending = run._closeout_pending(wf, state)
+        if pending:
+            raise TPError(f"{sid} reviews the whole change once, after the closeout (which can still add fix tasks): "
+                          f"{pending} — `tp closeout` first.")
     run._slots(state)
     n = s["round"] + 1
     tasks = session_tasks(plan, scope, s)
@@ -250,7 +270,9 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
     fresh = run.fresh_note(agent_id)
     if fresh:
         agent_id = None
-    if n == 1:
+    if n == 1 and s.get("whole"):
+        brief.write_text(briefs.whole_review(tasks, ctx, result))
+    elif n == 1:
         brief.write_text(briefs.batch_review(s["batch"], s["reviewer"], tasks, ctx, result))
     else:
         accepted = [f for f in s["findings"] if f["id"] in s["accepted"]]
@@ -327,7 +349,8 @@ def _outcome(s: Dict[str, Any], sid: str, n: int, blocking: List[Dict[str, Any]]
     """Where a recorded review goes on its findings alone."""
     if not blocking:
         return {"status": "done"}
-    if n == 1 or n < limit("max_review_rounds") + s.get("extra_rounds", 0):
+    # The whole-change review runs once; its fixes get one verification, then the human decides.
+    if n == 1 or (not s.get("whole") and n < limit("max_review_rounds") + s.get("extra_rounds", 0)):
         return {"status": "needs_triage"}
     return {"status": "blocked", "block": "rounds",
             "summary": f"{sid} still has {len(blocking)} blocking findings after verification"}

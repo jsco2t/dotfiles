@@ -22,7 +22,10 @@ from .common import (TP_SCRIPT, TPError, Workflow, agent_context_tokens, gap_min
                      now_iso, sha_file, waiting_gaps, words)
 
 DONE_STATES = ("accepted", "skipped")
-CHECK_TIMEOUT = 540
+CHECK_TIMEOUT = 540     # a task's tests and checks: they run inside a foreground `tp record`
+# The final checks run in the background (`tp final`, the first publish dry run): a whole suite
+# needs longer. Real runs' `make test` passed in 11 and 17 minutes after timing out at 540s.
+FINAL_CHECK_TIMEOUT = 45 * 60
 SUMMARY_WORDS = 80      # what a hand-back summary is shown at
 SUMMARY_CEILING = 300   # past this the agent rewrites it
 
@@ -417,7 +420,8 @@ GUIDE = {
             "question as every other ready gate and publish, in plain text if agents are in flight — and keep "
             "working the rest. Then `tp gate {id} --answer \"<their words>\"` (go ahead), or `--reopen T##` with "
             "their words (changes first).",
-    "final": "`tp final` — package checks and the report.{why}",
+    "final": "`tp final` (run it in the background: the final checks may take many minutes) — package checks and "
+             "the report.{why}",
     "closeout": "Closeout ({why}): `tp closeout` lists what was noticed; classify each (`tp closeout --items N,M "
                 "--class deferred|followup|observation --note \"<the issue and its consequence>\"`). Fix gaps in this "
                 "run's own deliverables yourself inside the allowance (`tp plan amend --delegated`); follow-ups go to "
@@ -843,13 +847,14 @@ def _trimmed(text: str, limit: int = SUMMARY_WORDS) -> str:
     return " ".join(ws[:limit]) + (" …" if len(ws) > limit else "")
 
 
-def _run_cmd(cmd: str, cwd: Path, log: Path) -> Tuple[bool, str]:
+def _run_cmd(cmd: str, cwd: Path, log: Path, timeout: Optional[int] = None) -> Tuple[bool, str]:
+    timeout = timeout or CHECK_TIMEOUT
     try:
         proc = subprocess.run(["bash", "-c", cmd], cwd=str(cwd), capture_output=True, text=True,
-                              timeout=CHECK_TIMEOUT)
+                              timeout=timeout)
         output, ok = proc.stdout + proc.stderr, proc.returncode == 0
     except subprocess.TimeoutExpired:
-        output, ok = f"timed out after {CHECK_TIMEOUT}s", False
+        output, ok = f"timed out after {timeout}s", False
     log.write_text(f"$ {cmd}\n(cwd {cwd})\n\n{output}")
     tail = "\n".join(output.strip().splitlines()[-12:])
     return ok, tail
@@ -889,7 +894,10 @@ BEHAVIOUR_STATES = ("wrong", "broken", "gap", "missing")
 FIX_ROUTES = ("impl", "tests-green", "tests-red")
 # A finding about words, not behaviour (a missing or stale comment, a typo): no failing test can
 # prove it, so it never opens a red-test round (real runs forced red on comment-only findings).
-_WORDING = re.compile(r"\b(comments?|docstrings?|godoc|doc comment|typos?|spelling|wording|misspell\w*)\b", re.I)
+_WORDING = re.compile(r"\b(comments?|docstrings?|godoc|doc comment|package doc\w*|typos?|spelling|wording|"
+                      r"misspell\w*)\b", re.I)
+# Go's package overview: by convention the file holds only the package comment.
+_DOC_FILE = re.compile(r"(^|/)doc\.go$")
 
 
 def fix_route(task: Dict[str, Any], scope: Dict[str, Any], finding: Dict[str, Any]) -> str:
@@ -907,7 +915,7 @@ def fix_route(task: Dict[str, Any], scope: Dict[str, Any], finding: Dict[str, An
     if task.get("tests_paths") and snapshot.matches(rel, task["tests_paths"]):
         return "tests-green"
     if (finding.get("state") in BEHAVIOUR_STATES and task.get("tests_paths")
-            and not _WORDING.search(str(finding.get("issue", "")))):
+            and not _WORDING.search(str(finding.get("issue", ""))) and not _DOC_FILE.search(rel)):
         return "tests-red"
     return "impl"
 
@@ -968,12 +976,23 @@ def _expand_cmd(cmd: str, task: Optional[Dict[str, Any]], scope: Dict[str, Any])
         ws = _ws(scope, task["workspace"])
         files = _expand(ws, task["paths"])
         out = out.replace("{paths}", " ".join(shlex.quote(str(f)) for f in files))
+        out = out.replace("{files}", " ".join(shlex.quote(str(f)) for f in _task_files_for(cmd, task, scope)))
         out = out.replace("{dirs}", " ".join(shlex.quote(d) for d in _task_dirs(cmd, task, scope)))
     return out
 
 
 # A Go tool in a check command, bare or behind a wrapper (`tools/with-toolchain go vet`).
 _GO_CMD = re.compile(r"(?:^|[\s;&|/(])(?:go|gofmt|golangci-lint|staticcheck)\s")
+
+
+def _task_files_for(cmd: str, task: Dict[str, Any], scope: Dict[str, Any]) -> List[Path]:
+    """{files}: the files the task writes in its workspace (never a workflow draft: a Jira draft
+    names its ticket, which a tracker check forbids in the code). A Go tool gets only the Go ones:
+    `gofmt` fails on YAML and testdata. A real run's gofmt and tracker checks never had this
+    substituted and passed 14 times having checked nothing."""
+    ws = _ws(scope, task["workspace"])
+    files = _expand(ws, [p for p in task["paths"] if planmod.wf_rel(p) is None])
+    return [f for f in files if f.suffix == ".go"] if _GO_CMD.search(cmd) else files
 
 
 def _task_dirs(cmd: str, task: Dict[str, Any], scope: Dict[str, Any]) -> List[str]:
@@ -1012,6 +1031,10 @@ def _task_checks(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan
                 # task's is there to check.
                 log.write_text(f"skipped: none of the task's directories holds code for `{spec['cmd']}`")
                 continue
+            if "{files}" in spec["cmd"] and not _task_files_for(spec["cmd"], task, scope):
+                # Run bare, `gofmt -l` and `grep` read stdin instead: nothing of this task's to check.
+                log.write_text(f"skipped: the task writes no file for `{spec['cmd']}`")
+                continue
             ok, tail = _run_cmd(_expand_cmd(spec["cmd"], task, scope), cwd, log)
             if not ok:
                 failures.append(f"Check `{name}` failed (log {log}): {tail}")
@@ -1036,7 +1059,9 @@ def _sibling_red(wf: Workflow, state: Dict[str, Any], tasks: Dict[str, Dict[str,
                  label: str) -> List[str]:
     """The sibling tasks that explain every failure location in this step's test and check logs:
     their tests share this task's test run or build (one Go package, one test discovery) and are red
-    until their own implementations land. Empty when any location is this task's or nobody's."""
+    until their own implementations land, or the location is in a file of theirs (never this
+    task's) that their implementation is still changing — a live run's build failed in a store file
+    a sibling was mid-way through changing. Empty when any location is this task's or nobody's."""
     logs = [wf.run_dir(tid) / f"tests-{label}.log"] + sorted(wf.run_dir(tid).glob(f"check-*-{label}.log"))
     root = ws.resolve()
     locs: set = set()
@@ -1061,7 +1086,8 @@ def _sibling_red(wf: Workflow, state: Dict[str, Any], tasks: Dict[str, Dict[str,
             continue
         if ots["status"] == "blocked" and (ots.get("blocked") or {}).get("kind") == "sibling":
             continue  # its implementation is in, so its red tests are a real failure, and two waits would deadlock
-        hit = [loc for loc in locs if snapshot.matches(loc, ot["tests_paths"])]
+        hit = [loc for loc in locs if snapshot.matches(loc, ot["tests_paths"])
+               or (snapshot.matches(loc, ot["paths"]) and not snapshot.matches(loc, tasks[tid]["paths"]))]
         if hit:
             owners[other] = hit
     explained = {loc for hits in owners.values() for loc in hits}
@@ -1139,7 +1165,7 @@ def cmd_recheck(wf: Workflow, tid: str) -> str:
         ws = _ws(scope, task["workspace"])
         label = f"recheck-{ts['round']}"
         findings: List[str] = []
-        if effective == "impl":
+        if effective in ("impl", "build"):  # a fused build runs its tests too, as `tp record` did
             ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
             if not ok:
                 findings.append(f"The tests are not green: `{task['test_cmd']}` failed: {tail}")
@@ -1579,8 +1605,8 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
                              "since": now_iso(),
                              "summary": f"{tid} waits on {', '.join(waits_on)}: its only failures are in their "
                                         "still-red tests"}
-            out = (f"{tid} waits on {', '.join(waits_on)}: every failure is in their tests, which are red until their "
-                   "implementations land — not this task's failure, so no fix round. `tp next` offers "
+            out = (f"{tid} waits on {', '.join(waits_on)}: every failure is in their tests or files, which stay red "
+                   "until their implementations land — not this task's failure, so no fix round. `tp next` offers "
                    f"`tp recheck {tid}` once they land. {' '.join(msgs)}".rstrip())
         elif findings:
             ts["fix_source"] = "gate"
@@ -2437,7 +2463,7 @@ def _run_final_checks(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any],
             spec = plan["checks"][name]
             cwd = _ws(scope, spec["cwd"]) if spec.get("cwd") else Path(next(
                 w["path"] for w in scopemod.workspaces(scope).values() if w["mode"] == "write"))
-            ok, tail = _run_cmd(_expand_cmd(spec["cmd"], None, scope), cwd, log)
+            ok, tail = _run_cmd(_expand_cmd(spec["cmd"], None, scope), cwd, log, timeout=FINAL_CHECK_TIMEOUT)
             results.append(f"{name}: {'ok' if ok else 'failed'}")
             if not ok:
                 failures.append((check_key(name, tail), f"final check {name} failed (log {log}): {tail}"))
@@ -2453,9 +2479,11 @@ def final_failure_advice(keys: List[str], baseline: Set[str], readonly: bool = F
     out = []
     slow = [k.split(":")[1] for k in keys if k.endswith(":timeout")]
     if slow:
-        out.append(f"{', '.join(slow)} ran past the {CHECK_TIMEOUT}s limit, which proves nothing either way. A slow "
-                   "check needs no code change: run it under the repo's pinned toolchain (the survey's env prefix) or in "
-                   "parallel (`make -j4 <the same targets>`) — either is yours, `tp plan amend --delegated`; any other "
+        out.append(f"{', '.join(slow)} ran past the {FINAL_CHECK_TIMEOUT // 60}-minute limit, which proves nothing "
+                   "either way. First make sure nothing else is loading the machine (another run's tests) and that "
+                   "`tp final` runs in the background. A slow check needs no code change: run it under the repo's "
+                   "pinned toolchain (the survey's env prefix) or with more parallel jobs (`make -jN <the same "
+                   "targets>`) — either is yours, `tp plan amend --delegated`; any other "
                    "rewrite — a narrower command — is a check change the plan reviewer or the human decides (`tp plan "
                    "amend` says which).")
     if any(not k.endswith(":timeout") for k in keys) or readonly:

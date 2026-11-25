@@ -19,6 +19,8 @@ BUILTIN_TASK_CHECKS = {"docs": "every relative link resolves, and every code cit
                                "do not name what its sentence claims is flagged for the manager's fact check)"}
 BUILTIN_FINAL_CHECKS = {"docs-all": "links, citations, and reachability from index.md for the Markdown each write "
                                     "workspace gained or changed since approval (every file when it is not under git)"}
+# Check placeholders that name one task's files: meaningless in a final check, which has no task.
+TASK_PLACEHOLDERS = ("{files}", "{paths}", "{dirs}")
 REVIEW_MINUTES = 8
 # `tp publish` destinations: what the manager posts, from a reviewed `wf:` draft, after the human's OK.
 PUBLISH_TARGETS = ("jira-comment", "jira-description", "jira-issue", "confluence-comment", "confluence-page")
@@ -106,12 +108,15 @@ def review_sessions(plan: Dict[str, Any], scope: Dict[str, Any]) -> List[Dict[st
         if not mine:
             continue
         for unit in scopemod.review_units(scope):
+            if unit["agent"] == WHOLE_REVIEWER:
+                continue  # /reviewomatic reviews the whole change once (whole_change_session), never per batch
             out.append({"sid": f"{b['id']}/{unit['name']}", "batch": b["id"], "reviewer": unit["agent"],
                         "lenses": unit["lenses"], "tasks": mine, "code": all(is_code(tasks[t], scope) for t in mine)})
     return out
 
 
 WHOLE = "W"
+WHOLE_REVIEWER = "code-reviewer"
 
 
 def whole_change_session(plan: Dict[str, Any], scope: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -124,7 +129,7 @@ def whole_change_session(plan: Dict[str, Any], scope: Dict[str, Any]) -> Optiona
     work = [t["id"] for t in plan["tasks"] if not is_integration(t, scope) and not is_gate(t)]
     if not work:
         return None
-    return {"sid": f"{WHOLE}/code-reviewer", "batch": WHOLE, "reviewer": "code-reviewer", "lenses": [],
+    return {"sid": f"{WHOLE}/{WHOLE_REVIEWER}", "batch": WHOLE, "reviewer": WHOLE_REVIEWER, "lenses": [],
             "tasks": work, "code": True, "whole": True}
 
 
@@ -425,6 +430,12 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
         if name not in BUILTIN_FINAL_CHECKS and name not in plan.get("checks", {}):
             errs.append(f"final check {name!r} is neither built in ({', '.join(BUILTIN_FINAL_CHECKS)}) "
                         "nor defined in `checks`.")
+        elif isinstance(plan.get("checks", {}).get(name), dict):
+            # A final check has no task: the placeholder would stay literal and check nothing.
+            named = [p for p in TASK_PLACEHOLDERS if p in str(plan["checks"][name].get("cmd", ""))]
+            if named:
+                errs.append(f"final check {name!r} uses {', '.join(named)}, which name one task's files; a final "
+                            "check runs over the whole change: give it its own command (`make lint`, `gofmt -l .`).")
     for ref in plan.get("conventions", []):
         path = resolve_ref(ref, scope, wf_root)
         if path is None or not path.is_file():
@@ -989,8 +1000,11 @@ _PARALLEL_MAKE = re.compile(r"make -j(?:[2-9]|[1-5]\d|6[0-4]) (?P<rest>\S.*)")
 
 
 def _parallel_make(old: str, new: str) -> bool:
+    """`make <targets>` or `make -jN <targets>` → `make -jM <targets>`: only the job count differs."""
     m = _PARALLEL_MAKE.fullmatch(new.strip())
-    return bool(m) and old.strip().startswith("make ") and m.group("rest") == old.strip()[len("make "):].strip()
+    was = _PARALLEL_MAKE.fullmatch(old.strip())
+    targets = was.group("rest") if was else old.strip()[len("make "):].strip()
+    return bool(m) and (bool(was) or old.strip().startswith("make ")) and m.group("rest") == targets
 
 
 def same_check(old: str, new: str, pinned: Set[str]) -> bool:

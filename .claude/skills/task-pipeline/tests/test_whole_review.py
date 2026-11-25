@@ -117,6 +117,53 @@ class WholeChangeReviewTest(unittest.TestCase):
         self.assertEqual(m.h.state()["reviews"][WHOLE]["status"], "blocked")
 
 
+class CodeReviewerRunsOnceTest(unittest.TestCase):
+    """A scope that lists code-reviewer (a live run's scoper added it as "the closeout /reviewomatic
+    pass") gets it once, over the whole change, not once per batch as well: four batch sessions of
+    the same /reviewomatic cost that run 29 minutes before the whole-change pass ran it again."""
+
+    def test_code_reviewer_reviews_the_whole_change_only(self) -> None:
+        m = Mixed()
+        try:
+            scope = m.scope(["code"], ["tests", "code", "correctness", "security"])
+            scope["participants"].append({"agent": "code-reviewer", "role": "reviewer",
+                                          "why": "Closeout /reviewomatic pass over the whole change."})
+            sub = m.code_task("T02", title="sub", paths=["sub.py", "test_sub.py"], tests_paths=["test_sub.py"],
+                              test_cmd="python3 -m unittest -q test_sub")
+            m.approve([m.code_task("T01"), sub], scope,
+                      review_batches=[{"id": "B1", "tasks": ["T01"]}, {"id": "B2", "tasks": ["T02"]}])
+            reviews = m.h.state()["reviews"]
+            self.assertEqual(sorted(reviews), ["B1/lens-reviewer", "B2/lens-reviewer", WHOLE])
+            self.assertIn("W/code-reviewer", (m.h.wf / "plan.md").read_text())
+        finally:
+            m.close()
+
+
+class OnlyCodeReviewerTest(unittest.TestCase):
+    """code-reviewer as the only reviewer: no batch sessions, and the whole-change pass still runs."""
+
+    def test_the_whole_change_pass_runs_with_no_batch_sessions(self) -> None:
+        m = Mixed()
+        try:
+            scope = m.scope(["code"], ["tests", "code"])
+            scope["participants"].append({"agent": "code-reviewer", "role": "reviewer",
+                                          "why": "Closeout /reviewomatic pass over the whole change."})
+            m.approve([m.code_task("T01")], scope)
+            self.assertEqual(list(m.h.state()["reviews"]), [WHOLE])
+            m.code_done("T01")
+            kinds = [(a["action"], a.get("id")) for a in m.actions()]
+            if ("closeout", None) in kinds:
+                m.h.tp("closeout", "--items", "1", "--class", "observation", "--note", "cosmetic")
+                kinds = [(a["action"], a.get("id")) for a in m.actions()]
+            self.assertIn(("review", WHOLE), kinds)
+            m.h.tp("dispatch", WHOLE)
+            m.review_file(WHOLE, 1, "pass")
+            m.h.tp("record", WHOLE)
+            self.assertEqual([a["action"] for a in m.actions()], ["final"])
+        finally:
+            m.close()
+
+
 class NoWholeReviewTest(unittest.TestCase):
 
     def test_a_run_the_human_chose_no_review_for_gets_none(self) -> None:

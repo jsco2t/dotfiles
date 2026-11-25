@@ -77,7 +77,7 @@ SCHEMAS = {
                         "T04` asks it; tasks that depend on T04 wait for the answer, and their briefs quote it"}],
         "review_batches": [{"id": "B1", "tasks": ["T01", "T02"]}],
         "checks": {"vet": {"cmd": "go vet {dirs}", "cwd": "src",
-                           "_": "{files}: the task's changed files; {dirs}: their ./directories (package-scoped)"}},
+                           "_": "{files}: the files the task writes (a Go tool gets the .go ones); {dirs}: their ./directories (package-scoped); per-task only, never in final_checks"}},
         "final_checks": ["docs-all"],
     },
     "research": {

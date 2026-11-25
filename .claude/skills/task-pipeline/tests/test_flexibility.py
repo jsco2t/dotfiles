@@ -11,7 +11,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from harness import Harness
+from harness import Harness, git
 from scenarios import CALC_MUL_PY, FakeCli, Mixed, TEST_PY
 from test_execute import FINAL_REVIEW, S1, statuses
 
@@ -185,6 +185,69 @@ class SiblingRedTestsTest(unittest.TestCase):
         self.assertNotIn("passed", h.tp("recheck", "T01").out)
         self.assertEqual(m.status("T01"), "needs_fix")
         self.assertEqual(h.state()["tasks"]["T01"]["round"], 1)
+
+
+HELPER_TEST_PY = ("import unittest\nfrom helper import helper\n\n\nclass H(unittest.TestCase):\n"
+                  "    def test_helper(self):\n        self.assertEqual(helper(), 2)\n")
+
+
+class SiblingMidImplementationTest(unittest.TestCase):
+    """A shared build fails in a file a sibling is still changing (a live run: T03 was mid-way through a
+    signature change in its own store file, and T02's build of that package failed): not this task's
+    failure. It waits, and its recheck runs its tests again once the sibling lands."""
+
+    def setUp(self) -> None:
+        self.m = m = Mixed()
+        (m.app / "helper.py").write_text("def helper():\n    return 1\n")
+        git(m.app, "add", "-A")
+        git(m.app, "commit", "-q", "-m", "helper")
+        # T01's build compiles the module T02 owns, as a Go test builds every package it imports.
+        t1 = m.code_task("T01", test_cmd="python3 -m py_compile helper.py && python3 -m unittest -q test_calc")
+        t2 = m.code_task("T02", title="helper", paths=["helper.py", "test_helper.py"], sources=["app:helper.py"],
+                         brief="helper() returns 2.", acceptance=["helper() == 2"],
+                         test_cmd="python3 -m unittest -q test_helper", tests_paths=["test_helper.py"])
+        scope = m.scope(["code"], ["code", "correctness"])
+        scope["split_tests"] = False
+        m.approve([t1, t2], scope)
+        h = m.h
+        h.tp("dispatch", "T02")
+        (m.app / "test_helper.py").write_text(HELPER_TEST_PY)
+        h.tp("red", "T02")
+        h.tp("dispatch", "T01")
+        (m.app / "test_calc.py").write_text(TEST_PY)
+        h.tp("red", "T01")
+        (m.app / "helper.py").write_text("def helper(:\n    return 2\n")    # T02, half-way through
+        (m.app / "calc.py").write_text(CALC_MUL_PY)
+        h.result("T01", "build", changed=["calc.py", "test_calc.py"])
+        self.out = h.tp("record", "T01", "--agent-id", "ca-1").out
+
+    def tearDown(self) -> None:
+        self.m.close()
+
+    def t02_lands(self) -> None:
+        m, h = self.m, self.m.h
+        (m.app / "helper.py").write_text("def helper():\n    return 2\n")
+        h.result("T02", "build", changed=["helper.py", "test_helper.py"])
+        h.tp("record", "T02", "--agent-id", "ca-2")
+        self.assertEqual(m.status("T02"), "needs_check")
+
+    def test_it_waits_on_the_sibling_without_a_fix_round(self) -> None:
+        ts = self.m.h.state()["tasks"]["T01"]
+        self.assertEqual(ts["status"], "blocked", self.out)
+        self.assertEqual(ts["blocked"]["on"], ["T02"])
+        self.assertEqual(ts["round"], 0)
+
+    def test_the_recheck_passes_once_the_sibling_lands(self) -> None:
+        self.t02_lands()
+        self.assertIn("passed", self.m.h.tp("recheck", "T01").out)
+        self.assertEqual(self.m.status("T01"), "needs_check")
+
+    def test_the_recheck_runs_the_tests_again(self) -> None:
+        m = self.m
+        self.t02_lands()
+        (m.app / "calc.py").write_text("def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a + b\n")
+        self.assertNotIn("passed", m.h.tp("recheck", "T01").out)
+        self.assertEqual(m.status("T01"), "needs_fix")
 
 
 class ApprovedTestChangesTest(unittest.TestCase):

@@ -294,7 +294,7 @@ class FinalCheckTest(unittest.TestCase):
 
     def test_a_timeout_is_advised_as_a_slow_check_not_a_fix_task(self) -> None:
         advice = run.final_failure_advice(["check:unit:timeout"], set())
-        self.assertIn(str(run.CHECK_TIMEOUT), advice)
+        self.assertIn(f"{run.FINAL_CHECK_TIMEOUT // 60}-minute", advice)
         self.assertNotIn("fix task", advice)
         self.assertIn("fix task", run.final_failure_advice(["check:unit"], set()))
 

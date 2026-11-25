@@ -105,7 +105,7 @@ for a reader who was not in the conversation.
 
 ## Stage 5 — Execute (autonomous)
 
-ToolSearch `select:SendMessage,TaskStop` first. Known or suspected breakage → `tp baseline`
+ToolSearch `select:SendMessage,TaskStop` first. Known or suspected breakage → `tp baseline` (in the background)
 before the first dispatch; any failure goes to the human then, not at the end (leave → `tp
 baseline --leave --answer "..."`). Loop:
 
@@ -137,7 +137,7 @@ baseline --leave --answer "..."`). Loop:
 
 `tp closeout`: classify in bulk; then `W/code-reviewer` runs /reviewomatic once over the whole change; fix every ≥80% finding. Fix gaps in this run's own work — a final check it broke
 included — yourself (`tp plan amend --delegated`); out-of-scope follow-ups go to the report unasked; only deferred work (asked for,
-left undone) goes to the human, once. Posts follow the closeout; then `tp final` writes `report.md`
+left undone) goes to the human, once. Posts follow the closeout; then `tp final` (in the background) writes `report.md`
 (reusing the checks the post ran); present it answer-first —
 delivered work, coverage, time, review outcome, gates you settled, what they decide.
 Committing and pushing are theirs.

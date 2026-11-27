@@ -161,6 +161,22 @@ class RecordTest(unittest.TestCase):
         self.h.result("T01", "author", summary="word " * 120)
         self.assertIn("summary", self.h.tp("record", "T01", expect=2).text)
 
+    def test_a_missing_result_file_is_a_one_line_resume_never_a_fresh_round(self) -> None:
+        """Seen live (KUB-1335): the agent did the work but never wrote its result file, and
+        the error's silence sent the manager to a full re-dispatch with a fresh brief. The
+        task is still in flight — the error must hand the manager the exact one line that
+        resumes the same agent instead."""
+        self.h.tp("dispatch", "T01")
+        self.h.good_article("architecture/overview.md")   # the work is done...
+        res = self.h.tp("record", "T01", expect=2)         # ...but no result-author.json
+        text = res.text
+        self.assertIn("result-author.json", text)
+        self.assertIn("in flight", text)                   # the resume is possible
+        self.assertIn("resume", text.lower())
+        self.assertIn("RESULT", text)                     # the line to send, spelled out
+        self.assertIn("Never dispatch a fresh round", text)
+        self.assertIn("T01", self.h.state()["in_flight"])  # still in flight: resumable
+
     def test_clean_author_pass_goes_to_the_manager_fact_check(self) -> None:
         out = self.h.author("T01", "architecture/overview.md").out
         self.assertEqual(statuses(self.h)["T01"], "needs_check")

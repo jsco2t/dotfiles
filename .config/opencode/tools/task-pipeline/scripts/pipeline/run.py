@@ -438,6 +438,20 @@ RED_MARK = re.compile(
     r"|\bexit (?:code )?[1-9]\d*\b",                       # the brief's self-proving last line
     re.M)
 
+# A pin task's saved log shows the tests passing against today's code — or, as a mutation
+# proof, failing against code the author deliberately broke and reverted (seen live: the
+# stronger evidence a pin agent sometimes saves, and it must not be refused). A passing run
+# says so with a status word or the run's exit status; unlike red, "0 errors" here is a
+# pass signal, because the run it summarizes passed.
+PASS_MARK = re.compile(
+    r"^ok\b|^OK\b"                                         # go test / TAP / unittest status lines
+    r"|\b\d+ +(?:passed|passing)\b"                        # pytest / jest / mocha counts
+    r"|\bAll tests passed\b"
+    r"|\b0 +(?:failed|failures?|errors?)\b"                # "0 failed", "0 errors"
+    r"|\bexit (?:code )?0\b"                               # the brief's self-proving last line
+    r"|✔",                                                 # node:test / tap per-test pass
+    re.M)
+
 _GROUP_LABEL = {"code": "coding", "tests": "coding", "build": "coding", "kb": "writing", "docs": "writing", "tutorial": "writing",
                 "education": "writing"}
 
@@ -1227,7 +1241,12 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
             ts["agents"][effective] = agent_id
         res_path = wf.run_dir(tid) / f"result-{step}.json"
         if not res_path.exists():
-            raise TPError(f"{res_path} is missing — the agent must write it before you record.")
+            raise TPError(f"{res_path} is missing — {tid} is still in flight and the agent's work stands unrecorded.",
+                          f"Resume that agent's `task(...)` call and send exactly: 'Your work stands. Write "
+                          f"{res_path} now (the JSON schema your brief names) and reply with exactly one line: "
+                          f"RESULT {res_path}' — then record again.",
+                          "Never dispatch a fresh round for a missing result file: the work is already done, "
+                          "and a re-brief would make a new agent re-read the whole workspace to redo it.")
         data = load_json(res_path, "the agent's result")
         # Evidence is asked of authoring and implementation hand-backs whose brief asked for it (an
         # agent briefed before evidence existed is not refused for leaving it out).
@@ -1357,19 +1376,28 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
             # agent's own saved log, checked for a real failure marker; the review still judges
             # whether the tests prove the criteria. A fix round has no red moment of its own — its
             # goal is green — so the red evidence stays the build round's log, re-checked here.
+            # A pin task saves the opposite log: today's behaviour observed passing (its brief
+            # says so), or its mutation proof — tests failing against deliberately broken code.
             red_log = wf.run_dir(tid) / ("red-build-0.log" if step == "fix" else f"red-{label}.log")
+            pin = task.get("test_mode") == "pin"
             if not red_log.exists():
-                findings.append(f"The red run's output is missing: save the failing `{task['test_cmd']}` run "
+                findings.append(f"The {'pin' if pin else 'red'} run's output is missing: save the "
+                                f"{'passing' if pin else 'failing'} `{task['test_cmd']}` run "
                                 f"to `{red_log}` (the brief names it) before implementing.")
             else:
                 red = red_log.read_text(errors="replace")
                 if not red.strip():
-                    findings.append(f"`{red_log.name}` is empty — the red run's full output goes in it.")
-                elif not RED_MARK.search(red):
+                    findings.append(f"`{red_log.name}` is empty — the {'pin' if pin else 'red'} run's "
+                                    "full output goes in it.")
+                elif pin and not (PASS_MARK.search(red) or RED_MARK.search(red)):
+                    findings.append(f"`{red_log.name}` shows no test outcome: a pin task saves the "
+                                    "passing test run (or its mutation proof, the tests failing "
+                                    "against deliberately broken code) — its full output goes in the log.")
+                elif not pin and not RED_MARK.search(red):
                     findings.append(f"`{red_log.name}` shows no failure: the tests were never observed red, so they "
                                     "do not prove the new behaviour.")
                 else:
-                    msgs.append(f"red observed: {red_log.name}.")
+                    msgs.append(f"{'pin' if pin else 'red'} observed: {red_log.name}.")
             ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
             if ok:
                 msgs.append(f"green: `{task['test_cmd']}` passes.")

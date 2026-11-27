@@ -18,6 +18,10 @@ CODE = dict(
 TEST_PY = "import unittest\nfrom calc import mul\n\nclass T(unittest.TestCase):\n" \
           "    def test_mul(self):\n        self.assertEqual(mul(2, 3), 6)\n"
 
+# A pin task characterizes today's behaviour: these tests pass against the code as it stands.
+PIN_PY = "import unittest\nfrom calc import add\n\nclass T(unittest.TestCase):\n" \
+         "    def test_add(self):\n        self.assertEqual(add(2, 3), 5)\n"
+
 
 class CodeFlowTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -275,6 +279,74 @@ class FusedBuildTest(unittest.TestCase):
         self.h.approved(plan=self.h.plan([self.task], final_checks=[]), **scope)
         act = self.h.next()["actions"][0]
         self.assertEqual((act["step"], act["agent"]), ("tests", "test-author"))
+
+    # --- pin tasks: the fused build gate must ask for the passing run its brief asks for ------
+    # Seen live (KUB-1335, T07 and T10): a pin task's brief says "observe today's behaviour
+    # pinned (tests pass); save that run" — but the build gate demanded a failure marker.
+    # T07 spent four fix rounds and two human resolves bridging the mismatch; T10's agent
+    # ended up deliberately breaking production code in a shared worktree to manufacture
+    # a failing log. A pin round's evidence is a passing run, or its mutation proof.
+
+    def approve_pin(self) -> None:
+        task = dict(self.task, test_mode="pin", brief="Pin add(a, b) with a characterization test.",
+                    acceptance=["add(2, 3) pins to 5, test-first"])
+        self.h.approved(plan=self.h.plan([task], final_checks=[]), **self.scope)
+
+    def pin_round(self, log: str) -> str:
+        """Write the characterization tests, save the given run output, hand back, record."""
+        self.h.tp("dispatch", "T01")
+        (self.app / "test_calc.py").write_text(PIN_PY)
+        (self.h.run_dir("T01") / "red-build-0.log").write_text(log)
+        self.h.result("T01", "build", changed=["test_calc.py"])
+        return self.h.tp("record", "T01", "--agent-id", "ca-1").out
+
+    def test_a_pin_build_round_records_from_its_passing_log(self) -> None:
+        self.approve_pin()
+        self.h.tp("dispatch", "T01")
+        self.assertIn("pinned", (self.h.run_dir("T01") / "brief-build-0.md").read_text())
+        (self.app / "test_calc.py").write_text(PIN_PY)
+        (self.h.run_dir("T01") / "red-build-0.log").write_text("...\nRan 1 test\n\nOK\nexit code 0\n")
+        self.h.result("T01", "build", changed=["test_calc.py"])
+        out = self.h.tp("record", "T01", "--agent-id", "ca-1").out
+        self.assertIn("pin observed: red-build-0.log", out)
+        self.assertIn("green", out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_check")
+
+    def test_a_pin_tasks_mutation_proof_log_is_still_evidence(self) -> None:
+        """A pin agent that proves its tests bite — regressing the code, watching them fail,
+        reverting (T10's accepted evidence) — holds the stronger proof, not a wrong one."""
+        self.approve_pin()
+        out = self.pin_round("--- FAIL: test_add\nAssertionError: 5 != 6\nFAIL\nexit 1\n")
+        self.assertIn("pin observed: red-build-0.log", out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_check")
+
+    def test_a_pin_log_without_a_test_outcome_is_refused(self) -> None:
+        self.approve_pin()
+        out = self.pin_round("the tests ran, honest\n")
+        self.assertIn("no test outcome", out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
+
+    def test_a_missing_pin_log_names_the_passing_run(self) -> None:
+        self.approve_pin()
+        self.h.tp("dispatch", "T01")
+        (self.app / "test_calc.py").write_text(PIN_PY)
+        self.h.result("T01", "build", changed=["test_calc.py"])
+        out = self.h.tp("record", "T01", "--agent-id", "ca-1").out
+        self.assertIn("pin run's output is missing", out)
+        self.assertEqual(self.h.state()["tasks"]["T01"]["status"], "needs_fix")
+
+    def test_a_pin_fix_round_names_the_pin_not_a_new_red(self) -> None:
+        """A pin task's fix brief must not tell the agent there is no new red to record while
+        the findings demand the pin log: T07's round-2 agent got exactly that contradiction and
+        produced ad-hoc logs under names no gate reads."""
+        self.approve_pin()
+        self.pin_round("")                                # empty log: a real finding
+        self.h.tp("dispatch", "T01")
+        brief = (self.h.run_dir("T01") / "brief-fix-1.md").read_text()
+        self.assertIn("red-build-0.log", brief)           # the build round's evidence, named
+        self.assertIn("pin", brief)                       # ...named as a pin, not a red
+        self.assertNotIn("red-fix", brief)                # no fresh red demanded
+
 
 
 if __name__ == "__main__":

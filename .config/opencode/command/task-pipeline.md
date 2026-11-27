@@ -200,17 +200,18 @@ Loop on `tp next`:
   without waking the human when an independent review finding already confirmed the test was
   wrong.
 - **wait** → end your turn only when `tp next` says to wait and nothing else is actionable — and
-  then **arm the watchdog**: one background call `sleep 600 && python3 <tp> -w <wf> next`; its
-  completion re-invokes you. Hand-backs re-invoke you too, but **a dispatch that dies hands back
-  nothing** — without the watchdog nothing wakes you (two real runs sat dead 77 and 86 min). On
-  each watchdog wake: `tp next`, act on what it prints, re-arm if you end the turn still waiting.
-- **A dispatch dies** (harness interrupt, restart, host loss; resume returns "Task cancelled") →
-  you learn it from `tp next`, never from the agent: past the silence threshold a dispatch is
-  `stale` on every call. `tp digest` then shows whether its writes still move (a long build that
-  is writing is fine: keep waiting); when nothing moved, check the workspace for stranded edits,
-  `tp lost <id> --summary "..."` (a research/review id keeps its slot: send its call again),
-  resolve, dispatch fresh. **Never tell the human the run is done, or waiting normally, while a
-  dispatch is stale** — that is unresolved work, and the report will show it.
+  then **arm the watchdog**: one background call `sleep 600 && python3 <tp> -w <wf> next`.
+  A dispatch that dies hands back nothing — without the watchdog nothing wakes you (real
+  runs sat dead 77 min). On each wake: `tp next`, act on what it prints, re-arm if you end
+  the turn still waiting.
+- **A dispatch dies or never starts** (harness interrupt, restart, host loss) → `tp next`
+  watches each in-flight agent's session. A call that never started one is `resend`: send the
+  call `tp resend <id>` prints — nothing was lost. A session silent past the threshold is
+  `stale`: `tp digest` shows whether its writes still move (a writing long build is fine:
+  keep waiting); when nothing moved, check the workspace for stranded edits, `tp lost <id>
+  --summary "..."` (a research/review id keeps its slot: send its call again), resolve,
+  dispatch fresh. **Never report the run done, or waiting normally, while a dispatch is
+  `stale` or `resend`-pending** — that is unresolved work, and the report will show it.
 - **A status question mid-run** → `tp digest`, present it answer-first, then `tp next` and keep
   working in the same turn.
 - **An agent far past its estimate** → a running `task` call cannot be stopped: note it, raise

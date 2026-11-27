@@ -7,9 +7,11 @@ import copy
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -64,6 +66,22 @@ class Harness:
         self.wf = self.root / "wf"
         self.request = self.root / "request.txt"
         self.request.write_text("Build a KB for the calc repo.\n")
+        # The fake opencode session store: tp reads it (read-only) to tell whether an
+        # in-flight dispatch's agent session exists and when it last produced a turn.
+        self.db = self.root / "sessions.db"
+        self.opencode_session("full-access", "manager", seconds_ago=0)
+
+    def opencode_session(self, agent: str, title: str, seconds_ago: float = 0) -> None:
+        """A session row as opencode's store holds it: agent, title, ms timestamps."""
+        con = sqlite3.connect(self.db)
+        con.execute("CREATE TABLE IF NOT EXISTS session_v2 "
+                    "(id TEXT PRIMARY KEY, agent TEXT, title TEXT, time_created INTEGER, time_updated INTEGER)")
+        now = int(time.time() * 1000)
+        con.execute("INSERT OR REPLACE INTO session_v2 VALUES (?,?,?,?,?)",
+                    (f"ses_{agent}_{title}".replace(" ", "_").replace("/", "_"), agent, title,
+                     now - 60_000, now - int(seconds_ago * 1000)))
+        con.commit()
+        con.close()
 
     def close(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
@@ -73,6 +91,7 @@ class Harness:
     def tp(self, *args: str, expect: Optional[int] = 0, wf: bool = True) -> Result:
         cmd = [PY, str(TP)] + (["-w", str(self.wf)] if wf else []) + list(args)
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", TP_GUARD_DIR=str(self.root / "guard"))
+        env.setdefault("TP_OPENCODE_DB", str(self.db))  # a test's own store override wins
         res = Result(subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120))
         if expect is not None and res.code != expect:
             raise AssertionError(f"tp {' '.join(args)} exited {res.code}, expected {expect}:\n{res.text}")
@@ -234,3 +253,17 @@ class Harness:
 
 def deep(d: Dict[str, Any]) -> Dict[str, Any]:
     return copy.deepcopy(d)
+
+
+def elapse(h: "Harness", minutes: int) -> None:
+    """Pretend `minutes` pass: every timestamp the state holds moves that far into the past.
+    The session store is untouched — create its rows with the age you mean to simulate."""
+    import re
+    from datetime import datetime, timedelta
+    path = h.wf / ".tp" / "state.json"
+
+    def back(m: "re.Match[str]") -> str:
+        ts = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%SZ") - timedelta(minutes=minutes)
+        return '"' + ts.strftime("%Y-%m-%dT%H:%M:%SZ") + '"'
+
+    path.write_text(re.sub(r'"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)"', back, path.read_text()))

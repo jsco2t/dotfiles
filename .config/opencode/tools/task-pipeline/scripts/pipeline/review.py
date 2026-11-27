@@ -250,7 +250,8 @@ def dispatch(wf: Workflow, state: Dict[str, Any], sid: str) -> str:
     for other in state["in_flight"].values():
         other.setdefault("concurrent", []).append(sid)
     state["in_flight"][sid] = {"step": "review", "since": now_iso(), "agent": s["reviewer"], "snaps": snaps,
-                               "concurrent": list(state["in_flight"]), "from": s["status"]}
+                               "concurrent": list(state["in_flight"]), "from": s["status"],
+                               "brief": str(brief), "result": str(result)}
     s.update(status="in_flight", round=n)
     wf.save(state)
     wf.event("dispatch", id=sid, step="review" if n == 1 else "verify", agent=s["reviewer"], round=n)

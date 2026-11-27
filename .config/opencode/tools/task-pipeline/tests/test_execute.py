@@ -165,7 +165,8 @@ class RecordTest(unittest.TestCase):
         """Seen live (KUB-1335): the agent did the work but never wrote its result file, and
         the error's silence sent the manager to a full re-dispatch with a fresh brief. The
         task is still in flight — the error must hand the manager the exact one line that
-        resumes the same agent instead."""
+        resumes the same agent instead, and the dead-dispatch branch (twice lost live, T05
+        and T08): when the resume comes back cancelled, `tp lost`, not another resume."""
         self.h.tp("dispatch", "T01")
         self.h.good_article("architecture/overview.md")   # the work is done...
         res = self.h.tp("record", "T01", expect=2)         # ...but no result-author.json
@@ -175,6 +176,7 @@ class RecordTest(unittest.TestCase):
         self.assertIn("resume", text.lower())
         self.assertIn("RESULT", text)                     # the line to send, spelled out
         self.assertIn("Never dispatch a fresh round", text)
+        self.assertIn("tp lost", text)                     # the dead-dispatch branch
         self.assertIn("T01", self.h.state()["in_flight"])  # still in flight: resumable
 
     def test_clean_author_pass_goes_to_the_manager_fact_check(self) -> None:

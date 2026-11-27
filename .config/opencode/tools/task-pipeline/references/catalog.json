@@ -397,8 +397,10 @@
     "max_delegated_fix_tasks": 5,
     "_max_delegated_scope_amends": "plumbing-only scope amendments the manager may settle without a question (a routing fix, a detail in-budget research discovered): everything the human agreed — requirement ledger, non-goals, terms, workspaces, shipping, answers, gate enforcement — unchanged and no write authority gained; substantive changes always ask",
     "max_delegated_scope_amends": 3,
-    "_stale_dispatch_minutes": "an in-flight dispatch this old with no hand-back gets a stale action in tp next (the harness kills an agent after about this much silence, so its death is otherwise invisible: no hand-back ever arrives to re-invoke the manager — real runs sat dead for over an hour while reporting themselves done)",
+    "_stale_dispatch_minutes": "an in-flight dispatch this old with no hand-back gets a stale action in tp next (the harness kills an agent after about this much silence, so its death is otherwise invisible: no hand-back ever arrives to re-invoke the manager — real runs sat dead for over an hour while reporting themselves done). With a readable agent-session store, 'this old' means the agent's session has been silent this long — a live session or a running test command is never stale",
     "stale_dispatch_minutes": 35,
+    "_unstarted_dispatch_minutes": "an in-flight dispatch this old whose task call never started an agent session (no session exists for it in the store) gets a resend action in tp next: the call is simply sent again, the standing brief unchanged — nothing was lost, so nothing is lost-marked (a live run sat 21 and 29 minutes on never-started calls and lost one as dead)",
+    "unstarted_dispatch_minutes": 5,
     "review_near_miss_floor": 60,
     "review_full_finding_floor": 70,
     "auto_accept_steps": [

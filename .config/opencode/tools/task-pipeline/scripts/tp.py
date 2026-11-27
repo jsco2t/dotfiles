@@ -217,6 +217,9 @@ def parser() -> argparse.ArgumentParser:
                                     "on a stuck agent): frees the slot, blocks the task for a fresh re-run")
     s.add_argument("id")
     s.add_argument("--summary", required=True, help="what happened, and the evidence")
+    s = sub.add_parser("resend", help="print an in-flight dispatch's task call again — for a round whose call never "
+                                      "started an agent session (nothing is re-dispatched; the brief stands)")
+    s.add_argument("id")
     sub.add_parser("baseline", help="record which final checks already fail before the run (right after approval)")
 
     s = sub.add_parser("approve", help="enter execution: on the new contract, the passing independent plan "
@@ -349,6 +352,8 @@ def dispatch(args: argparse.Namespace) -> str:
         return scopemod.cmd_budget_extend(wf, args.minutes, args.answer, args.note)
     if c == "lost":
         return run.cmd_lost(wf, args.id, args.summary)
+    if c == "resend":
+        return run.cmd_resend(wf, args.id)
     if c == "baseline":
         return run.cmd_baseline(wf)
     if c == "survey":

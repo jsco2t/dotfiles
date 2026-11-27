@@ -202,7 +202,8 @@ def dispatch(wf: Workflow, state: Dict[str, Any], rid: str, slots) -> str:
     brief.write_text(briefs.research(rid, item, wf.root / "scope.md", surveys, result))
     item["status"] = "in_flight"
     state["in_flight"][rid] = {"step": "research", "since": now_iso(), "agent": item["agent"], "concurrent": [],
-                               "porcelain": _porcelain(scopemod.load_scope(wf))}
+                               "porcelain": _porcelain(scopemod.load_scope(wf)),
+                               "brief": str(brief), "result": str(result)}
     wf.save(state)
     wf.event("dispatch", id=rid, step="research", agent=item["agent"])
     call = briefs.dispatch_line(item["agent"], f"{rid} research", briefs.prompt(brief, result), None, item.get("model"))

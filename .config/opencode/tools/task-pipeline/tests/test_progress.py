@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Tuple
 
-from harness import Harness, git
+from harness import Harness, elapse, git
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -36,18 +36,6 @@ FINAL_REVIEW = dict(review="final", participants=[
     {"agent": "doc-reviewer", "role": "reviewer", "why": "Reviews the finished KB for accuracy."}])
 INDEX = "# KB\n\n- [O](architecture/overview.md)\n- [B](build/guide.md)\n"
 ISO = re.compile(r'"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)"')
-
-
-def elapse(h: Harness, minutes: int) -> None:
-    """Pretend `minutes` pass: every timestamp the state holds moves that far into the past."""
-    path = h.wf / ".tp" / "state.json"
-
-    def back(m: "re.Match[str]") -> str:
-        ts = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%SZ") - timedelta(minutes=minutes)
-        return '"' + ts.strftime("%Y-%m-%dT%H:%M:%SZ") + '"'
-
-    path.write_text(ISO.sub(back, path.read_text()))
-
 
 def code_harness() -> Tuple[Harness, Path, Callable[[], None]]:
     """A one-task code plan in its own git workspace: tests first (red), then impl (green)."""
@@ -295,8 +283,10 @@ class LostTest(unittest.TestCase):
         # A killed agent hands back nothing, so nothing re-invokes the manager: past the silence
         # threshold the dispatch becomes a first-class action — `tp next` never endorses plain
         # waiting on it, and never lets the run be reported done. (A real run sat 77 min dead.)
+        # The dead dispatch is modeled by its session: started with the dispatch, silent since.
         h = self.h
         h.tp("dispatch", "T01")
+        h.opencode_session("kb-author", "T01 author", seconds_ago=39 * 60)
         elapse(h, 40)
         acts = [a for a in h.next()["actions"] if a["action"] in ("stale", "wait")]
         self.assertEqual([a["action"] for a in acts], ["stale"])
@@ -312,6 +302,7 @@ class LostTest(unittest.TestCase):
         # coming. The warning must point at the stale action instead.
         h = self.h
         h.tp("dispatch", "T01")
+        h.opencode_session("kb-author", "T01 author", seconds_ago=39 * 60)
         elapse(h, 40)
         h.next()                                          # first look
         out = h.tp("next").out                            # second look, nothing moved
@@ -323,6 +314,7 @@ class LostTest(unittest.TestCase):
         # Stale is a prompt to probe, not a verdict: the hand-back is recorded as usual.
         h = self.h
         h.tp("dispatch", "T01")
+        h.opencode_session("kb-author", "T01 author", seconds_ago=39 * 60)
         elapse(h, 40)
         h.next()
         h.good_article("architecture/overview.md")
@@ -470,7 +462,8 @@ class DigestTest(unittest.TestCase):
         out = h.tp("digest").out
         self.assertIn("PLANNING", out)
         self.assertIn("research 0/1", out)
-        self.assertIn("result file", out.split("In flight:")[1])   # researchers write at the end
+        # A just-dispatched researcher has no session yet (grace) — its result file comes at the end
+        self.assertIn("no agent session yet", out.split("In flight:")[1])
 
     def test_done_digest_points_at_the_report(self) -> None:
         h = self.h

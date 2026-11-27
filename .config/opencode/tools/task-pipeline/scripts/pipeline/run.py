@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import briefs, docscheck, snapshot
+from . import briefs, docscheck, liveness, snapshot
 from . import plan as planmod
 from . import scope as scopemod
 from .common import (TP_SCRIPT, TPError, Workflow, agent_context_tokens, auto_accept, catalog, gap_minutes, limit, load_json, minutes_since,
@@ -267,20 +267,40 @@ def actions(wf: Workflow, state: Dict[str, Any], ignore_halt: bool = False) -> L
             free -= 1
     review_acts = _review().actions(state, free)
     acts += review_acts
-    # A dispatch this old with no hand-back is presumed dying or dead: the harness kills an
-    # agent's silence well before this, and a killed agent never hands back, so nothing else
-    # would ever re-invoke the manager (a real run sat dead 77 min while reporting itself done).
-    # The action replaces blind waiting: tp next never endorses waiting on a dispatch past this.
-    stale = [{"action": "stale", "id": tid, "why": f"{minutes_since(fl['since']):.0f} min in flight, no hand-back"}
-             for tid, fl in sorted(state["in_flight"].items())
-             if minutes_since(fl["since"]) >= limit("stale_dispatch_minutes")]
-    acts += stale
+    # Is each in-flight dispatch's agent actually alive? The session store says whether its
+    # task call ever started a session and when its agent last produced a turn — the two
+    # things a clock cannot know. A call that never started is re-sent (nothing was lost:
+    # no agent, no work); a session silent past the threshold is a dead dispatch; a live
+    # session or a running test command is work, never a stall. (A live run sat 21 and 29
+    # minutes on dispatches whose calls were never sent, and lost one as dead.)
+    probes = {tid: liveness.session_activity(fl.get("agent"), tid, fl["step"],
+                                              minutes_since(fl["since"]) * 60)
+              for tid, fl in state["in_flight"].items()}
+    resend: List[Dict[str, Any]] = []
+    stale: List[Dict[str, Any]] = []
+    for tid, fl in sorted(state["in_flight"].items()):
+        probe, age = probes[tid], minutes_since(fl["since"])
+        if probe is not None and probe["state"] == "unstarted":
+            if age >= limit("unstarted_dispatch_minutes"):
+                resend.append({"action": "resend", "id": tid,
+                               "why": f"dispatched {age:.0f} min ago; no agent session ever started"})
+            continue
+        idle = probe["idle_min"] if probe is not None else age
+        if idle < limit("stale_dispatch_minutes"):
+            continue
+        cmd = tasks.get(tid, {}).get("test_cmd")
+        if cmd and liveness.process_running(cmd):
+            continue  # its test command is running: a long build or test, not a stall
+        why = (f"agent silent {idle:.0f} min, no hand-back" if probe is not None
+               else f"{age:.0f} min in flight, no hand-back")
+        stale.append({"action": "stale", "id": tid, "why": why})
+    acts += resend + stale
     everything_done = all(ts["status"] in DONE_STATES for ts in state["tasks"].values())
     if (everything_done and not state["in_flight"] and not state.get("blocked")
             and not _review().open_sessions(state)):
         pending = _closeout_pending(wf, state)
         acts.append({"action": "closeout", "why": pending} if pending else {"action": "final"})
-    live = [tid for tid in state["in_flight"] if tid not in {a["id"] for a in stale}]
+    live = [tid for tid in state["in_flight"] if tid not in {a["id"] for a in stale + resend}]
     if (not any(a["action"] in ("dispatch", "fix", "review", "final", "closeout", "rerun", "publish") for a in acts)
             and live):
         acts.append({"action": "wait", "ids": live})
@@ -324,6 +344,9 @@ GUIDE = {
              "moved, the dispatch died: check the workspace for stranded edits, then `tp lost {id} --summary "
              "\"...\"` (a research or review id keeps its slot: send its call again), resolve, and dispatch fresh. "
              "Never report the run as done, or waiting normally, while a stale dispatch is unresolved.",
+    "resend": "{id} was dispatched but its task call never started an agent ({why}) — nothing was lost: no agent, "
+              "no work, the brief stands. `tp resend {id}` prints the call again; send it now. If the platform "
+              "refuses it, `tp lost {id} --summary \"...\"` frees the slot for a fresh dispatch.",
     "recheck": "`tp recheck {id}`: the sibling tasks whose red tests were its only failures have landed, so its "
                "tests and checks run again (no agent, no fix round).",
     "halting": "Halt requested: record {ids} as they hand back; dispatch nothing new.",
@@ -359,8 +382,12 @@ def _liveness_warning(wf: Workflow, acts: List[Dict[str, Any]]) -> Optional[str]
     if not same:
         return None
     idle = minutes_since(since)
-    stale = [tid for tid, fl in state["in_flight"].items()
-             if minutes_since(fl["since"]) >= limit("stale_dispatch_minutes")]
+    stale = []
+    for tid, fl in state["in_flight"].items():
+        probe = liveness.session_activity(fl.get("agent"), tid, fl["step"], minutes_since(fl["since"]) * 60)
+        silence = probe["idle_min"] if probe is not None and probe["state"] == "live" else minutes_since(fl["since"])
+        if silence >= limit("stale_dispatch_minutes"):
+            stale.append(tid)
     if stale:
         return (f"no state change for {idle:.0f} min and {', '.join(stale)} "
                 f"{'is' if len(stale) == 1 else 'are'} past the silence threshold — do the stale action above: "
@@ -465,7 +492,19 @@ def _progress(wf: Workflow, scope: Dict[str, Any], tasks: Dict[str, Dict[str, An
     so a lone agent is never called stuck by this probe. Updates fl["probe"]. Researchers and
     reviewers write only at the end."""
     if tid not in tasks or fl["step"] == "review" or not fl.get("snap"):
-        return "writes its result file when it finishes, so the workspace is not its progress signal"
+        # Researchers and reviewers write only at the end, so the session store is their
+        # progress signal: a live session is a working agent; no session at all is a task
+        # call that never started (a live run sat 29 minutes on one, undetectable).
+        probe = liveness.session_activity(fl.get("agent"), tid, fl["step"],
+                                          minutes_since(fl["since"]) * 60)
+        if probe is None:
+            return ("writes its result file when it finishes; no readable session store, "
+                    "so the clock is the only signal")
+        if probe["state"] == "unstarted":
+            if minutes_since(fl["since"]) >= limit("unstarted_dispatch_minutes"):
+                return "no agent session — its task call never started (`tp resend`)"
+            return "no agent session yet"  # the call may still be in flight to the platform
+        return f"agent session live, last turn {probe['idle_min']:.0f} min ago"
     task = tasks[tid]
     # Only the task's own paths: both sides enumerated by the same walk rules and the same match.
     now = _take(wf, _ws(scope, task["workspace"]), only=task["paths"])
@@ -705,6 +744,7 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
                                    "concurrent": list(state["in_flight"]), "from": ts["status"],
                                    "head": _git_head(_ws(scope, task["workspace"])),
                                    "wf_hashes": _wf_hashes(wf, task),
+                                   "brief": str(brief), "result": str(result),
                                    "evidence": step != "review"}  # the brief asked for acceptance evidence
         ts["status"], ts["step"] = "in_flight", step
         ts["started"] = ts["started"] or now_iso()
@@ -1245,8 +1285,10 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
                           f"Resume that agent's `task(...)` call and send exactly: 'Your work stands. Write "
                           f"{res_path} now (the JSON schema your brief names) and reply with exactly one line: "
                           f"RESULT {res_path}' — then record again.",
-                          "Never dispatch a fresh round for a missing result file: the work is already done, "
-                          "and a re-brief would make a new agent re-read the whole workspace to redo it.")
+                          "If the resume comes back cancelled — the dispatch died, twice lost live — `tp lost "
+                          f"{tid} --summary \"...\"` frees the slot for a fresh agent instead.",
+                          "Never dispatch a fresh round while the agent can still be resumed: the work is already "
+                          "done, and a re-brief would make a new agent re-read the whole workspace to redo it.")
         data = load_json(res_path, "the agent's result")
         # Evidence is asked of authoring and implementation hand-backs whose brief asked for it (an
         # agent briefed before evidence existed is not refused for leaving it out).
@@ -1719,6 +1761,59 @@ def cmd_lost(wf: Workflow, tid: str, summary: str) -> str:
                     "(change the approach, split the task, or skip it) and resolve with --by human. A real "
                     "hand-back resets the count.")
         return out
+
+
+def _standing_brief(wf: Workflow, tid: str, fl: Dict[str, Any]) -> Path:
+    """The newest brief of an in-flight round, for state written before dispatches stored
+    their paths: task rounds write brief-<label>.md, review rounds brief-<reviewer>-N.md in
+    the batch's dir, research <rid>.brief.md — every name carries 'brief'."""
+    rdir = wf.run_dir(tid.split("/")[0] if "/" in tid else tid)
+    briefs_ = [p for p in rdir.iterdir() if p.suffix == ".md" and "brief" in p.name] if rdir.is_dir() else []
+    if not briefs_:
+        raise TPError(f"no brief found for {tid}'s {fl['step']} round — `tp lost {tid} --summary \"...\"` "
+                      "and dispatch fresh.")
+    return max(briefs_, key=lambda p: p.stat().st_mtime)
+
+
+def _standing_result(rdir: Path, brief: Path, tid: str) -> Path:
+    """The result file its brief's hand-back names: fix rounds result-fix.json, authoring
+    rounds result-<step>.json, review rounds <reviewer>-N.json, research <rid>.json."""
+    name = brief.name
+    if re.fullmatch(r"brief-fix-\d+\.md", name):
+        return rdir / "result-fix.json"
+    m = re.fullmatch(r"brief-(author|impl|build|tests)-\d+\.md", name)
+    if m:
+        return rdir / f"result-{m[1]}.json"
+    m = re.fullmatch(r"brief-(.+)-(\d+)\.md", name)
+    if m:
+        return rdir / f"{m[1]}-{m[2]}.json"
+    m = re.fullmatch(r"(.+)\.brief\.md", name)
+    if m:
+        return rdir / f"{m[1]}.json"
+    raise TPError(f"{tid}: no result file pairs with {name} — `tp lost {tid} --summary \"...\"` and dispatch fresh.")
+
+
+def cmd_resend(wf: Workflow, tid: str) -> str:
+    """The task call for an in-flight dispatch whose call never started an agent session,
+    printed again from the standing brief. Resend changes no state — the dispatch stands, so
+    the manager just sends the call. (A live run lost a round by re-dispatching a never-started
+    one: a fresh agent re-briefed and re-read the workspace for work already done.)"""
+    with wf.locked():
+        state = wf.load()
+        fl = state["in_flight"].get(tid)
+        if fl is None:
+            status = state["tasks"].get(tid, {}).get("status") or state["phase"]
+            raise TPError(f"{tid} is not in flight (status {status}).")
+        brief = Path(fl["brief"]) if fl.get("brief") else _standing_brief(wf, tid, fl)
+        rdir = brief.parent
+        result = Path(fl["result"]) if fl.get("result") else _standing_result(rdir, brief, tid)
+        if not brief.exists():
+            raise TPError(f"{tid}'s brief {brief} is gone — `tp lost {tid} --summary \"...\"` and dispatch fresh.")
+        call = briefs.dispatch_line(fl.get("agent"), f"{tid} {fl['step']}", briefs.prompt(brief, result), None, None)
+        return (f"RESEND {tid} · {fl['step']} · {fl.get('agent')} — the standing brief, unchanged\n"
+                f"brief: {brief}\nsend: {call}\n"
+                f"then, when it replies: tp record {tid} --agent-id <its agent id>")
+
 
 
 def _keep_decision(holder: Dict[str, Any], question: str, answer: str, by: Optional[str]) -> None:

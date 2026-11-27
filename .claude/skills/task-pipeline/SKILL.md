@@ -113,7 +113,8 @@ baseline --leave --answer "..."`). Loop:
   `Agent(...)`/`SendMessage(...)` call (from any command) in one message.
 - **An agent replies** → `tp advance <id> --agent-id <id>` (Bash `timeout` 600000).
 - **check** → fact-check the printed sample (read the diff for code), then `tp accept <ids…>
-  --note "..."` for the wave, or `tp reject <id> --reason "..."`.
+  --note "..."` for the wave, or `tp reject <id> --reason "..."`. `accept` dispatches what it
+  unblocks: send its calls; never chain `tp dispatch` after it.
 - **triage** → `tp show <id> --part blocking`, verify, then `tp triage <id> --accept-all`, or
   `--dismiss F# --reason "..."`, `--assign F#=T##`, `--route F#=impl|tests-green|tests-red`.
 - **Settle routine problems yourself** (each is reported and judged by the final review): a file

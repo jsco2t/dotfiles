@@ -392,7 +392,9 @@ GUIDE = {
     "followup": "Decide {id} ({why}): pursue it (`tp research add ... --from {id}`) or "
                 "`tp research dismiss {id} --reason \"...\"`.",
     "human": "Needs a decision{about}: {why}. First settle it yourself if the scope, plan, answers, or evidence "
-             "already do, or if it is routine mechanics — a retry (`--action retry --by manager`), a test fix "
+             "already do, or if it is routine mechanics — a reply to a blocked hand-back (`tp resolve --task {id} "
+             "--action answer --answer \"...\" --by manager`), another round for a task out of rounds (`tp resolve "
+             "--task {id} --action retry --answer \"...\" --by manager`), a test fix "
              "(`--action tests`), a test correction (`tp rebaseline-tests {id} --by manager`), a gate you have "
              "shown false (`tp accept {id} --override`, even once its fix round is printed), a file the fix needs "
              "(`tp widen`), a fix task inside the allowance (`tp plan amend --delegated`), plumbing scope (`tp scope "
@@ -991,7 +993,7 @@ def _task_files_for(cmd: str, task: Dict[str, Any], scope: Dict[str, Any]) -> Li
     `gofmt` fails on YAML and testdata. A real run's gofmt and tracker checks never had this
     substituted and passed 14 times having checked nothing."""
     ws = _ws(scope, task["workspace"])
-    files = _expand(ws, [p for p in task["paths"] if planmod.wf_rel(p) is None])
+    files = _expand(ws, [p for p in _writes(task) if planmod.wf_rel(p) is None])
     return [f for f in files if f.suffix == ".go"] if _GO_CMD.search(cmd) else files
 
 
@@ -1527,7 +1529,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
                                 "produce the work.")
         others = _others_paths(wf, state, tasks, tid, fl)
         moved = _head_moved(state, task["workspace"], ws, fl.get("head"))
-        allowed = list(task["paths"]) + others + moved
+        allowed = _writes(task) + others + moved
         off = [c for c in changed if not snapshot.matches(c, allowed)]
         if off:
             findings.append(f"Changed files outside this task's paths: {', '.join(off[:10])} — revert them; if the "
@@ -1653,7 +1655,14 @@ def _others_paths(wf: Workflow, state: Dict[str, Any], tasks: Dict[str, Dict[str
     since = fl.get("window") or fl.get("since") or ""
     ran |= {e.get("id") for e in wf.events() if e.get("kind") == "dispatch" and e.get("ts", "") >= since}
     return [p for o in sorted(x for x in ran if isinstance(x, str)) if o != tid and o in tasks
-            and tasks[o].get("workspace") == ws for p in tasks[o].get("paths", []) if planmod.wf_rel(p) is None]
+            and tasks[o].get("workspace") == ws for p in _writes(tasks[o]) if planmod.wf_rel(p) is None]
+
+
+def _writes(task: Dict[str, Any]) -> List[str]:
+    """Every file a task may write: its `paths` and its `tests_paths`. The plan schema does not
+    ask for a test file in both, and a real run (KUB-1339) listed them only in `tests_paths`:
+    a fence of `paths` alone then charged every code task with its own tests and its siblings'."""
+    return list(dict.fromkeys(list(task.get("paths") or []) + list(task.get("tests_paths") or [])))
 
 
 def _head_moved(state: Dict[str, Any], ws_name: str, ws: Path, head: Optional[str]) -> List[str]:

@@ -179,6 +179,36 @@ class RecordTest(unittest.TestCase):
         self.assertIn("tp lost", text)                     # the dead-dispatch branch
         self.assertIn("T01", self.h.state()["in_flight"])  # still in flight: resumable
 
+    def test_a_disputed_finding_is_surfaced_before_the_round_is_dispatched(self) -> None:
+        """Seen live (KUB-1335 follow-up, T05): the agent disputed a structurally broken
+        check in its fix hand-back, but the record output buried the dispute in the result
+        file — the printed call dispatched another identical round, and only the human
+        reading the file caught it (a mid-run plan revision). The dispute must lead the
+        FAIL output with the routing paths named, and travel into the next brief when the
+        manager dispatches the round anyway."""
+        h = self.h
+        h.tp("dispatch", "T01")
+        p = h.kb / "architecture" / "overview.md"
+        p.parent.mkdir(parents=True)
+        p.write_text("# Overview\n\nSee [missing](nope.md).\n")   # the docs check fails
+        h.result("T01", "author", changed=["architecture/overview.md"])
+        h.tp("record", "T01", "--agent-id", "agent-77")
+        self.assertEqual(statuses(h)["T01"], "needs_fix")
+        h.tp("dispatch", "T01")
+        # the fix round disputes the finding instead of fixing it (a disputed finding may land nothing)
+        h.result("T01", "fix", summary="The link exists; the checker miscounts.",
+                 disputes=[{"finding": "docs", "why": "nope.md exists at the repo root; the checker only looks in kb/"}])
+        out = h.tp("record", "T01", "--agent-id", "agent-77").out
+        self.assertIn("disputes 1 finding", out)         # the dispute leads the FAIL
+        self.assertIn("nope.md exists", out)             # verbatim, from the hand-back
+        self.assertIn("Check `docs` failed", out)        # the finding stands until ruled on
+        self.assertIn("routing claim, not a fix", out)   # with the routing counsel
+        self.assertEqual(statuses(h)["T01"], "needs_fix")
+        h.tp("dispatch", "T01")
+        brief = (h.run_dir("T01") / "brief-fix-2.md").read_text()
+        self.assertIn("disputed", brief)                  # the next agent sees the prior dispute
+        self.assertIn("nope.md exists", brief)
+
     def test_clean_author_pass_goes_to_the_manager_fact_check(self) -> None:
         out = self.h.author("T01", "architecture/overview.md").out
         self.assertEqual(statuses(self.h)["T01"], "needs_check")

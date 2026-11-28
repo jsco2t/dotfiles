@@ -726,6 +726,10 @@ def cmd_dispatch(wf: Workflow, tid: str) -> str:
             rnd = ts["round"]
             brief, result = run / f"brief-fix-{rnd}.md", run / "result-fix.json"
             ctx.update(cap=_cap(ts), fix_expect=ts.get("fix_expect"), fixing=ts.get("fixing"))
+            if ts.get("disputes"):
+                # The prior round disputed a finding and the manager dispatched anyway: the
+                # next agent must see its predecessor's dispute, not redispute it blind.
+                ctx["prior_disputes"] = ts.pop("disputes")
             text = briefs.fix(task, rnd, ctx, _stale_guard(wf, task, scope, rnd) + ts["findings"], result,
                               same_agent=bool(act["agent_id"]))
             label = f"fix-{rnd}"
@@ -1088,10 +1092,26 @@ def _stale_guard(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], rnd:
             "older finding."]
 
 
+# A dispute a hand-back carries is a routing claim, not a fix: it must reach the manager at
+# the decision point — printed ahead of the findings and the dispatch — or the round is sent
+# on a finding its own author has already shown wrong (a live run lost the dispute in the
+# result file and needed a human plan revision to drop a structurally broken check).
+_DISPUTE_COUNSEL = ("A dispute is a routing claim, not a fix — verify it against the log before dispatching: "
+                    "if it holds, the finding leaves the fix loop (a check that cannot pass is a plan defect: "
+                    "`tp plan amend` drops it; a wrong test: `tp rebaseline-tests`); dispatch the round only for "
+                    "findings nobody disputes.")
+
+
+def _dispute_lines(disputes: Optional[List[Dict[str, Any]]]) -> List[str]:
+    return [f"  - disputed `{d.get('finding', '?')}`: {d.get('why', '')}"
+            for d in (disputes or []) if isinstance(d, dict) and d.get("why")]
+
+
 def _fail(wf: Workflow, ts: Dict[str, Any], tid: str, findings: List[str], fixing: str,
-          ws: Optional[Path] = None) -> str:
+          ws: Optional[Path] = None, disputes: Optional[List[Dict[str, Any]]] = None) -> str:
     """ws: the task's workspace, snapshotted as it stood at the failure (the fix brief's
-    staleness guard compares against it)."""
+    staleness guard compares against it). disputes: the hand-back's disputes, printed ahead
+    of the findings so the manager routes them before any round is dispatched."""
     ts["round"] += 1
     ts["fixing"] = fixing
     ts["findings"] = findings
@@ -1099,7 +1119,15 @@ def _fail(wf: Workflow, ts: Dict[str, Any], tid: str, findings: List[str], fixin
     (run / f"findings-{ts['round']}.json").write_text(json.dumps(findings, indent=1))
     if ws is not None:
         snapshot.save(run / f"snap-failed-{ts['round']}.json", _take(wf, ws))
-    lines = [f"  - {f}" for f in findings]
+    if disputes:
+        ts["disputes"] = disputes
+    else:
+        ts.pop("disputes", None)
+    lines = _dispute_lines(disputes) + [f"  - {f}" for f in findings]
+    head = [f"FAIL {tid} → fix round {ts['round']} of {_cap(ts)}"
+            + (f" — the hand-back disputes {len(disputes)} finding"
+               f"{'s' if len(disputes) != 1 else ''} (verify before dispatching):"
+               if disputes else ":")]
     if ts["round"] > _cap(ts):
         ts["status"] = "blocked"
         wf.event("blocked", id=tid, reason="rounds")
@@ -1118,7 +1146,7 @@ def _fail(wf: Workflow, ts: Dict[str, Any], tid: str, findings: List[str], fixin
         return "\n".join([f"BLOCKED {tid}: still failing after {_cap(ts)} fix rounds — the human decides "
                           "(retry, skip, or revise the plan)."] + lines)
     ts["status"] = "needs_fix"
-    return "\n".join([f"FAIL {tid} → fix round {ts['round']} of {_cap(ts)}:"] + lines)
+    return "\n".join(head + lines + ([_DISPUTE_COUNSEL] if disputes else []))
 
 
 def add_fix(wf: Workflow, state: Dict[str, Any], tid: str, findings: List[str], fixing: str,
@@ -1464,7 +1492,8 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
                    "implementations land — not this task's failure, so no fix round. `tp next` offers "
                    f"`tp recheck {tid}` once they land. {' '.join(msgs)}".rstrip())
         elif findings:
-            out = _fail(wf, ts, tid, findings, fixing=effective, ws=ws)
+            out = _fail(wf, ts, tid, findings, fixing=effective, ws=ws,
+                        disputes=[d for d in (data.get("disputes") or []) if isinstance(d, dict)])
         elif effective == "tests" and expect and ts.get("queued"):
             # The failing test is in; the code author fixes the behaviour against it. This round
             # was opened by the review, so it does not count against the task's own cap.
@@ -1490,6 +1519,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
             # review still reads the change, and reopen puts it back in a fix round).
             ts["status"] = "accepted"
             ts["accepted"] = now_iso()
+            ts.pop("disputes", None)  # a green round settles whatever the last one disputed
             ts["note"] = "auto-accepted: green gates on a mechanical round; the review still reads the change."
             task_min = minutes + sum(e.get("minutes", 0.0) for e in wf.events()
                                      if e["kind"] == "record" and e.get("id") == tid)

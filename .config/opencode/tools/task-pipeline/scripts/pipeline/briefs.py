@@ -208,6 +208,10 @@ def fix(task: Dict[str, Any], rnd: int, ctx: Dict[str, Any], findings: List[str]
     out += ["## Fix", "", f"Round {rnd} of {ctx.get('cap', limit('max_fix_rounds'))}. Address every blocking item below: fix it, or "
             "dispute it with evidence in `disputes`. Change nothing else.", ""]
     out += [f"- {f}" for f in findings] + [""]
+    for d in ctx.get("prior_disputes") or []:
+        if isinstance(d, dict) and d.get("why"):
+            out += [f"- (disputed in the previous round — this round was sent anyway: strengthen the dispute "
+                    f"with evidence, or fix it) `{d.get('finding', '?')}`: {d.get('why', '')}", ""]
     if not same_agent:
         out += _task_body(task, ctx) + _style()
     else:

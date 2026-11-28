@@ -106,6 +106,23 @@ class PlanCheckTest(unittest.TestCase):
         finally:
             h.close()
 
+    def test_a_dirs_check_on_a_task_with_no_directories_is_refused(self) -> None:
+        """Seen live (KUB-1335 follow-up, T05): the task's only path was the repo-root
+        scope.json, so its `go vet {dirs}` check collapsed to `go vet .` at a root with no
+        Go files — structurally doomed, failing every round until a human revised the plan
+        mid-run. A per-task {dirs} check on a task that names no directories is refused at
+        plan check, before any round burns on it."""
+        plan = self.h.plan([self.h.task("T01", "a.md", checks=["vet"])],
+                           checks={"vet": {"cmd": "go vet {dirs}", "cwd": "kb"}})
+        text = self.check(plan, expect=2).text
+        self.assertIn("vet", text)
+        self.assertIn("no directories", text)
+
+    def test_a_dirs_check_on_a_directory_scoped_task_passes(self) -> None:
+        plan = self.h.plan([self.h.task("T01", "architecture/a.md", checks=["vet"])],
+                           checks={"vet": {"cmd": "go vet {dirs}", "cwd": "kb"}})
+        self.check(plan)
+
     def test_unknown_research_source_is_refused(self) -> None:
         plan = self.h.plan([self.h.task("T01", "a.md", sources=["research:R9"])])
         self.assertIn("R9", self.check(plan, expect=2).text)

@@ -404,6 +404,16 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
             if c not in checks:
                 errs.append(f"{tid}: unknown check {c!r} (built in: {', '.join(BUILTIN_TASK_CHECKS)}; "
                             "or define it in plan `checks`).")
+            elif "{dirs}" in str(plan.get("checks", {}).get(c, {}).get("cmd", "")):
+                # {dirs} scopes a check to the task's own directories; a task that names none
+                # (root-level files only) collapses it to the bare workspace root — a check
+                # that fails structurally every round until the plan is revised mid-run
+                # (seen live: `go vet .` at a root with no Go files).
+                parents = {PurePosixPath(str(p)).parent.as_posix() for p in t.get("paths", [])}
+                if not parents or parents == {"."}:
+                    errs.append(f"{tid}: check {c!r} runs over {{dirs}}, but the task's paths name no "
+                                "directories — the check would run at the workspace root and cannot pass. "
+                                "Drop the check from this task or give the task paths inside directories.")
         est = t.get("estimate_min", 5 if publish else None)
         if not isinstance(est, int) or est < 1:
             errs.append(f"{tid}: estimate_min must be a whole number of minutes.")

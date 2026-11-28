@@ -864,6 +864,8 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
     plan = load_plan(wf)
     scope = scopemod.load_scope(wf)
     state["plan_approved_sha"] = state["plan_submitted_sha"]
+    if sha_file(wf.plan_json) == state["plan_approved_sha"]:
+        keep_approved(wf)
     state["conventions_sha"] = conventions_shas(plan, scope, wf.root)
     state["phase"] = "EXECUTING"
     state["approved"] = now_iso()
@@ -884,6 +886,84 @@ def cmd_approve(wf: Workflow, answer: str) -> str:
 
 
 AMEND_JSON = "plan-amend.json"
+APPROVED_COPY = "plan-approved.json"  # under .tp: what plan.json was when last approved
+_FINISHED = ("accepted", "skipped")
+
+
+def keep_approved(wf: Workflow) -> None:
+    """Keep a copy of plan.json as just approved, so an edit to it can be turned into a draft and
+    the approved plan put back (`tp plan amend`) instead of stopping every tp command."""
+    wf.meta.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(wf.plan_json, wf.meta / APPROVED_COPY)
+
+
+def _edited_plan_to_draft(wf: Workflow, state: Dict[str, Any]) -> bool:
+    """plan.json was edited after approval: make the edit the amendment draft and restore the
+    approved plan. False when tp has no copy of the approved plan, or a draft already exists."""
+    copy, draft = wf.meta / APPROVED_COPY, wf.root / AMEND_JSON
+    if draft.exists() or not copy.exists() or sha_file(copy) != state.get("plan_approved_sha"):
+        return False
+    shutil.copyfile(wf.plan_json, draft)
+    shutil.copyfile(copy, wf.plan_json)
+    return True
+
+
+def _complete_draft(wf: Workflow, state: Dict[str, Any]) -> List[str]:
+    """Fill in what an amendment adding work always needs, so the manager writes only the work:
+    - a plan-amend.json holding only the tasks to add or change (`{"tasks": [...]}`, no `title`)
+      becomes the whole draft, the approved plan with those tasks put in by id;
+    - an added task that writes a finished task's files is ordered after it;
+    - added work no review batch names gets a new batch (a started batch keeps exactly its tasks).
+    In a real run (KUB-1407) the manager took four tries to add two fix tasks: it edited plan.json,
+    then wrote only the new tasks (read as dropping every approved one), then hit an overlap with an
+    accepted task. Writes the draft only when it changes it; returns what it did."""
+    draft_path = wf.root / AMEND_JSON
+    if not draft_path.exists():
+        return []
+    draft = load_json(draft_path, "the amended plan")
+    if not isinstance(draft, dict) or not isinstance(draft.get("tasks"), list):
+        return []
+    approved = load_plan(wf)
+    scope, _ = _amend_scope(wf)
+    notes: List[str] = []
+    if "title" in draft:
+        merged = draft
+    else:
+        merged = json.loads(json.dumps(approved))
+        at = {t["id"]: i for i, t in enumerate(merged["tasks"])}
+        for t in draft["tasks"]:
+            if t.get("id") in at:
+                merged["tasks"][at[t["id"]]] = t
+            else:
+                merged["tasks"].append(t)
+        for key, value in draft.items():
+            if key != "tasks":
+                merged[key] = value
+        notes.append(f"merged {len(draft['tasks'])} task(s) into the approved plan ({AMEND_JSON} now holds the "
+                     "whole draft)")
+    old_ids = {t["id"] for t in approved["tasks"]}
+    added = [t.get("id") for t in merged["tasks"] if t.get("id") not in old_ids]
+    for t in (t for t in merged["tasks"] if t.get("id") in added):
+        after = [o["id"] for o in merged["tasks"] if o["id"] != t["id"] and o.get("workspace") == t.get("workspace")
+                 and state["tasks"].get(o["id"], {}).get("status") in _FINISHED and o["id"] not in t.get("depends_on", [])
+                 and any(paths_overlap(p, q) for p in t.get("paths", []) for q in o.get("paths", []))]
+        if after:
+            t["depends_on"] = list(t.get("depends_on", [])) + after
+            notes.append(f"{t['id']} writes files of {', '.join(after)} (finished): ordered after them")
+    # The batches as written, or else the ones the approved plan ran with (a plan without
+    # `review_batches` gets default ones, which would otherwise regroup started batches).
+    batches = merged.get("review_batches") or review_batches(approved, scope)
+    placed = {tid for b in batches for tid in b.get("tasks", [])}
+    by_id = {t.get("id"): t for t in merged["tasks"]}
+    fresh = [tid for tid in added if tid in by_id and tid not in placed
+             and not is_integration(by_id[tid], scope) and not is_gate(by_id[tid])]
+    if batches and fresh:
+        n = max([int(b["id"][1:]) for b in batches if re.fullmatch(r"B\d+", str(b.get("id")))] + [0]) + 1
+        merged["review_batches"] = [dict(b) for b in batches] + [{"id": f"B{n}", "tasks": fresh}]
+        notes.append(f"new review batch B{n}: {', '.join(fresh)}")
+    if notes:
+        draft_path.write_text(json.dumps(merged, indent=2) + "\n")
+    return notes
 
 
 def _amendment(approved: Dict[str, Any], draft: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
@@ -1150,6 +1230,7 @@ def _apply_amendment(wf: Workflow, state: Dict[str, Any], draft: Dict[str, Any],
     (wf.root / "plan-amend.md").unlink(missing_ok=True)
     state.pop("amend_checked", None)
     state["plan_approved_sha"] = state["plan_submitted_sha"] = sha_file(wf.plan_json)
+    keep_approved(wf)
     state["conventions_sha"] = conventions_shas(draft, scope, wf.root)
     ids = [t["id"] for t in draft["tasks"]]
     for tid in [t for t in state["tasks"] if t not in ids]:
@@ -1177,6 +1258,7 @@ def _amend_scope(wf: Workflow) -> Tuple[Dict[str, Any], bool]:
 def _checked_draft(wf: Workflow, state: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any],
                                                                  List[str], Set[str]]:
     """(approved, draft, scope, changes, frozen) for a plan-amend.json that validates."""
+    _complete_draft(wf, state)
     approved = load_plan(wf)
     scope, _ = _amend_scope(wf)
     draft_path = wf.root / AMEND_JSON
@@ -1205,16 +1287,26 @@ def cmd_amend(wf: Workflow, answer: Optional[str], delegated: bool = False, note
         state = wf.load()
         if state["phase"] != "EXECUTING":
             raise TPError(f"amend changes a plan mid-run; the workflow is {state['phase']}.")
+        notes = []
         if sha_file(wf.plan_json) != state.get("plan_approved_sha"):
-            raise TPError("plan.json changed after approval — restore it; an amendment goes in plan-amend.json.")
+            if not _edited_plan_to_draft(wf, state):
+                raise TPError("plan.json changed after approval — restore it; an amendment goes in plan-amend.json "
+                              "(only the tasks to add or change: `{\"tasks\": [...]}`).")
+            notes.append("your edit of plan.json is now the draft plan-amend.json; plan.json is the approved plan again")
         draft_path = wf.root / AMEND_JSON
         if not draft_path.exists():
             shutil.copyfile(wf.plan_json, draft_path)
             return (f"Draft started: {draft_path}, a copy of the approved plan. Add tasks, or change or remove tasks "
                     "not yet dispatched (new work needs a review batch whose review has not started). To change "
                     "conventions, write them to a new file and point `conventions` at it: the frozen file stays "
-                    "as it is until the human agrees. Then `tp plan amend` to check it — before you ask anything.")
-        approved, draft, scope, changes, _ = _checked_draft(wf, state)
+                    "as it is until the human agrees. Then `tp plan amend` to check it — before you ask anything. "
+                    "To add or change tasks only, the file may instead hold just them, `{\"tasks\": [...]}`: tp "
+                    "merges them into the approved plan.")
+        notes += _complete_draft(wf, state)
+        try:
+            approved, draft, scope, changes, _ = _checked_draft(wf, state)
+        except TPError as exc:
+            raise TPError(*[f"note: {n}." for n in notes], *exc.lines)
         if not changes:
             return f"{draft_path.name} changes nothing yet."
         remaining, _ = _remaining(draft, scope, state)
@@ -1248,8 +1340,8 @@ def cmd_amend(wf: Workflow, answer: Optional[str], delegated: bool = False, note
                 tail = [f"Inside the human's standing delegation ({used} of {allow} fix tasks used): `tp plan amend "
                         "--delegated --note \"<what is wrong and why it needs fixing>\"` — no question; the report "
                         "lists it."]
-            return "\n".join([f"amendment ok — {'; '.join(changes)}:"] + _change_lines(approved, draft) + remaining
-                             + tail)
+            return "\n".join([f"note: {n}." for n in notes] + [f"amendment ok — {'; '.join(changes)}:"]
+                             + _change_lines(approved, draft) + remaining + tail)
         checked = state.get("amend_checked") or {}
         checked_now = {"sha": sha_file(draft_path)}
         if record:
@@ -1806,6 +1898,7 @@ def cmd_widen(wf: Workflow, tid: str, paths: List[str], reason: str, answer: Opt
                     t["depends_on"] = list(dict.fromkeys(list(t.get("depends_on", [])) + after))
             draft.write_text(json.dumps(data, indent=2) + "\n")
         state["plan_approved_sha"] = state["plan_submitted_sha"] = sha_file(wf.plan_json)
+        keep_approved(wf)
         state["tasks"][tid]["widened"] = widened + added
         wf.save(state)
         (wf.root / "plan.md").write_text(render(plan, scope, wf))

@@ -129,7 +129,9 @@ baseline --leave --answer "..."`). Loop:
   a check pinned to the repo's toolchain or run as `make -jN`, or plumbing scope → `tp plan|scope amend --delegated`; more than that which strengthens the run
   → `--review --note`, send the call, `--record` (the reviewer decides; the check says which).
 - **For the human** (Rule 1): `tp ask --about <id>`, keep working, then `tp answer` and the
-  `tp resolve … --by human` it prints; a plan change is checked first (`tp plan amend`).
+  `tp resolve … --by human` it prints; a plan change is checked first (`tp plan amend`). To add or
+  change tasks, write only them to plan-amend.json (`{"tasks": [...]}`, never edit plan.json): tp
+  merges them, gives new work a review batch, and orders it after finished tasks it touches.
 - **gate / publish** → `tp gate <id>` / `tp publish <id>` (dry run; posts come last, after the
   closeout; the first dry run runs the final checks:
   run it in the background); pre-approved posts:

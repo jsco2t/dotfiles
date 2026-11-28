@@ -121,7 +121,8 @@ def _readonly_changes(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any]
 
 def _loaded(wf: Workflow, state: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Dict[str, Any]]]:
     if state.get("plan_approved_sha") and sha_file(wf.plan_json) != state["plan_approved_sha"]:
-        raise TPError("plan.json changed after approval — restore it, or ask the human and run "
+        raise TPError("plan.json changed after approval. If you meant to amend the plan, `tp plan amend` makes your "
+                      "edit the draft and restores the approved plan; otherwise restore it, or ask the human and run "
                       "`tp revise --feedback \"<their words>\"`.")
     plan = planmod.load_plan(wf)
     scope = scopemod.load_scope(wf)

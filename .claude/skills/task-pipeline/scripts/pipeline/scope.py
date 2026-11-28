@@ -489,6 +489,7 @@ def _keep_approved_plan(wf: Workflow, state: Dict[str, Any]) -> bool:
     if planmod.validate(plan, scope, state, wf.root, {t["id"] for t in plan["tasks"]}):
         return False
     state["plan_approved_sha"] = state["plan_submitted_sha"] = revised["plan_sha"]
+    planmod.keep_approved(wf)
     state["phase"] = "EXECUTING"
     planmod.merge_baselines(wf, state, scope)
     state["reviews"] = review.new_reviews(plan, scope, state.get("reviews", {}))

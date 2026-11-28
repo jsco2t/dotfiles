@@ -252,13 +252,17 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("ids", nargs="+", metavar="id")
     s = sub.add_parser("sample", help="the fact-check sample for a task")
     s.add_argument("id")
+    long_help = ("run the task's tests and checks with the final checks' time limit (in the background) — after a "
+                 "record that stopped because they ran past the foreground limit")
     s = sub.add_parser("record", help="record an agent's hand-back and run the gates")
     s.add_argument("id")
     s.add_argument("--agent-id", help="the agent's id, for fix rounds by the same agent")
+    s.add_argument("--long", action="store_true", help=long_help)
     s = sub.add_parser("advance", help="record a hand-back, then dispatch every step that is ready because of it "
                                        "(one call instead of record, next, dispatch)")
     s.add_argument("id")
     s.add_argument("--agent-id", help="the agent's id, for fix rounds by the same agent")
+    s.add_argument("--long", action="store_true", help=long_help)
     s = sub.add_parser("publish", help="post a publish task's reviewed draft to Jira: a dry run without --answer; "
                                        "with the human's words, the post itself, then a read-back")
     s.add_argument("id")
@@ -306,7 +310,11 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("note", help="log something noticed outside the plan")
     s.add_argument("text")
-    sub.add_parser("final", help="package checks and the report")
+    s = sub.add_parser("final", help="package checks and the report")
+    s.add_argument("--waive", action="store_true",
+                   help="with --answer: the human accepts the final-check failures tp final just stopped on; it "
+                        "then finishes over them without re-running them, while the workspaces do not change")
+    s.add_argument("--answer", help="--waive: the human's words, verbatim")
     sub.add_parser("report", help="timings")
 
     s = sub.add_parser("check-docs", help="check Markdown links and path:line citations")
@@ -457,9 +465,9 @@ def dispatch(args: argparse.Namespace) -> str:
                 raise
         return "\n\n".join(done)
     if c == "record":
-        return run.after_record(wf, run.cmd_record(wf, args.id, args.agent_id))
+        return run.after_record(wf, run.cmd_record(wf, args.id, args.agent_id, long=args.long))
     if c == "advance":
-        return run.cmd_advance(wf, args.id, args.agent_id)
+        return run.cmd_advance(wf, args.id, args.agent_id, long=args.long)
     if c == "publish":
         return publish.cmd_publish(wf, args.id, args.answer, preapproved=args.preapproved)
     if c == "sample":
@@ -492,6 +500,10 @@ def dispatch(args: argparse.Namespace) -> str:
         wf.noticed("manager", args.text)
         return "noted in noticed.md (shown to the human at approval and in the report)."
     if c == "final":
+        if args.waive:
+            return run.cmd_final_waive(wf, args.answer or "")
+        if args.answer:
+            raise TPError("--answer goes with --waive.")
         return run.cmd_final(wf)
     if c == "report":
         return run.cmd_report(wf)

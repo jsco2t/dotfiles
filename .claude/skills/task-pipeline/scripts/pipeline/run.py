@@ -22,10 +22,11 @@ from .common import (TP_SCRIPT, TPError, Workflow, agent_context_tokens, gap_min
                      now_iso, sha_file, waiting_gaps, words)
 
 DONE_STATES = ("accepted", "skipped")
-CHECK_TIMEOUT = 540     # a task's tests and checks: they run inside a foreground `tp record`
+# (The TP_* variables exist for the test suite, which cannot wait minutes for a timeout.)
+CHECK_TIMEOUT = int(os.environ.get("TP_CHECK_TIMEOUT", 540))  # a task's tests and checks: a foreground `tp record`
 # The final checks run in the background (`tp final`, the first publish dry run): a whole suite
 # needs longer. Real runs' `make test` passed in 11 and 17 minutes after timing out at 540s.
-FINAL_CHECK_TIMEOUT = 45 * 60
+FINAL_CHECK_TIMEOUT = int(os.environ.get("TP_FINAL_CHECK_TIMEOUT", 45 * 60))
 SUMMARY_WORDS = 80      # what a hand-back summary is shown at
 SUMMARY_CEILING = 300   # past this the agent rewrites it
 
@@ -384,8 +385,9 @@ GUIDE = {
     "dispatch": "`tp dispatch {id}`, then send the call it prints.",
     "fix": "`tp dispatch {id}` (fix round), then send the call it prints.",
     "review": "`tp dispatch {id}`, then send the call it prints.",
-    "check": "Fact-check {id}: read the sample `tp record` printed (or `tp sample {id}`); then "
-             "`tp accept {id} --note \"...\"` or `tp reject {id} --reason \"...\"`.",
+    "check": "Fact-check {id}: read the sample `tp record` printed (or `tp sample {id}`) — tp already ran its "
+             "tests and checks, so do not run them again; then `tp accept {id} --note \"...\"` or `tp reject {id} "
+             "--reason \"...\"`.",
     "triage": "Triage {id}: `tp show {id} --part blocking`, check each against the source, then "
               "`tp triage {id} --accept-all`, or `--dismiss F# --reason \"...\"` (repeat the pair for a reason "
               "each) and/or `--assign F#=T##`.",
@@ -849,14 +851,23 @@ def _trimmed(text: str, limit: int = SUMMARY_WORDS) -> str:
     return " ".join(ws[:limit]) + (" …" if len(ws) > limit else "")
 
 
-def _run_cmd(cmd: str, cwd: Path, log: Path, timeout: Optional[int] = None) -> Tuple[bool, str]:
-    timeout = timeout or CHECK_TIMEOUT
+# Results run ahead of the workflow lock (`tp record --long`), by (command, cwd): the locked record
+# takes them instead of running the command again.
+_PRERUN: Dict[Tuple[str, str], Tuple[bool, str]] = {}
+
+
+def _execute(cmd: str, cwd: Path, timeout: int) -> Tuple[bool, str]:
     try:
         proc = subprocess.run(["bash", "-c", cmd], cwd=str(cwd), capture_output=True, text=True,
                               timeout=timeout)
-        output, ok = proc.stdout + proc.stderr, proc.returncode == 0
+        return proc.returncode == 0, proc.stdout + proc.stderr
     except subprocess.TimeoutExpired:
-        output, ok = f"timed out after {timeout}s", False
+        return False, f"timed out after {timeout}s"
+
+
+def _run_cmd(cmd: str, cwd: Path, log: Path, timeout: Optional[int] = None) -> Tuple[bool, str]:
+    pre = _PRERUN.pop((cmd, str(cwd)), None)
+    ok, output = pre if pre is not None else _execute(cmd, cwd, timeout or CHECK_TIMEOUT)
     log.write_text(f"$ {cmd}\n(cwd {cwd})\n\n{output}")
     tail = "\n".join(output.strip().splitlines()[-12:])
     return ok, tail
@@ -1014,7 +1025,7 @@ def _task_dirs(cmd: str, task: Dict[str, Any], scope: Dict[str, Any]) -> List[st
 
 
 def _task_checks(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan: Dict[str, Any],
-                 label: str) -> List[str]:
+                 label: str, timeout: Optional[int] = None) -> List[str]:
     failures = []
     ws = _ws(scope, task["workspace"])
     for name in task.get("checks", []):
@@ -1037,10 +1048,22 @@ def _task_checks(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any], plan
                 # Run bare, `gofmt -l` and `grep` read stdin instead: nothing of this task's to check.
                 log.write_text(f"skipped: the task writes no file for `{spec['cmd']}`")
                 continue
-            ok, tail = _run_cmd(_expand_cmd(spec["cmd"], task, scope), cwd, log)
-            if not ok:
+            ok, tail = _run_cmd(_expand_cmd(spec["cmd"], task, scope), cwd, log, timeout)
+            if _timed_out(ok, tail):
+                failures.append(f"Check `{name}` {tail} (log {log})")
+            elif not ok:
                 failures.append(f"Check `{name}` failed (log {log}): {tail}")
     return failures
+
+
+_TIMED_OUT = "timed out after"
+_SLOW_CHECK = re.compile(r"^Check `[^`]+` timed out after \d+s")
+
+
+def _timed_out(ok: bool, tail: str) -> bool:
+    """A run that hit its time limit (`_run_cmd` reports it in place of output): it neither passed
+    nor failed, so it is never red, never green, and never a finding."""
+    return not ok and tail.startswith(_TIMED_OUT)
 
 
 # A failure location in test or build output: `path/file.go:12:3` or `File "/abs/file.py", line 4`.
@@ -1136,6 +1159,10 @@ def cmd_red(wf: Workflow, tid: str) -> str:
         fl, ts = state["in_flight"].get(tid), state["tasks"][tid]
         if fl is None or fl["since"] != since:
             raise TPError(f"{tid} was recorded or re-dispatched while its tests ran; nothing was recorded.")
+        if _timed_out(ok, tail):
+            raise TPError(f"`{task['test_cmd']}` {tail}: a run that does not finish is neither red nor green, so "
+                          "nothing was recorded. Hand back `blocked` saying the task's test_cmd is too slow to run "
+                          "here; the manager narrows it to this task's tests, then you run `tp red` again.")
         if mode == "red" and ok:
             raise TPError(f"`{task['test_cmd']}` passes: the tests are not red, so they do not prove the new behaviour. "
                           f"Make them fail for the reason the task names (log {log}).")
@@ -1186,9 +1213,12 @@ def cmd_recheck(wf: Workflow, tid: str) -> str:
             ts["fix_source"] = "gate"
             out = _fail(wf, ts, tid, findings, fixing=effective, ws=ws)
         else:
-            ts["status"] = "needs_review" if planmod.reviewer_for(task, scope) else "needs_check"
-            out = f"{tid} passed its checks on recheck (no fix round spent).\n" + (
-                _sample(wf, task, scope) if ts["status"] == "needs_check" else "Next: review.")
+            if planmod.reviewer_for(task, scope):
+                ts["status"] = "needs_review"
+                out = f"{tid} passed its checks on recheck (no fix round spent).\nNext: review."
+            else:
+                out = (f"{tid} passed its checks on recheck (no fix round spent).\n"
+                       + _checked(wf, state, scope, tasks, tid))
         wf.save(state)
         wf.event("recheck", id=tid, status=ts["status"])
         return out
@@ -1448,7 +1478,10 @@ def _sample(wf: Workflow, task: Dict[str, Any], scope: Dict[str, Any]) -> str:
     return "\n".join(out)
 
 
-def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
+def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str], long: bool = False) -> str:
+    """long: run the task's tests and checks with the final checks' time limit — for a suite that ran
+    past the foreground limit, re-recorded in the background. A timeout proves nothing either way, so
+    it never opens a fix round: the hand-back stays unrecorded until a run finishes."""
     if tid.startswith("amend/"):
         # The reviewer hands back like any agent; its verdict settles the amendment it judged.
         kind = (wf.load().get("amend_review") or {}).get("kind")
@@ -1456,6 +1489,39 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
             raise TPError(f"no amendment review is in flight ({tid}).")
         return (planmod.cmd_scope_amend(wf, None, record=True, agent_id=agent_id) if kind == "scope"
                 else planmod.cmd_amend(wf, None, record=True, agent_id=agent_id))
+    if long:
+        _prerun_long(wf, tid)
+    try:
+        return _record_locked(wf, tid, agent_id, long)
+    finally:
+        _PRERUN.clear()
+
+
+def _prerun_long(wf: Workflow, tid: str) -> None:
+    """`tp record --long`: run the task's suite and command checks before taking the workflow lock,
+    which every tp command waits on — held for a 45-minute suite, it would stall every other agent's
+    hand-back. The locked record then takes these results (the agent has handed back: its files
+    stand still)."""
+    state = wf.load()
+    plan, scope, tasks = _loaded(wf, state)
+    task = tasks.get(tid)
+    if task is None or tid not in state["in_flight"]:
+        return  # the locked record says why
+    ws = _ws(scope, task["workspace"])
+    cmds = [(task["test_cmd"], ws)] if task.get("test_cmd") else []
+    for name in task.get("checks", []):
+        spec = plan.get("checks", {}).get(name)
+        if name == "docs" or not isinstance(spec, dict):
+            continue
+        if ("{dirs}" in spec["cmd"] and not _task_dirs(spec["cmd"], task, scope)) or \
+                ("{files}" in spec["cmd"] and not _task_files_for(spec["cmd"], task, scope)):
+            continue  # skipped by the checks themselves
+        cmds.append((_expand_cmd(spec["cmd"], task, scope), _ws(scope, spec["cwd"]) if spec.get("cwd") else ws))
+    for cmd, cwd in cmds:
+        _PRERUN[(cmd, str(cwd))] = _execute(cmd, cwd, FINAL_CHECK_TIMEOUT)
+
+
+def _record_locked(wf: Workflow, tid: str, agent_id: Optional[str], long: bool) -> str:
     with wf.locked():
         state = wf.load()
         if tid.startswith("R"):
@@ -1485,8 +1551,11 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
         if errs:
             raise TPError(*[f"{res_path}: {e}" for e in errs],
                           "Ask the same agent to fix the file (SendMessage), then record again.")
-        for item in data.get("noticed", []):
-            wf.noticed(tid, str(item))
+        if fl.get("noticed_from") != str(res_path.stat().st_mtime_ns):
+            # Once per hand-back: a record that stops on a timed-out suite runs again for the same file.
+            for item in data.get("noticed", []):
+                wf.noticed(tid, str(item))
+            fl["noticed_from"] = str(res_path.stat().st_mtime_ns)
         state.get("lost", {}).pop(tid, None)  # a real hand-back ends a run of lost dispatches
         minutes = minutes_since(fl["since"])
         if data["status"] != "done":
@@ -1538,19 +1607,25 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
         findings += _role_fence(task, effective, step, [c for c in changed if c not in off], others + moved)
         label = f"{step}-{ts['round']}"
         expect = ts.get("fix_expect") if step == "fix" else None
+        limit_s = FINAL_CHECK_TIMEOUT if long else CHECK_TIMEOUT
+        slow: List[str] = []  # timed-out runs: they prove nothing, so they are never findings
         if effective == "tests" and expect == "green":
-            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
-            if ok:
+            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log", limit_s)
+            if _timed_out(ok, tail):
+                slow.append(f"`{task['test_cmd']}` {tail}")
+            elif ok:
                 msgs.append(f"tests still pass: `{task['test_cmd']}`.")
             else:
                 findings.append(f"A test-files-only fix must leave the tests passing, and `{task['test_cmd']}` now "
                                 f"fails: {tail}")
-            if not findings:
+            if not findings and not slow:
                 ts["tests_hash"] = _tests_hash(task, scope)
                 _freeze_tests_baseline(wf, task, scope)
         elif effective == "tests":
-            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
-            if expect == "red" or task.get("test_mode", "red") == "red":
+            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log", limit_s)
+            if _timed_out(ok, tail):
+                slow.append(f"`{task['test_cmd']}` {tail}")
+            elif expect == "red" or task.get("test_mode", "red") == "red":
                 if ok:
                     findings.append(f"The tests pass before any implementation, so they are not red: they do not "
                                     f"prove the new behaviour. `{task['test_cmd']}` passed.")
@@ -1560,7 +1635,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
                 findings.append(f"The characterization tests must pass against current code: {tail}")
             else:
                 msgs.append("pinned: characterization tests pass.")
-            if not findings:
+            if not findings and not slow:
                 ts["tests_hash"] = _tests_hash(task, scope)
                 _freeze_tests_baseline(wf, task, scope)
         elif effective in ("impl", "build"):
@@ -1590,13 +1665,30 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
                                 "the baseline moves to them.")
                     ts["tests_hash"] = now_hash
                     _freeze_tests_baseline(wf, task, scope)
-            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log")
-            if ok:
+            ok, tail = _run_cmd(task["test_cmd"], ws, wf.run_dir(tid) / f"tests-{label}.log", limit_s)
+            if _timed_out(ok, tail):
+                slow.append(f"`{task['test_cmd']}` {tail}")
+            elif ok:
                 msgs.append(f"green: `{task['test_cmd']}` passes.")
             else:
                 findings.append(f"The tests are not green: `{task['test_cmd']}` failed: {tail}")
         if effective in ("author", "impl", "build"):
-            findings += _task_checks(wf, task, scope, plan, label)
+            checked = _task_checks(wf, task, scope, plan, label, limit_s)
+            slow += [f for f in checked if _SLOW_CHECK.match(f)]
+            findings += [f for f in checked if not _SLOW_CHECK.match(f)]
+        if slow and not findings:
+            # Nothing failed; something did not finish. A fix round cannot make a suite faster (a real
+            # run sent three, and the manager overrode each after timing the suite by hand).
+            wf.save(state)  # in flight still: the same hand-back is recorded again
+            wf.event("record_slow", id=tid, step=step, long=long or None)
+            if not long:
+                return (f"{tid} NOT recorded: {'; '.join(slow)[:400]}. Past the {CHECK_TIMEOUT}s foreground limit "
+                        "a run proves nothing either way, so no fix round. Run `tp record " + tid + " --long` in the "
+                        f"background (Bash run_in_background; it allows {FINAL_CHECK_TIMEOUT // 60} min), then "
+                        "`tp next`. Nothing else about the hand-back changes.")
+            return (f"{tid} NOT recorded: even with {FINAL_CHECK_TIMEOUT // 60} min, {'; '.join(slow)[:400]}. Narrow "
+                    "the task's test_cmd to its own tests (`-run` over their names, its own packages) with `tp plan "
+                    f"amend` (it says who decides), then `tp record {tid}` again.")
         del state["in_flight"][tid]
         waits_on = (_sibling_red(wf, state, tasks, tid, ws, label)
                     if findings and effective in ("author", "impl", "build")
@@ -1624,8 +1716,11 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
         elif effective == "tests" and expect:
             ts.pop("fix_expect", None)
             ts.pop("queued", None)
-            ts["status"] = "needs_review" if planmod.reviewer_for(task, scope) else "needs_check"
-            out = f"{tid} test fix recorded. " + " ".join(msgs) + "\n" + _sample(wf, task, scope)
+            if planmod.reviewer_for(task, scope):
+                ts["status"] = "needs_review"
+                out = f"{tid} test fix recorded. " + " ".join(msgs) + " Next: review."
+            else:
+                out = f"{tid} test fix recorded. " + " ".join(msgs) + "\n" + _checked(wf, state, scope, tasks, tid)
         elif effective == "tests":
             ts["status"] = "needs_impl"
             out = f"{tid} tests recorded; " + " ".join(msgs) + " Next: implementation."
@@ -1633,8 +1728,7 @@ def cmd_record(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
             ts["status"] = "needs_review"
             out = f"{tid} passed its checks. " + " ".join(msgs) + " Next: review."
         else:
-            ts["status"] = "needs_check"
-            out = f"{tid} passed its checks. " + " ".join(msgs) + "\n" + _sample(wf, task, scope)
+            out = f"{tid} passed its checks. " + " ".join(msgs) + "\n" + _checked(wf, state, scope, tasks, tid)
         if not findings and (changed or drafted):
             out += _stale_docs(wf, state, plan, scope, tasks, tid, ws, changed)
         wf.save(state)
@@ -1905,17 +1999,7 @@ def cmd_accept(wf: Workflow, tids: List[str], note: str, override: bool = False)
                 if tid in unsent:
                     state["in_flight"].pop(tid)
                 ts.update(blocked=None, fixing=None, findings=[])
-            ts.update(status="accepted", accepted=now_iso(), note=note)
-            task = tasks.get(tid)
-            if task and "docs" in task.get("checks", []):
-                # What the docs check already doubts at acceptance: a later code change is judged
-                # only on doubts it adds (see _stale_docs).
-                ts["doc_doubts"] = _doc_problems(wf, task, scope)[1]
-            mins = task_minutes(state, ts)
-            wf.event("accept", id=tid, minutes=round(mins, 1), wall=round(minutes_since(ts["started"]), 1),
-                     override=override or None)
-            out.append(f"accepted {tid}{' over its gate findings' if override else ''} ({mins:.0f} min, "
-                       f"{ts['round']} fix rounds)."
+            out.append(_accept_one(wf, state, scope, tasks, tid, note, override=override)
                        + (" Its fix round is cancelled: if you already sent that call, TaskStop the agent."
                           if tid in unsent else ""))
         wf.save(state)
@@ -1923,6 +2007,53 @@ def cmd_accept(wf: Workflow, tids: List[str], note: str, override: bool = False)
             for tid in tids:
                 wf.decision(f"accept {tid} over its gate findings", note, who="manager")
         return "\n".join(out)
+
+
+def _accept_one(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], tasks: Dict[str, Dict[str, Any]],
+                tid: str, note: str, override: bool = False, auto: Optional[str] = None) -> str:
+    """Mark one task accepted (the caller holds the lock and saves): the record every acceptance
+    leaves, whether the manager fact-checked it, overrode its gate, or a review covers it (auto)."""
+    ts = state["tasks"][tid]
+    ts.update(status="accepted", accepted=now_iso(), note=note)
+    task = tasks.get(tid)
+    if task and "docs" in task.get("checks", []):
+        # What the docs check already doubts at acceptance: a later code change is judged
+        # only on doubts it adds (see _stale_docs).
+        ts["doc_doubts"] = _doc_problems(wf, task, scope)[1]
+    mins = task_minutes(state, ts)
+    wf.event("accept", id=tid, minutes=round(mins, 1), wall=round(minutes_since(ts["started"]), 1),
+             override=override or None, auto=auto)
+    return (f"accepted {tid}{' over its gate findings' if override else ''} ({mins:.0f} min, "
+            f"{ts['round']} fix rounds)" + (f" — no fact check needed: {auto} reviews it." if auto else "."))
+
+
+def _covering_review(state: Dict[str, Any], scope: Dict[str, Any], task: Dict[str, Any]) -> Optional[str]:
+    """The review session that will still read this code task's change: one that has not started
+    (a batch review, or the whole-change review, which waits for every batch), or one waiting on this
+    task's fix to verify it. None for documents and other non-code work, which no code lens reads."""
+    if not planmod.is_code(task, scope) or os.environ.get("TP_AUTO_ACCEPT") == "0":  # 0: older test scenarios
+        return None
+    for sid, s in sorted(_review().sessions(state).items()):
+        if task["id"] not in (s.get("tasks") or []):
+            continue
+        if s["status"] == "pending" or (s["status"] == "waiting_fixes" and task["id"] in s.get("fix_tasks", [])):
+            return sid
+    return None
+
+
+def _checked(wf: Workflow, state: Dict[str, Any], scope: Dict[str, Any], tasks: Dict[str, Dict[str, Any]],
+             tid: str) -> str:
+    """A task whose gates all passed and that waits on no reviewer of its own: accepted at once when a
+    review session will read it anyway, else left for the manager's fact check (with the sample).
+    In a real run (KUB-1339) the manager re-read the diff and re-ran the tests of every code task
+    before accepting it, at ~450k tokens of context a turn, and the batch reviews then read it again."""
+    task = tasks[tid]
+    sid = _covering_review(state, scope, task)
+    if sid:
+        return _accept_one(wf, state, scope, tasks, tid, f"auto-accepted: every gate passed; {sid} reviews it",
+                           auto=sid)
+    state["tasks"][tid]["status"] = "needs_check"
+    return _sample(wf, task, scope)
 
 
 def cmd_reject(wf: Workflow, tid: str, reason: str) -> str:
@@ -2076,10 +2207,14 @@ def cmd_rebaseline_tests(wf: Workflow, tid: str, answer: str, by: str) -> str:
                 ts["fix_source"] = "gate"
                 out.append(_fail(wf, ts, tid, findings, fixing=ts.get("fixing") or _authoring_step(task, scope, ts), ws=ws))
             else:
-                ts.update(fixing=None, findings=[],
-                          status="needs_review" if planmod.reviewer_for(task, scope) else "needs_check")
+                ts.update(fixing=None, findings=[])
+                if planmod.reviewer_for(task, scope):
+                    ts["status"] = "needs_review"
+                    tail_msg = ""
+                else:
+                    tail_msg = "\n" + _checked(wf, state, scope, tasks, tid)
                 out.append(f"{tid}'s only failure was that weakening finding; re-run green, so no fix round is spent."
-                           + ("\n" + _sample(wf, task, scope) if ts["status"] == "needs_check" else ""))
+                           + tail_msg)
         wf.save(state)
         wf.decision(f"rebaseline tests {tid}", f"{answer} ({', '.join(moved) or 'no file changed'})", who=by)
         wf.event("rebaseline_tests", id=tid, files=moved, by=by)
@@ -2440,14 +2575,20 @@ def cmd_closeout(wf: Workflow, item: Optional[int] = None, cls: Optional[str] = 
 
 
 def _run_final_checks(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any],
-                      scope: Dict[str, Any]) -> Tuple[List[Tuple[str, str]], List[str]]:
+                      scope: Dict[str, Any], skip: Optional[Dict[str, str]] = None
+                      ) -> Tuple[List[Tuple[str, str]], List[str]]:
     """Run the plan's final checks: ([(baseline key, failure)], result lines). The key says which
     failure it is across runs: a docs-all problem by its own text (deterministic), a command check
-    by its name (its output shifts run to run)."""
+    by its name (its output shifts run to run). skip: {check name: its waived key} — a command
+    check the human waived on this very tree is not run again; its waived failure stands."""
     failures: List[Tuple[str, str]] = []
     results: List[str] = []
     for name in plan.get("final_checks", []):
         log = wf.meta / f"final-{name}.log"
+        if name in (skip or {}):
+            results.append(f"{name}: waived by the human on this tree — not run again (last log {log})")
+            failures.append((skip[name], f"final check {name} waived by the human (last log {log})"))
+            continue
         if name == "docs-all":
             for wname, w in scopemod.workspaces(scope).items():
                 if w["mode"] != "write":
@@ -2479,6 +2620,154 @@ def _run_final_checks(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any],
     return failures, results
 
 
+# The lines a failing check prints to name what failed, in the formats test runners and make share:
+# Go (`--- FAIL: TestX`, `FAIL <pkg>`), TAP (`not ok 3 - name`), node's spec reporter (`✖ name`),
+# Python unittest (`FAIL: test_x (mod.Class)`, `ERROR: ...`), and make's own `*** ... Error N`.
+_FAIL_LINE = re.compile(r"^(--- FAIL: \S+.*|FAIL[ \t]+\S+.*|FAIL: .*|ERROR: .*|not ok \d+.*|\s*[✖✗✕] .*|"
+                        r"make(\[\d+\])?: \*\*\* .*)$", re.M)
+_DURATION = re.compile(r"\s*\(\d+(\.\d+)?\s*(ms|s|m)\)|[ \t]+\d+(\.\d+)?s\b|\(cached\)")
+
+
+def failure_signature(text: str, roots: List[str]) -> Set[str]:
+    """What a failing check names as failed, comparable across two runs in two directories: durations
+    dropped, the directory each ran in replaced by `<ws>`, TAP's test numbers dropped."""
+    out: Set[str] = set()
+    for m in _FAIL_LINE.finditer(text):
+        line = m.group(1).strip()
+        if "Waiting for unfinished jobs" in line:
+            continue  # make -jN prints it or not depending on timing
+        line = re.sub(r"^make\[\d+\]", "make", line)  # the recursion depth differs between a -k run and not
+        for root in roots:
+            line = line.replace(root.rstrip("/"), "<ws>")
+        line = _DURATION.sub("", line)
+        line = re.sub(r"^not ok \d+", "not ok", line)
+        out.add(" ".join(line.split()))
+    return out
+
+
+def _clean_copy(ws: Path, sha: str, dest: Path) -> Tuple[Optional[Path], str]:
+    """A checkout of sha in dest, sharing ws's objects (nothing is written to ws's repository, so it
+    works where a sandbox makes `.git/worktrees` read-only): (the copy's ws directory, error)."""
+    top = subprocess.run(["git", "-C", str(ws), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if top.returncode != 0:
+        return None, "the workspace is not under git"
+    rel = Path(ws).resolve().relative_to(Path(top.stdout.strip()).resolve())
+    shutil.rmtree(dest, ignore_errors=True)
+    for cmd in (["git", "clone", "-q", "--shared", "--no-checkout", top.stdout.strip(), str(dest)],
+                ["git", "-C", str(dest), "checkout", "-q", "--detach", sha]):
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            return None, (res.stderr or res.stdout).strip()[-300:]
+    return dest / rel, ""
+
+
+def _probe_base(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any],
+                name: str) -> Dict[str, Any]:
+    """Run final check `name` once on a clean copy of the commit the run was approved on, so tp can
+    tell a failure the run caused from one that was already there (a sandbox that refuses unix
+    sockets, breakage on the branch). Cached per check and commit: it never runs twice.
+    In a real run (KUB-1339) nothing could say so: `make test` ran four times in 31 minutes on an
+    unchanged tree, the human was asked, and their answer still did not let `tp final` finish."""
+    spec = plan["checks"][name]
+    wname = spec.get("cwd") or next(n for n, w in scopemod.workspaces(scope).items() if w["mode"] == "write")
+    sha = (state.get("write_baseline") or {}).get(wname)
+    if not sha:
+        return {"error": f"no approval commit recorded for {wname}"}
+    probes = state.setdefault("base_probes", {})
+    key = f"{name}@{sha}"
+    if key in probes:
+        return probes[key]
+    ws = _ws(scope, wname)
+    dest = wf.meta / "base-copy"
+    copy, err = _clean_copy(ws, sha, dest)
+    log = wf.meta / f"final-{name}-base.log"
+    if copy is None:
+        probes[key] = {"error": f"could not check out {sha[:12]}: {err}", "sha": sha}
+    else:
+        # make -k: without it, a parallel make stops starting recipes at the first failure, so which
+        # others ran is timing; keeping going makes this run's failures a superset to compare against.
+        cmd = ('export MAKEFLAGS="-k${MAKEFLAGS:+ $MAKEFLAGS}"; '
+               + _expand_cmd(spec["cmd"], None, scope).replace(str(ws), str(copy)))
+        ok, tail = _run_cmd(cmd, copy, log, timeout=FINAL_CHECK_TIMEOUT)
+        text = log.read_text(errors="replace")
+        probes[key] = {"sha": sha, "ok": ok, "log": str(log), "timed_out": _timed_out(ok, tail),
+                       "signature": sorted(failure_signature(text, [str(copy), str(dest)]))}
+    shutil.rmtree(dest, ignore_errors=True)
+    wf.event("base_probe", check=name, sha=sha[:12], ok=probes[key].get("ok"), error=probes[key].get("error"))
+    return probes[key]
+
+
+def _prove_preexisting(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope: Dict[str, Any],
+                       stopping: List[Tuple[str, str]]) -> Tuple[List[str], List[str]]:
+    """Of the final-check failures that would stop the run, the ones a clean copy of the approval
+    commit fails in exactly the same places: (their keys, a line of evidence per check probed). Only a
+    command check that failed — not a timeout, not docs-all — and only when every failure line the
+    run's log names also appears in the approval commit's run; anything new, or a log that names no
+    failure tp can read, still stops the run."""
+    proven, notes = [], []
+    for key, _ in stopping:
+        parts = key.split(":")
+        if len(parts) != 2 or parts[0] != "check" or parts[1] not in plan.get("checks", {}):
+            continue
+        name = parts[1]
+        log = wf.meta / f"final-{name}.log"
+        wname = plan["checks"][name].get("cwd")
+        roots = [str(_ws(scope, wname))] if wname else [w["path"] for w in scopemod.workspaces(scope).values()]
+        mine = failure_signature(log.read_text(errors="replace") if log.exists() else "", roots)
+        if not mine:
+            notes.append(f"{name}: its log names no failure tp can compare (log {log}) — not probed.")
+            continue
+        probe = _probe_base(wf, state, plan, scope, name)
+        if probe.get("error") or probe.get("timed_out"):
+            notes.append(f"{name}: the approval commit could not be checked "
+                         f"({probe.get('error') or 'its run timed out'}).")
+            continue
+        new = sorted(mine - set(probe.get("signature", [])))
+        if new:
+            notes.append(f"{name}: fails at the approval commit {probe['sha'][:12]} too, but not in "
+                         f"{len(new)} place(s) — this run's: " + "; ".join(new[:5]) + f" (base log {probe['log']}).")
+            continue
+        proven.append(key)
+        state.setdefault("proven_preexisting", {})[key] = {"sha": probe["sha"], "failures": sorted(mine),
+                                                          "log": probe["log"], "ts": now_iso()}
+        notes.append(f"{name}: every failure ({len(mine)}) also fails on a clean copy of the approval commit "
+                     f"{probe['sha'][:12]} (log {probe['log']}) — pre-existing, not this run's; the report lists it.")
+        wf.event("preexisting_proven", check=name, sha=probe["sha"][:12], failures=len(mine))
+    return proven, notes
+
+
+def _left_keys(state: Dict[str, Any]) -> Set[str]:
+    """Final-check failures the run finishes over: the ones the human chose to leave at the baseline,
+    the ones a clean copy of the approval commit reproduced, and the ones the human waived after
+    they failed — while the workspaces are as they were then (final_checks sets `valid`)."""
+    waived = state.get("final_waived") or {}
+    return (set((state.get("baseline_left") or {}).get("keys", [])) | set(state.get("proven_preexisting") or {})
+            | (set(waived.get("keys", [])) if waived.get("valid") else set()))
+
+
+def cmd_final_waive(wf: Workflow, answer: str) -> str:
+    """The human accepts the final-check failures `tp final` just stopped on (the manager showed them
+    an outside-sandbox run, say). They stand for the tree as it was when they failed: `tp final`
+    finishes over them without running those checks again, and any change to the workspaces, or a
+    new failure, stops it again. In a real run (KUB-1339) the human accepted the manager's outside-
+    sandbox run, and `tp final` still re-ran `make test` and failed the same way, twice."""
+    if words(answer) < 2:
+        raise TPError("--answer needs the human's words, verbatim.")
+    with wf.locked():
+        state = wf.load()
+        if state["phase"] != "EXECUTING":
+            raise TPError(f"final runs while EXECUTING; the workflow is {state['phase']}.")
+        keys, tree = state.get("final_failed_keys"), state.get("final_failed_tree")
+        if not keys or not tree:
+            raise TPError("no final-check failure to waive: run `tp final` first; it records what failed.")
+        state["final_waived"] = {"keys": list(keys), "answer": answer, "tree": tree, "ts": now_iso()}
+        wf.save(state)
+        wf.decision(f"waive the final-check failures {', '.join(keys)}", answer, who="human")
+        wf.event("final_waived", keys=keys)
+        return (f"waived: {', '.join(keys)}. `tp final` (in the background) now finishes over them without running "
+                "them again, while the workspaces stay as they are; a change to them, or a new failure, stops it.")
+
+
 def final_failure_advice(keys: List[str], baseline: Set[str], readonly: bool = False) -> str:
     """What `tp final` tells the manager to do about the failures it stopped on (keys from check_key)."""
     if keys and not readonly and all(k in baseline for k in keys):
@@ -2500,7 +2789,9 @@ def final_failure_advice(keys: List[str], baseline: Set[str], readonly: bool = F
                    "(`tp plan amend`; inside the fix-task allowance `--delegated`, past it the check says who decides); "
                    "a failure from the machine — a toolchain or tool the repo pins to another version — is a pinned "
                    "check (`tp plan amend --delegated`, an env prefix only).")
-    out.append("Then `tp final` again. Only what neither settles goes to the human: `tp exception --summary ...`.")
+    out.append("Then `tp final` again. Only what neither settles goes to the human: ask them once, with your "
+               "evidence (a run outside the sandbox, say); on their OK `tp final --waive --answer \"<their words>\"` "
+               "— `tp final` then finishes over exactly these failures without running them again.")
     return " ".join(out)
 
 
@@ -2587,8 +2878,7 @@ def cmd_final(wf: Workflow) -> str:
             return (f"Final checks pass on the finished work ({'; '.join(results) or 'no final checks'}). "
                     f"Now the posts, last: {', '.join(held)} (`tp next`). Then `tp final` writes the report from "
                     "these results.")
-        left = state.get("baseline_left") or {}
-        state["final_left"] = [f for key, f in keyed if key in set(left.get("keys", []))]
+        state["final_left"] = [f for key, f in keyed if key in _left_keys(state)]
         state["phase"] = "DONE"
         state["done"] = now_iso()
         state.pop("final_failed", None)
@@ -2621,23 +2911,42 @@ def final_checks(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scop
     if reviews_open:
         raise TPError(f"review sessions still open: {', '.join(reviews_open)} — `tp next`.")
     pre = state.get("prefinal") or {}
-    tree = _tree_sig(wf, scope) if (held or pre) else ""
+    waived = state.get("final_waived")
+    tree = _tree_sig(wf, scope) if (held or pre or waived) else ""
+    lapsed = []
+    if waived:
+        # A waiver covers the tree the human saw fail; once any workspace file moves it covers nothing.
+        waived["valid"] = waived.get("tree") == tree
+        if not waived["valid"]:
+            lapsed = [f"the human's waiver of {', '.join(waived['keys'])} lapsed: the workspaces changed since "
+                      "those checks failed, so they ran again."]
+    skip = {k.split(":")[1]: k for k in (waived or {}).get("keys", [])
+            if waived.get("valid") and k.startswith("check:") and k.split(":")[1] in plan.get("checks", {})}
     if not held and pre.get("tree") == tree and pre.get("sig") == _work_sig(state):
         # Checked before the post and nothing moved since: the post changed no workspace file.
         keyed, results = [(k[0], k[1]) for k in pre.get("keyed", [])], list(pre.get("results", []))
     else:
-        keyed, results = _run_final_checks(wf, state, plan, scope)
+        keyed, results = _run_final_checks(wf, state, plan, scope, skip)
+    results = results + lapsed
     baseline = set(state.get("final_baseline", []))
-    left = state.get("baseline_left") or {}
-    stopping = [(key, f) for key, f in keyed if key not in set(left.get("keys", []))]
+    stopping = [(key, f) for key, f in keyed if key not in _left_keys(state)]
+    proven, probe_notes = _prove_preexisting(wf, state, plan, scope, stopping) if stopping else ([], [])
+    stopping = [(key, f) for key, f in stopping if key not in proven]
+    results = results + [f"probe: {n}" for n in probe_notes]
     failures = [f + (" [pre-existing: it failed at the recorded baseline too]" if key in baseline else "")
                 for key, f in stopping] + _readonly_changes(wf, state, scope)
     if failures:
         state["final_failed"] = failures[:50]
+        # What a human waiver (`tp final --waive`) would cover: these checks, on the tree as the
+        # checks left it (a check may write into the workspace).
+        state["final_failed_keys"] = [key for key, _ in stopping]
+        state["final_failed_tree"] = _tree_sig(wf, scope)
         wf.save(state)
         readonly_only = len(stopping) != len(failures)
-        raise TPError(*failures[:40], final_failure_advice([key for key, _ in stopping], baseline,
-                                                           readonly=readonly_only))
+        raise TPError(*failures[:40], *[f"probe: {n}" for n in probe_notes], *lapsed,
+                      final_failure_advice([key for key, _ in stopping], baseline, readonly=readonly_only))
+    if proven or waived:
+        wf.save(state)
     if held:
         # The tree as the checks left it: a check that writes into the workspace (coverage, build
         # output) must not make the run after the post look changed.
@@ -2772,8 +3081,14 @@ def _report_md(wf: Workflow, state: Dict[str, Any], plan: Dict[str, Any], scope:
     out += ["", "## Final checks", ""] + ([f"- {r}" for r in results] or ["- none planned"])
     if state.get("final_left"):
         left = state.get("baseline_left") or {}
-        out += ["", f"Left as pre-existing (they failed before the run began; the human: \u201c{left.get('answer', '')}"
-                    "\u201d):", ""] + [f"- {f.splitlines()[0][:300]}" for f in state["final_left"]]
+        why = [f"the human chose to leave them: \u201c{left['answer']}\u201d"] if left.get("answer") else []
+        why += [f"{key.split(':')[1]} failed in the same places on a clean copy of the approval commit "
+                f"{p['sha'][:12]} (log {p['log']})" for key, p in (state.get("proven_preexisting") or {}).items()]
+        waived = state.get("final_waived") or {}
+        if waived.get("valid"):
+            why.append(f"the human waived {', '.join(waived['keys'])}: “{waived['answer']}”")
+        out += ["", "Left as pre-existing \u2014 they failed before the run began (" + "; ".join(why) + "):", ""] + [
+            f"- {f.splitlines()[0][:300]}" for f in state["final_left"]]
     groups: Dict[str, List[str]] = {c: [] for c in CLOSEOUT_CLASSES + ("unclassified",)}
     for raw in wf.noticed_items():
         e = _closeout_marks(state, wf).get(_noticed_text(raw), {})
@@ -2917,10 +3232,10 @@ def follow_on(wf: Workflow, always: bool = False) -> str:
     return "\n\n".join(out)
 
 
-def cmd_advance(wf: Workflow, tid: str, agent_id: Optional[str]) -> str:
+def cmd_advance(wf: Workflow, tid: str, agent_id: Optional[str], long: bool = False) -> str:
     """Record a hand-back, then dispatch every step that is ready because of it, in one call: the
     manager's turns each re-read its whole context, and record → next → dispatch took three."""
-    first = after_record(wf, cmd_record(wf, tid, agent_id))
+    first = after_record(wf, cmd_record(wf, tid, agent_id, long=long))
     if wf.load().get("halt"):
         return first
     rest = follow_on(wf, always=True)

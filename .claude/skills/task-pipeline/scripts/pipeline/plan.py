@@ -521,9 +521,15 @@ def validate(plan: Dict[str, Any], scope: Dict[str, Any], state: Dict[str, Any],
             if dep not in all_ids:
                 errs.append(f"{tid}: depends on unknown {dep}.")
                 computable = False
+        if tid not in frozen:
+            errs += _whole_change_gate_errors(tid, t, plan)
         if kind == "code":
             if not t.get("test_cmd"):
                 errs.append(f"{tid}: a code task needs `test_cmd` (tests first, observed red, then green).")
+            elif tid not in frozen and _GO_TEST.search(t["test_cmd"]) and _NO_TEST_CACHE.search(t["test_cmd"]):
+                errs.append(f"{tid}: test_cmd turns off Go's test cache (`-count=1`). tp runs it at the red run, at "
+                            "record, and after every fix round; with the cache on, a package nothing changed in "
+                            "costs nothing on the next run. Drop `-count=1` (keep `-race`, `-run`).")
             if t.get("test_mode", "red") not in ("red", "pin", "existing"):
                 errs.append(f"{tid}: test_mode must be red (new behaviour), pin (characterize current behaviour), "
                             "or existing (the current tests already prove it: removals, ports, refactors).")
@@ -996,6 +1002,54 @@ def _split_pin(cmd: str, pinned: Set[str]) -> Tuple[str, str]:
 
 # `make -jN <targets>` runs exactly the targets `make <targets>` runs, N at a time: a slow check
 # made to finish inside the limit, never a different check. Only the job count may be added.
+_GO_TEST = re.compile(r"\bgo\s+test\b")
+# Go's `-count=1` (or `-test.count=1`) turns off the test cache. A real run (KUB-1339) gave all 22 code
+# tasks package-wide `-race -count=1` suites, so every red run, record, and fix record ran them cold.
+_NO_TEST_CACHE = re.compile(r"(?<!\S)-(?:test\.)?count[= ]1(?![\d.])")
+# A `make` invocation: its flags and variable assignments, then its targets, up to a shell separator.
+_MAKE_CALL = re.compile(r"(?<![\w/.-])make\s+((?:[^\s;&|`'\"]+\s*)+)")
+
+
+def _make_targets(text: str, first_only: bool = False) -> Set[str]:
+    """The targets every `make` invocation in text names (flags, -j values, and VAR=value skipped).
+    first_only: just the first target of each, for prose ("make test passes", but "make sure ...")."""
+    out: Set[str] = set()
+    for m in _MAKE_CALL.finditer(text):
+        skip_next = False
+        for word in m.group(1).split():
+            if skip_next:
+                skip_next = False
+                continue
+            if word in ("-j", "-C", "-f", "-l", "-o", "-W", "-I"):
+                skip_next = True
+            elif word.startswith("-") or "=" in word:
+                continue
+            else:
+                out.add(word.strip(".,:)`"))
+                if first_only:
+                    break
+    return out
+
+
+def _whole_change_gate_errors(tid: str, task: Dict[str, Any], plan: Dict[str, Any]) -> List[str]:
+    """A task's acceptance must not run a final check: those run once, over the whole change, at the
+    end. In a real run (KUB-1339) one task's criterion read "make test passes", and its agent ran the
+    whole repository's suite for 23 minutes inside the task, before tp ran the task's own suite again."""
+    finals = {name: str((plan.get("checks", {}).get(name) or {}).get("cmd", "")).strip()
+              for name in plan.get("final_checks", []) if isinstance(plan.get("checks", {}).get(name), dict)}
+    targets = {tgt: name for name, cmd in finals.items() for tgt in _make_targets(cmd)}
+    errs = []
+    for i, crit in enumerate(task.get("acceptance", []), 1):
+        text = str(crit)
+        hit = sorted({targets[tgt] for tgt in _make_targets(text, first_only=True) if tgt in targets}
+                     | {name for name, cmd in finals.items() if cmd and cmd in text})
+        if hit:
+            errs.append(f"{tid}: acceptance criterion {i} ({text[:80]!r}) runs the final check "
+                        f"{', '.join(hit)}, which runs once over the whole change at the end. A task proves itself "
+                        "with its own test_cmd and checks: name the behaviour and the tests that show it instead.")
+    return errs
+
+
 _PARALLEL_MAKE = re.compile(r"make -j(?:[2-9]|[1-5]\d|6[0-4]) (?P<rest>\S.*)")
 
 

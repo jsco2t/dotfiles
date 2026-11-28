@@ -111,10 +111,14 @@ baseline --leave --answer "..."`). Loop:
 
 - **dispatch / fix / review** → `tp dispatch <ids…>` in one call; send every printed
   `Agent(...)`/`SendMessage(...)` call (from any command) in one message.
-- **An agent replies** → `tp advance <id> --agent-id <id>` (Bash `timeout` 600000).
-- **check** → fact-check the printed sample (read the diff for code), then `tp accept <ids…>
-  --note "..."` for the wave, or `tp reject <id> --reason "..."`. `accept` dispatches what it
-  unblocks: send its calls; never chain `tp dispatch` after it.
+- **An agent replies** → `tp advance <id> --agent-id <id>` (Bash `timeout` 600000). `NOT recorded`
+  (its suite outran the foreground limit; no fix round) → the same `tp advance … --long` in the
+  background.
+- **check** → only what tp prints as `check`: a code task a review will still read is accepted by
+  tp itself. Fact-check the printed sample, then `tp accept <ids…> --note "..."` for the wave, or
+  `tp reject <id> --reason "..."`. tp already ran the tests and checks: never re-run them, or re-read
+  a diff a review will read. `accept` dispatches what it unblocks: send its calls; never chain `tp
+  dispatch` after it.
 - **triage** → `tp show <id> --part blocking`, verify, then `tp triage <id> --accept-all`, or
   `--dismiss F# --reason "..."`, `--assign F#=T##`, `--route F#=impl|tests-green|tests-red`.
 - **Settle routine problems yourself** (each is reported and judged by the final review): a file
@@ -141,7 +145,10 @@ included — yourself (`tp plan amend --delegated`); out-of-scope follow-ups go 
 left undone) goes to the human, once. Posts follow the closeout; then `tp final` (in the background) writes `report.md`
 (reusing the checks the post ran); present it answer-first —
 delivered work, coverage, time, review outcome, gates you settled, what they decide.
-Committing and pushing are theirs.
+A final-check failure that a clean copy of the approval commit fails in the same places (a sandbox
+limit, the branch's own breakage) is recorded as pre-existing by `tp final` itself and reported;
+never re-run a final check by hand. One it cannot settle goes to the human once, with your evidence;
+their OK → `tp final --waive --answer "<their words>"`, then `tp final` finishes without re-running it. Committing and pushing are theirs.
 
 ## Halt, resume, status
 

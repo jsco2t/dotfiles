@@ -56,6 +56,9 @@ class Harness:
         # follow_on: accept, triage, resolve... dispatch what they unblock (the real behaviour).
         # Older scenarios step by hand, so it is off unless a test turns it on.
         self.follow_on = os.environ.get("TP_TEST_FOLLOW_ON") == "1"
+        # auto_accept: a code task whose gates pass is accepted when a review will read it (the real
+        # behaviour). Older scenarios accept by hand, so it is off unless a test turns it on.
+        self.auto_accept = os.environ.get("TP_TEST_AUTO_ACCEPT") == "1"
         self.root = Path(tempfile.mkdtemp(prefix="tp-test-", dir=os.environ.get("TMPDIR")))
         self.kb = self.root / "kb"
         self.kb.mkdir()
@@ -84,7 +87,7 @@ class Harness:
             args = ("approve",)
         cmd = [PY, str(TP)] + (["-w", str(self.wf)] if wf else []) + list(args)
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", TP_GUARD_DIR=str(self.root / "guard"),
-                   TP_FOLLOW_ON="1" if self.follow_on else "0")
+                   TP_FOLLOW_ON="1" if self.follow_on else "0", TP_AUTO_ACCEPT="1" if self.auto_accept else "0")
         res = Result(subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120))
         if expect is not None and res.code != expect:
             raise AssertionError(f"tp {' '.join(args)} exited {res.code}, expected {expect}:\n{res.text}")
